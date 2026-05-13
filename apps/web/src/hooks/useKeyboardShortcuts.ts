@@ -5,7 +5,6 @@ import { useTransportStore } from "../store/transportStore";
 import { useMetronomeStore } from "../store/metronomeStore";
 import { useHistoryStore } from "../store/historyStore";
 import { transport } from "../engine/Transport";
-import { clipScheduler } from "../engine/ClipScheduler";
 import { beatsPerBar, secondsPerBeat } from "../utils/musicalTime";
 import { DeleteClipsCommand, DeleteTrackCommand, DuplicateClipsCommand, SplitClipCommand } from "../commands";
 
@@ -52,31 +51,21 @@ export function useKeyboardShortcuts() {
           e.preventDefault();
           if (isPlaying) {
             transport.pause();
-            clipScheduler.cancelAll();
             setIsPlaying(false);
           } else {
-            void transport.play(() => {
-              clipScheduler.schedule(project.tracks);
-              setIsPlaying(true);
-            });
+            void transport.play().then(() => setIsPlaying(true));
           }
           break;
         }
         case "Enter": {
           e.preventDefault();
-          transport.stop(() => {
-            clipScheduler.cancelAll();
-            setIsPlaying(false);
-          });
+          transport.stop();
+          setIsPlaying(false);
           break;
         }
         case "Home": {
           e.preventDefault();
           transport.seek(0);
-          if (isPlaying) {
-            clipScheduler.cancelAll();
-            clipScheduler.schedule(project.tracks);
-          }
           break;
         }
 

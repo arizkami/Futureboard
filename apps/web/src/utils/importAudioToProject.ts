@@ -1,5 +1,4 @@
 import { audioEngine } from "../engine/AudioEngine";
-import { mixer } from "../engine/Mixer";
 import { useProjectStore } from "../store/projectStore";
 import { useHistoryStore } from "../store/historyStore";
 import { AddTrackCommand, AddClipCommand } from "../commands";
@@ -51,6 +50,7 @@ export async function importAudioFilesAsNewTracks(files: File[]): Promise<void> 
         name: f.name.replace(/\.[^.]+$/, ""),
         type: "audio",
         color: trackColor,
+        channelCount: audioBuffer.numberOfChannels,
         volume: 0.8,
         pan: 0,
         muted: false,
@@ -70,7 +70,6 @@ export async function importAudioFilesAsNewTracks(files: File[]): Promise<void> 
         gain: 1,
       };
 
-      mixer.getOrCreateTrack(trackId, track.volume, track.pan);
       addFile(dawFile);
       history.execute(new AddTrackCommand(track));
       history.execute(new AddClipCommand(trackId, clip));

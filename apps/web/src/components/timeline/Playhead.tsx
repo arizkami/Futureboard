@@ -4,7 +4,7 @@ import { useTransportStore } from "../../store/transportStore";
 import { useUIStore } from "../../store/uiStore";
 import { HEADER_WIDTH } from "../../theme";
 
-export function Playhead() {
+export function Playhead({ height }: { height: number }) {
   const lineRef = useRef<HTMLDivElement>(null);
   const headRef = useRef<HTMLDivElement>(null);
   const rafRef  = useRef<number>(0);
@@ -45,8 +45,8 @@ export function Playhead() {
       {/* Vertical line through tracks */}
       <div
         ref={lineRef}
-        className="absolute top-0 bottom-0 left-0 pointer-events-none z-30 will-change-transform"
-        style={{ width: 2, background: "rgba(72,166,167,0.86)" }}
+        className="absolute left-0 top-0 pointer-events-none z-30 will-change-transform"
+        style={{ width: 2, height, background: "rgba(72,166,167,0.86)" }}
       />
     </>
   );

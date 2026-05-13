@@ -16,17 +16,18 @@ function readAnalyserTimeDomain(analyser: AnalyserNode, dest: Float32Array): voi
 export type StereoLevel = { l: number; r: number };
 
 type TrackNodes = {
-  gain:      GainNode;
-  panner:    StereoPannerNode;
-  splitter:  ChannelSplitterNode;
-  merger:    ChannelMergerNode;
-  analyserL: AnalyserNode;
-  analyserR: AnalyserNode;
-  bufL:      Float32Array;
-  bufR:      Float32Array;
-  muted:     boolean;
-  solo:      boolean;
-  volume:    number;
+  gain:       GainNode;
+  panner:     StereoPannerNode;
+  splitter:   ChannelSplitterNode;
+  merger:     ChannelMergerNode;
+  analyserL:  AnalyserNode;
+  analyserR:  AnalyserNode;
+  bufL:       Float32Array;
+  bufR:       Float32Array;
+  _userMuted: boolean; // explicit user mute, never modified by solo logic
+  muted:      boolean; // effective (user OR solo-forced)
+  solo:       boolean;
+  volume:     number;
 };
 
 class Mixer {
@@ -109,6 +110,7 @@ class Mixer {
         analyserR,
         bufL: analyserSampleBuffer(ANALYSER_FFT),
         bufR: analyserSampleBuffer(ANALYSER_FFT),
+        _userMuted: false,
         muted: false,
         solo: false,
         volume,
@@ -162,8 +164,8 @@ class Mixer {
   setMute(trackId: TrackId, muted: boolean) {
     const nodes = this.tracks.get(trackId);
     if (!nodes) return;
-    nodes.muted = muted;
-    this.recalcGain(nodes);
+    nodes._userMuted = muted;
+    this.applyAllSolo(); // recomputes effective mute for all tracks
   }
 
   setSolo(trackId: TrackId, solo: boolean) {
@@ -195,7 +197,8 @@ class Mixer {
   private applyAllSolo() {
     const anySolo = [...this.tracks.values()].some((n) => n.solo);
     for (const nodes of this.tracks.values()) {
-      nodes.muted = anySolo && !nodes.solo;
+      // Mute if user explicitly muted, or if another track is soloed and this one isn't
+      nodes.muted = nodes._userMuted || (anySolo && !nodes.solo);
       this.recalcGain(nodes);
     }
   }

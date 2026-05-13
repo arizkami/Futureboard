@@ -1,5 +1,6 @@
 import type { DawFile, FileId, WaveformPeaks } from "../types/daw";
 import { audioStorage } from "./AudioStorage";
+import { generatePeaks } from "./WaveformGenerator";
 
 type OnPeaks = (fileId: FileId, peaks: WaveformPeaks) => void;
 
@@ -36,27 +37,11 @@ class AudioEngine {
       peaks: { samplesPerPeak: 256, channelCount: audioBuffer.numberOfChannels, peaks: new Float32Array(0) },
     });
 
-    // Generate waveform peaks in a worker
-    const channelData: Float32Array[] = [];
-    for (let c = 0; c < audioBuffer.numberOfChannels; c++) {
-      channelData.push(audioBuffer.getChannelData(c).slice());
-    }
-
-    const worker = new Worker(
-      new URL("../workers/waveformWorker.ts", import.meta.url),
-      { type: "module" }
-    );
-    worker.postMessage(
-      { fileId: file.id, channelData, samplesPerPeak: 256 },
-      channelData.map((c) => c.buffer)
-    );
-    worker.onmessage = (e: MessageEvent<{ fileId: FileId; peaks: WaveformPeaks }>) => {
-      const { fileId, peaks } = e.data;
+    generatePeaks(file.id, audioBuffer, (fileId, peaks) => {
       const entry = this.bufferCache.get(fileId);
       if (entry) entry.peaks = peaks;
       onPeaks(fileId, peaks);
-      worker.terminate();
-    };
+    });
 
     return audioBuffer;
   }

@@ -3,10 +3,30 @@ import { AppShell } from "./components/AppShell";
 import { TransportBar } from "./components/TransportBar";
 import { CommandPalette } from "./components/ui/CommandPalette";
 import { audioEngine } from "./engine/AudioEngine";
+import { transport } from "./engine/Transport";
+import { metronomeScheduler } from "./engine/MetronomeScheduler";
 import { useProjectStore } from "./store/projectStore";
+import { useMetronomeStore } from "./store/metronomeStore";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { importAudioFilesAsNewTracks } from "./utils/importAudioToProject";
 import "./App.css";
+
+// Wire engine modules to app-layer state — runs once at module load time.
+// Engine modules stay store-free; this adapter is the only crossing point.
+transport.setTrackGetter(() => useProjectStore.getState().project.tracks);
+
+metronomeScheduler.setConfigGetter(() => {
+  const { project } = useProjectStore.getState();
+  const metro = useMetronomeStore.getState();
+  return {
+    bpm: project.bpm,
+    timeSignature: project.timeSignature,
+    enabled: metro.enabled,
+    volume: metro.volume,
+    accentVolume: metro.accentVolume,
+    sound: metro.sound,
+  };
+});
 
 export default function App() {
   const { setPeaks, loadLocal, saveLocal, project } = useProjectStore();

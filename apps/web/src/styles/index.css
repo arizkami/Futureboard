@@ -106,3 +106,24 @@ input[type=range].vertical::-webkit-slider-thumb {
     0 0 0 5px color-mix(in srgb, var(--fader-accent, #48a6a7) 24%, transparent),
     0 4px 12px rgba(0, 0, 0, 0.38);
 }
+
+.daw-track-fader::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      to right,
+      var(--track-accent, #56c7c9) 0%,
+      var(--track-accent, #56c7c9) var(--track-value, 80%),
+      rgba(255, 255, 255, 0.09) var(--track-value, 80%),
+      rgba(255, 255, 255, 0.09) 100%
+    );
+}
+
+.daw-track-fader::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border-color: var(--track-accent, #56c7c9);
+  box-shadow: 0 0 0 2px rgba(16, 18, 22, 0.9);
+}

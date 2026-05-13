@@ -1,14 +1,42 @@
+import type { TimeSignature } from "../types/daw";
 import { audioEngine } from "./AudioEngine";
 import { mixer } from "./Mixer";
 import { transport } from "./Transport";
-import { useProjectStore } from "../store/projectStore";
-import { useMetronomeStore } from "../store/metronomeStore";
 import { secondsPerBeat, beatsPerBar } from "../utils/musicalTime";
+
+type MetronomeSound = "classic" | "wood" | "digital" | "soft";
+
+export type MetronomeConfig = {
+  bpm: number;
+  timeSignature: TimeSignature;
+  enabled: boolean;
+  volume: number;
+  accentVolume: number;
+  sound: MetronomeSound;
+};
+
+const DEFAULT_CONFIG: MetronomeConfig = {
+  bpm: 120,
+  timeSignature: { numerator: 4, denominator: 4 },
+  enabled: false,
+  volume: 0.8,
+  accentVolume: 1.0,
+  sound: "digital",
+};
 
 class MetronomeScheduler {
   private intervalId: number | null = null;
   private nextNoteTime: number = 0;
   private currentBeat: number = 0;
+  private configGetter: (() => MetronomeConfig) | null = null;
+
+  setConfigGetter(fn: () => MetronomeConfig): void {
+    this.configGetter = fn;
+  }
+
+  private getConfig(): MetronomeConfig {
+    return this.configGetter?.() ?? DEFAULT_CONFIG;
+  }
 
   start() {
     this.stop();
@@ -30,33 +58,28 @@ class MetronomeScheduler {
   }
 
   private sync() {
-    const { project } = useProjectStore.getState();
-    const bpm = project.bpm || 120;
+    const { bpm } = this.getConfig();
     const spb = secondsPerBeat(bpm);
     const pTime = transport.projectTime;
-    
+
     // Find the next beat boundary on or after the playhead time
     this.currentBeat = Math.ceil(pTime / spb);
-    
+
     // The exact project time of the next beat
     const nextBeatProjectTime = this.currentBeat * spb;
     const beatOffset = nextBeatProjectTime - pTime;
-    
+
     this.nextNoteTime = audioEngine.currentTime + beatOffset;
   }
 
   private scheduleNextNotes() {
-    const { enabled, volume, accentVolume, sound } = useMetronomeStore.getState();
-    const { project } = useProjectStore.getState();
-    const bpm = project.bpm || 120;
+    const { enabled, volume, accentVolume, sound, bpm, timeSignature } = this.getConfig();
     const spb = secondsPerBeat(bpm);
-    const timeSig = project.timeSignature || { numerator: 4, denominator: 4 };
-    const bpb = beatsPerBar(timeSig);
+    const bpb = beatsPerBar(timeSignature);
 
     const lookahead = 0.1; // 100ms
     while (this.nextNoteTime < audioEngine.currentTime + lookahead) {
       if (enabled) {
-        // Beats are 0-indexed internally, so beat 0 is the start of the bar
         const isAccent = (this.currentBeat % bpb) === 0;
         this.scheduleClick(isAccent, this.nextNoteTime, volume, accentVolume, sound);
       }
@@ -70,7 +93,7 @@ class MetronomeScheduler {
     time: number,
     volume: number,
     accentVolume: number,
-    sound: "classic" | "wood" | "digital" | "soft"
+    sound: MetronomeSound
   ) {
     const ctx = audioEngine.ctx;
     const osc = ctx.createOscillator();
@@ -112,10 +135,7 @@ class MetronomeScheduler {
     osc.frequency.value = isAccent ? highFreq : lowFreq;
     osc.type = type;
 
-    // Base volume calculation
-    const baseVol = (isAccent ? accentVolume : volume) * 0.5; // Scale down a bit so it isn't deafening
-
-    // Ensure safe scheduling
+    const baseVol = (isAccent ? accentVolume : volume) * 0.5;
     const scheduledTime = Math.max(ctx.currentTime, time);
 
     env.gain.value = 0;

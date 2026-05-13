@@ -9,6 +9,7 @@ import { useUIStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
 import { secondsPerBeat } from "../../utils/musicalTime";
 import { importAudioFilesAsNewTracks } from "../../utils/importAudioToProject";
+import { TRACK_HEIGHT } from "../../theme";
 
 const MIN_PPS = 10;
 const MAX_PPS = 800;
@@ -101,6 +102,7 @@ export function Timeline() {
     ...tracks.flatMap((t) => t.clips.map((c) => c.startTime + c.duration + 4))
   );
   const timelineWidth = Math.max(1200, Math.ceil(timelineSeconds * pixelsPerSecond));
+  const trackContentHeight = Math.max(0, tracks.length * TRACK_HEIGHT);
 
   return (
     <div
@@ -140,7 +142,7 @@ export function Timeline() {
           onScroll={(e) => setScrollX(e.currentTarget.scrollLeft)}
         >
           <TrackList timelineWidth={timelineWidth} />
-          <Playhead />
+          <Playhead height={trackContentHeight} />
         </div>
       </div>
 

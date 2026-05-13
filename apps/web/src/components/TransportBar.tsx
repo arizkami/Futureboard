@@ -24,7 +24,6 @@ import {
   Undo2,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { clipScheduler } from "../engine/ClipScheduler";
 import { transport } from "../engine/Transport";
 import { APP_MENUS, type AppMenuGroup, type AppMenuItem } from "../menu/menuItems";
 import { useProjectStore } from "../store/projectStore";
@@ -245,23 +244,18 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
   }, [openMenu]);
 
   const handlePlay = async () => {
-    await transport.play(() => {
-      clipScheduler.schedule(project.tracks);
-      setIsPlaying(true);
-    });
+    await transport.play();
+    setIsPlaying(true);
   };
 
   const handlePause = () => {
     transport.pause();
-    clipScheduler.cancelAll();
     setIsPlaying(false);
   };
 
   const handleStop = () => {
-    transport.stop(() => {
-      clipScheduler.cancelAll();
-      setIsPlaying(false);
-    });
+    transport.stop();
+    setIsPlaying(false);
   };
 
   const getMenuItemState = (item: AppMenuItem) => {
@@ -304,7 +298,6 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
         break;
       case "transport:go-to-start":
         transport.seek(0);
-        clipScheduler.cancelAll();
         break;
       case "transport:toggle-loop":
         toggleLoop();
@@ -365,10 +358,7 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
           <IconBtn
             icon={SkipBack}
             label="Return to start [Enter]"
-            onClick={() => {
-              transport.seek(0);
-              clipScheduler.cancelAll();
-            }}
+            onClick={() => transport.seek(0)}
           />
           {isPlaying ? (
             <IconBtn icon={Pause} label="Pause [Space]" active onClick={handlePause} />

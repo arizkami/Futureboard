@@ -1,6 +1,5 @@
 import { CircleDot, Cpu, GitMerge, Mic2, Music, Plus, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { mixer } from "../engine/Mixer";
 import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
 import { useHistoryStore } from "../store/historyStore";
@@ -61,6 +60,8 @@ export function AddTrackDialog({ onClose }: { onClose: () => void }) {
   const [selectedType, setSelectedType] = useState<TrackTypeConfig>(TRACK_TYPES[0]);
   const [trackName, setTrackName] = useState(`Audio Track ${nextNum}`);
   const [colorIndex, setColorIndex] = useState(() => tracks.length % TRACK_COLORS.length);
+  const [trackCount, setTrackCount] = useState(1);
+  const [channelCount, setChannelCount] = useState(2);
 
   useEffect(() => {
     window.setTimeout(() => inputRef.current?.select(), 0);
@@ -78,25 +79,31 @@ export function AddTrackDialog({ onClose }: { onClose: () => void }) {
   };
 
   const createTrack = () => {
-    const id = crypto.randomUUID();
-    const name = trackName.trim() || `${selectedType.label} ${nextNum}`;
-    const track: DawTrack = {
-      id,
-      name,
-      type: selectedType.type,
-      color: TRACK_COLORS[colorIndex % TRACK_COLORS.length],
-      volume: 0.8,
-      pan: 0,
-      muted: false,
-      solo: false,
-      armed: false,
-      clips: [],
-    };
-    // mixer node created inside AddTrackCommand.execute(), but we pre-create
-    // here so it's ready even on the first render tick
-    mixer.getOrCreateTrack(id, track.volume, track.pan);
-    useHistoryStore.getState().execute(new AddTrackCommand(track));
-    setSelectedTrackId(id);
+    const baseName = trackName.trim() || `${selectedType.label} ${nextNum}`;
+    let firstTrackId: string | null = null;
+
+    for (let i = 0; i < trackCount; i++) {
+      const id = crypto.randomUUID();
+      const trackNumber = nextNum + i;
+      const name = trackCount === 1 ? baseName : `${baseName.replace(/\s+\d+$/, "")} ${trackNumber}`;
+      const track: DawTrack = {
+        id,
+        name,
+        type: selectedType.type,
+        color: TRACK_COLORS[(colorIndex + i) % TRACK_COLORS.length],
+        channelCount,
+        volume: 0.8,
+        pan: 0,
+        muted: false,
+        solo: false,
+        armed: false,
+        clips: [],
+      };
+      useHistoryStore.getState().execute(new AddTrackCommand(track));
+      firstTrackId ??= id;
+    }
+
+    if (firstTrackId) setSelectedTrackId(firstTrackId);
     onClose();
   };
 
@@ -206,6 +213,52 @@ export function AddTrackDialog({ onClose }: { onClose: () => void }) {
           </label>
         </div>
 
+        {/* Track options */}
+        <div className="grid grid-cols-2 gap-2 border-t border-white/[0.05] px-3 py-2.5">
+          <OptionGroup label="Amount">
+            <button
+              type="button"
+              onClick={() => setTrackCount((v) => Math.max(1, v - 1))}
+              className="flex h-7 w-7 items-center justify-center rounded-md border border-white/[0.07] bg-[#13161c] text-[12px] font-semibold text-daw-dim transition-colors hover:bg-white/[0.05] hover:text-daw-text"
+            >
+              -
+            </button>
+            <input
+              type="number"
+              min={1}
+              max={32}
+              value={trackCount}
+              onChange={(event) => setTrackCount(Math.max(1, Math.min(32, Number(event.target.value) || 1)))}
+              className="h-7 min-w-0 flex-1 rounded-md border border-white/[0.07] bg-[#13161c] text-center text-[12px] font-semibold tabular-nums text-daw-text outline-none focus:border-daw-accent/50"
+            />
+            <button
+              type="button"
+              onClick={() => setTrackCount((v) => Math.min(32, v + 1))}
+              className="flex h-7 w-7 items-center justify-center rounded-md border border-white/[0.07] bg-[#13161c] text-[12px] font-semibold text-daw-dim transition-colors hover:bg-white/[0.05] hover:text-daw-text"
+            >
+              +
+            </button>
+          </OptionGroup>
+
+          <OptionGroup label="Channels">
+            {[1, 2].map((count) => (
+              <button
+                key={count}
+                type="button"
+                onClick={() => setChannelCount(count)}
+                className={[
+                  "h-7 flex-1 rounded-md border px-2 text-[11px] font-semibold transition-colors",
+                  channelCount === count
+                    ? "border-daw-accent/50 bg-daw-accent/[0.14] text-daw-text"
+                    : "border-white/[0.07] bg-[#13161c] text-daw-faint hover:bg-white/[0.05] hover:text-daw-text",
+                ].join(" ")}
+              >
+                {count === 1 ? "Mono" : "Stereo"}
+              </button>
+            ))}
+          </OptionGroup>
+        </div>
+
         {/* Footer */}
         <div className="flex items-center justify-between border-t border-white/[0.05] px-3 py-2.5">
           {/* Color picker */}
@@ -241,11 +294,22 @@ export function AddTrackDialog({ onClose }: { onClose: () => void }) {
               style={{ background: selectedColor }}
             >
               <Plus size={12} />
-              Add Track
+              Add {trackCount === 1 ? "Track" : `${trackCount} Tracks`}
             </button>
           </div>
         </div>
       </section>
+    </div>
+  );
+}
+
+function OptionGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wide text-daw-faint">
+        {label}
+      </div>
+      <div className="flex items-center gap-1.5">{children}</div>
     </div>
   );
 }

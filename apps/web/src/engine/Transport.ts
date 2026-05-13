@@ -1,7 +1,7 @@
+import type { DawTrack } from "../types/daw";
 import { audioEngine } from "./AudioEngine";
 import { metronomeScheduler } from "./MetronomeScheduler";
 import { clipScheduler } from "./ClipScheduler";
-import { useProjectStore } from "../store/projectStore";
 
 export type PlayState = "stopped" | "playing" | "paused";
 
@@ -10,6 +10,15 @@ class Transport {
   private transportStartAudioTime = 0;
   private transportStartProjectTime = 0;
   private _playheadTime = 0;
+  private trackGetter: (() => DawTrack[]) | null = null;
+
+  setTrackGetter(fn: () => DawTrack[]): void {
+    this.trackGetter = fn;
+  }
+
+  private getTracks(): DawTrack[] {
+    return this.trackGetter?.() ?? [];
+  }
 
   get state(): PlayState {
     return this._state;
@@ -27,14 +36,14 @@ class Transport {
     );
   }
 
-  async play(onPlay?: () => void) {
+  async play() {
     if (this._state === "playing") return;
     await audioEngine.resume();
     this.transportStartAudioTime = audioEngine.currentTime;
     this.transportStartProjectTime = this._playheadTime;
     this._state = "playing";
     metronomeScheduler.start();
-    onPlay?.();
+    clipScheduler.schedule(this.getTracks());
   }
 
   pause() {
@@ -42,13 +51,14 @@ class Transport {
     this._playheadTime = this.projectTime;
     this._state = "paused";
     metronomeScheduler.stop();
+    clipScheduler.cancelAll();
   }
 
-  stop(onStop?: () => void) {
+  stop() {
     this._playheadTime = 0;
     this._state = "stopped";
     metronomeScheduler.stop();
-    onStop?.();
+    clipScheduler.cancelAll();
   }
 
   seek(time: number) {
@@ -62,8 +72,7 @@ class Transport {
       this.transportStartAudioTime = audioEngine.currentTime;
       this.transportStartProjectTime = this._playheadTime;
       this._state = "playing";
-      const { project } = useProjectStore.getState();
-      clipScheduler.schedule(project.tracks);
+      clipScheduler.schedule(this.getTracks());
       metronomeScheduler.seek();
     }
   }

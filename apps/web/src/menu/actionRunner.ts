@@ -38,18 +38,15 @@ export function runAction(actionId: string) {
         clipScheduler.cancelAll();
         transportStore.setIsPlaying(false);
       } else {
-        void transport.play(() => {
-          clipScheduler.schedule(projectStore.project.tracks);
+        void transport.play().then(() => {
           transportStore.setIsPlaying(true);
         });
       }
       break;
 
     case "transport:stop":
-      transport.stop(() => {
-        clipScheduler.cancelAll();
-        transportStore.setIsPlaying(false);
-      });
+      transport.stop();
+      transportStore.setIsPlaying(false);
       break;
 
     case "transport:go-to-start":

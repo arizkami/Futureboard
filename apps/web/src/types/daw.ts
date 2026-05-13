@@ -39,6 +39,7 @@ export type DawTrack = {
   name: string;
   type: TrackType;
   color: string;
+  channelCount: number;
   volume: number;
   pan: number;
   muted: boolean;
