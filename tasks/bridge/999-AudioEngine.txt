@@ -1,0 +1,1363 @@
+# 999-AudioEngine.txt
+
+Task: Design and implement the long-term Audio Engine + DSP architecture for Futureboard Studio using Rust WebAssembly for Web and a native .exe DSP service for Electron.
+
+Goal:
+Build the real audio engine architecture that will eventually replace the current WebAudio prototype.
+
+This task defines the production-grade direction for:
+- shared audio engine API
+- Rust DSP core
+- WebAssembly runtime for Web
+- native DSP service for Electron
+- IPC protocol
+- audio graph
+- mixer
+- routing
+- device/plugin chain
+- built-in DSP effects
+- transport/scheduling
+- meter/telemetry
+- offline rendering
+- safe fallback paths
+- low-error incremental implementation strategy
+
+Important:
+This is a long-term engine task.
+Do not attempt to replace the entire current app in one giant unsafe patch.
+Build the architecture incrementally with compatibility adapters.
+
+Current app:
+- React + Vite UI
+- Electron shell
+- WebAudio prototype
+- project state / tracks / clips / mixer / inserts in TypeScript
+- Future target: Rust/WASM for Web, native DSP service for Electron, later C++/SphereEngine rewrite
+
+Main rule:
+The UI must talk to one TypeScript AudioEngineAdapter API.
+The UI must not care whether the runtime is:
+- WebAudio
+- Rust WASM
+- Electron native service
+- future SphereEngine
+
+============================================================
+0. Implementation Philosophy
+============================================================
+
+Build this in phases.
+
+Do not break the current WebAudio prototype.
+
+Required approach:
+1. Define stable TypeScript audio engine API and protocol.
+2. Implement a no-crash Rust DSP core skeleton.
+3. Compile Rust core to WebAssembly for Web.
+4. Wrap WASM in AudioWorklet for Web audio output.
+5. Create native DSP service for Electron.
+6. Communicate with Electron via safe IPC.
+7. Keep WebAudio adapter as fallback until WASM/native are stable.
+8. Add features in small testable layers.
+
+Never do:
+- direct UI calls into DSP internals
+- hardcoded engine-specific logic in React components
+- blocking audio thread with JSON parsing
+- large memory allocations inside realtime process
+- unbounded message spam from DSP to UI
+- full plugin hosting before the internal graph is stable
+
+============================================================
+1. Runtime Targets
+============================================================
+
+Target 1: Web
+- React UI
+- AudioEngineAdapter
+- AudioWorkletNode
+- Rust WASM DSP core
+- SharedArrayBuffer/ring buffer later if COOP/COEP is enabled
+- WebAudio AudioContext for audio output
+- IndexedDB/OPFS for cache/assets later
+
+Target 2: Electron
+- React UI
+- Electron preload bridge
+- Electron main process
+- native DSP service executable
+- Rust native binary first
+- communicates via stdio JSON-RPC first
+- later named pipe / Unix socket / shared memory
+- eventually native audio backends:
+  - Windows: WASAPI first, ASIO later
+  - macOS: CoreAudio later
+  - Linux: PipeWire/JACK/ALSA later
+
+Target 3: Future Native
+- SphereEngine C++
+- same conceptual audio protocol and graph model
+- direct native UI/runtime integration later
+
+Acceptance:
+[ ] Web runtime path is clearly separated
+[ ] Electron runtime path is clearly separated
+[ ] UI uses one adapter interface
+[ ] Current WebAudio adapter remains usable as fallback
+
+============================================================
+2. Repository Structure
+============================================================
+
+Create or plan this structure:
+
+engines/
+  dsp-core/
+    Cargo.toml
+    src/
+      lib.rs
+      engine.rs
+      graph.rs
+      transport.rs
+      buffer.rs
+      mixer.rs
+      routing.rs
+      devices/
+        mod.rs
+        gain.rs
+        pan.rs
+        eq.rs
+        compressor.rs
+        delay.rs
+        saturation.rs
+        limiter.rs
+      meters.rs
+      params.rs
+      sample.rs
+      ids.rs
+
+  wasm-audio/
+    Cargo.toml
+    src/
+      lib.rs
+      wasm_engine.rs
+      bindings.rs
+    pkg/ generated later
+
+  native-dsp-service/
+    Cargo.toml
+    src/
+      main.rs
+      protocol.rs
+      service.rs
+      audio_backend/
+        mod.rs
+        null_backend.rs
+        cpal_backend.rs
+      ipc/
+        mod.rs
+        stdio_json.rs
+
+packages/
+  audio-api/
+    src/
+      AudioEngineAdapter.ts
+      protocol.ts
+      engineTypes.ts
+      WebAudioEngineAdapter.ts
+      WasmAudioEngineAdapter.ts
+      NativeServiceAudioEngineAdapter.ts
+      MockAudioEngineAdapter.ts
+
+apps/
+  web/
+  electron/
+
+Rules:
+- dsp-core must not depend on Electron, Web, DOM, or platform APIs.
+- wasm-audio wraps dsp-core for browser.
+- native-dsp-service wraps dsp-core for desktop service.
+- TypeScript package exposes shared engine API.
+
+Acceptance:
+[ ] Core crate is platform-independent
+[ ] WASM crate wraps core
+[ ] Native service crate wraps core
+[ ] TypeScript API package is runtime-neutral
+
+============================================================
+3. Rust DSP Core Goals
+============================================================
+
+The Rust DSP core is the shared engine logic.
+
+It should own:
+- audio graph
+- track mixer
+- routing
+- clip scheduling
+- sample-accurate transport primitives
+- built-in device DSP
+- meters
+- automation later
+- offline render later
+
+It should not own:
+- UI state
+- menus
+- React state
+- filesystem dialogs
+- Electron APIs
+- browser APIs
+
+Core processing model:
+- fixed block size or variable block size input
+- non-interleaved f32 buffers internally
+- sample rate aware
+- no heap allocation in audio process after preparation
+- no locks in realtime path where possible
+- commands applied at safe sync points
+
+Acceptance:
+[ ] dsp-core builds as Rust library
+[ ] Core can initialize with sample rate and block size
+[ ] Core can process silent buffers without panic
+[ ] Core has no UI/platform dependencies
+
+============================================================
+4. Rust Core Public API
+============================================================
+
+Expose a simple Rust API.
+
+Example:
+
+pub struct EngineConfig {
+    pub sample_rate: f32,
+    pub max_block_size: usize,
+    pub channel_count: usize,
+    pub bpm: f64,
+    pub time_sig_num: u32,
+    pub time_sig_den: u32,
+}
+
+pub struct DspEngine {
+    // internal graph/transport/state
+}
+
+impl DspEngine {
+    pub fn new(config: EngineConfig) -> Self;
+    pub fn reset(&mut self);
+    pub fn process(&mut self, output: &mut [&mut [f32]], frames: usize);
+    pub fn handle_command(&mut self, command: EngineCommand) -> EngineResult;
+    pub fn drain_events(&mut self) -> Vec<EngineEvent>;
+    pub fn get_status(&self) -> EngineStatus;
+}
+
+Rules:
+- process() must not allocate large memory.
+- process() must not parse JSON.
+- handle_command() can allocate if not called on realtime thread.
+- event draining should be bounded.
+
+Acceptance:
+[ ] Rust API supports create/reset/process/command/events/status
+[ ] Silent process output is valid
+[ ] No panics for empty project
+
+============================================================
+5. Shared Engine Commands
+============================================================
+
+Define shared engine commands in Rust and TypeScript.
+
+Command examples:
+
+Transport:
+- Init
+- LoadProject
+- Play
+- Pause
+- Stop
+- SeekBeat
+- SetBpm
+- SetLoop
+- SetMetronome
+
+Tracks:
+- CreateTrack
+- RemoveTrack
+- SetTrackVolume
+- SetTrackPan
+- SetTrackMute
+- SetTrackSolo
+- SetTrackOutput
+
+Clips:
+- AddAudioClip
+- UpdateAudioClip
+- RemoveClip
+- AddMidiClip
+- UpdateMidiClip
+- RemoveMidiClip
+
+Assets:
+- LoadAudioAsset
+- UnloadAudioAsset
+
+Devices:
+- AddInsertDevice
+- RemoveInsertDevice
+- SetInsertEnabled
+- SetInsertParam
+- ReorderInsertDevice
+
+Routing:
+- AddSend
+- UpdateSend
+- RemoveSend
+- SetOutputRoute
+
+Render:
+- StartOfflineRender
+- CancelOfflineRender
+
+Telemetry:
+- GetStatus
+- SubscribeMeters optional
+- Ping
+
+Rules:
+- Commands must be serializable.
+- Use stable IDs from TypeScript project state.
+- Keep command payloads small.
+- Do not send huge audio buffers via JSON once binary path exists.
+- For first pass, JSON for metadata is okay.
+- For audio asset data, use ArrayBuffer in WASM path and file path/shared handle in native service path.
+
+Acceptance:
+[ ] TypeScript and Rust command definitions match conceptually
+[ ] Commands have stable IDs
+[ ] Unknown commands return error, not panic
+
+============================================================
+6. Shared Engine Events
+============================================================
+
+Define events from engine to UI.
+
+Events:
+- Ready
+- Error
+- Warning
+- TransportPosition
+- PlaybackStarted
+- PlaybackStopped
+- MeterUpdate
+- XRun
+- TrackCreated
+- TrackRemoved
+- AssetLoaded
+- AssetLoadFailed
+- RenderProgress
+- RenderComplete
+
+Rules:
+- MeterUpdate should be throttled.
+- TransportPosition should be throttled for UI.
+- Critical events should always deliver.
+- Events should not be unbounded.
+
+Acceptance:
+[ ] Engine can emit Ready/Error/Transport/Meter events
+[ ] UI adapter can consume events
+[ ] Event spam is controlled
+
+============================================================
+7. TypeScript AudioEngineAdapter Interface
+============================================================
+
+Create a stable TypeScript interface.
+
+File:
+packages/audio-api/src/AudioEngineAdapter.ts
+
+Required:
+
+export interface AudioEngineAdapter {
+  readonly kind: "webaudio" | "wasm" | "native-service" | "mock";
+
+  init(config: AudioEngineConfig): Promise<void>;
+  dispose(): Promise<void>;
+
+  loadProject(project: EngineProjectSnapshot): Promise<void>;
+  syncProject(project: EngineProjectSnapshot): Promise<void>;
+
+  play(positionBeat?: number): Promise<void>;
+  pause(): Promise<void>;
+  stop(): Promise<void>;
+  seekBeat(beat: number): Promise<void>;
+
+  setBpm(bpm: number): Promise<void>;
+  setLoop(enabled: boolean, startBeat: number, endBeat: number): Promise<void>;
+
+  createTrack(track: EngineTrack): Promise<void>;
+  removeTrack(trackId: string): Promise<void>;
+
+  loadAudioAsset(asset: EngineAudioAsset, data?: ArrayBuffer): Promise<void>;
+  unloadAudioAsset(fileId: string): Promise<void>;
+
+  addClip(trackId: string, clip: EngineClip): Promise<void>;
+  updateClip(clipId: string, patch: Partial<EngineClip>): Promise<void>;
+  removeClip(clipId: string): Promise<void>;
+
+  setTrackVolume(trackId: string, volume: number): Promise<void>;
+  setTrackPan(trackId: string, pan: number): Promise<void>;
+  setTrackMute(trackId: string, muted: boolean): Promise<void>;
+  setTrackSolo(trackId: string, solo: boolean): Promise<void>;
+  setTrackOutput(trackId: string, target: string | "master" | "none"): Promise<void>;
+
+  addSend(trackId: string, send: EngineSend): Promise<void>;
+  updateSend(trackId: string, sendId: string, patch: Partial<EngineSend>): Promise<void>;
+  removeSend(trackId: string, sendId: string): Promise<void>;
+
+  addInsertDevice(trackId: string, device: EngineInsertDevice): Promise<void>;
+  removeInsertDevice(trackId: string, deviceId: string): Promise<void>;
+  setInsertEnabled(trackId: string, deviceId: string, enabled: boolean): Promise<void>;
+  setInsertParam(trackId: string, deviceId: string, param: string, value: EngineParamValue): Promise<void>;
+
+  getStatus(): Promise<AudioEngineStatus>;
+
+  onEvent(callback: (event: AudioEngineEvent) => void): () => void;
+}
+
+Rules:
+- Existing UI/store should depend on this interface, not a concrete engine.
+- WebAudio adapter should implement it.
+- WASM adapter should implement it.
+- Native service adapter should implement it.
+- Mock adapter should implement it for tests.
+
+Acceptance:
+[ ] Interface exists
+[ ] Existing WebAudio engine can be wrapped
+[ ] UI code does not import concrete engines directly where avoidable
+
+============================================================
+8. Engine Project Snapshot
+============================================================
+
+Define an engine-friendly project snapshot separate from UI-heavy project state.
+
+EngineProjectSnapshot:
+- settings
+- tracks
+- clips
+- assets metadata
+- routing
+- inserts
+- loop
+
+Rules:
+- Strip UI-only fields:
+  - panel size
+  - selected state
+  - hover state
+  - collapsed state if engine does not need it
+  - color if engine does not need it
+- Convert to engine canonical units:
+  - beats for musical timing
+  - seconds only when necessary
+  - f32/f64 explicitly
+
+Acceptance:
+[ ] toEngineProjectSnapshot(project) helper exists
+[ ] Engine loadProject does not receive UI-only garbage
+[ ] Snapshot is serializable
+
+============================================================
+9. Audio Buffer Model
+============================================================
+
+Core audio uses f32.
+
+Internal buffer format:
+- non-interleaved channels preferred
+- Vec<Vec<f32>> for asset storage outside realtime path
+- process buffers as slices
+
+Rules:
+- Avoid copying large buffers repeatedly.
+- Asset loading can allocate.
+- Realtime process must not clone large buffers.
+- Use Arc for immutable audio asset buffers if needed in native Rust.
+- WASM asset data must be copied once into WASM memory or managed carefully.
+
+Acceptance:
+[ ] Audio asset representation exists
+[ ] Clips reference asset IDs
+[ ] Processing can read from asset buffers
+
+============================================================
+10. Transport and Scheduling
+============================================================
+
+Implement a transport model in Rust core.
+
+State:
+- playing
+- sample_position
+- beat_position
+- bpm
+- time signature
+- loop enabled
+- loop start/end
+- sample rate
+
+Scheduling:
+- Convert beat positions to sample positions.
+- Audio clip start/end in beats.
+- Audio asset duration in samples/seconds.
+- Clip offset in beats/seconds.
+- When processing a block, determine which clip samples overlap current block.
+- Mix active clips into track buffers.
+
+First pass:
+- only audio clips
+- no time stretch
+- no pitch shift
+- no reverse
+- no MIDI synth
+
+Later:
+- MIDI event scheduling
+- automation curves
+- tempo map
+
+Acceptance:
+[ ] Engine can advance transport during process
+[ ] Engine can seek beat
+[ ] Engine can loop between loopStart/loopEnd
+[ ] Audio clips can be scheduled by beat
+[ ] No panic when no clips exist
+
+============================================================
+11. Audio Graph
+============================================================
+
+Implement an internal graph.
+
+Minimum graph:
+Asset clip playback
+→ Track processing
+→ Inserts
+→ Sends
+→ Output route
+→ Master
+→ Output buffer
+
+Nodes:
+- TrackNode
+- BusNode
+- ReturnNode
+- MasterNode
+- DeviceChain
+- SendNode
+- MeterNode
+
+Rules:
+- Start simple.
+- A flat ordered graph is acceptable first.
+- Avoid full dynamic graph complexity until needed.
+- Rebuild graph outside realtime path when topology changes.
+- Process graph in deterministic order.
+- Detect simple routing cycles and reject them.
+
+Acceptance:
+[ ] Tracks route to master by default
+[ ] Bus/return/group can exist
+[ ] Invalid self-routing rejected
+[ ] Graph can process silence
+[ ] Topology changes do not panic
+
+============================================================
+12. Mixer DSP
+============================================================
+
+Implement basic mixer DSP.
+
+Track processing:
+- gain/volume
+- pan
+- mute
+- solo effective mute
+- phase invert
+- mono sum optional
+- simple meter tap
+
+Volume:
+- UI volume can be linear or dB mapped before engine
+- Engine receives linear gain or dB consistently
+- Document the convention
+
+Pan:
+- equal-power pan recommended
+- pan range -1..1
+
+Solo:
+- if any track soloed, non-solo tracks muted unless routed/solo-safe later
+
+Acceptance:
+[ ] Volume affects track output
+[ ] Pan affects stereo output
+[ ] Mute works
+[ ] Solo basic behavior works
+[ ] Master gain works
+
+============================================================
+13. Built-in DSP Devices
+============================================================
+
+Implement built-in devices gradually.
+
+Device trait:
+
+pub trait AudioDevice {
+    fn id(&self) -> &str;
+    fn process(&mut self, buffer: &mut AudioBuffer, context: &ProcessContext);
+    fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), EngineError>;
+    fn reset(&mut self, sample_rate: f32);
+}
+
+Required devices:
+
+1. Gain
+- utility gain
+- output trim
+
+2. Pan
+- equal-power pan
+
+3. Parametric EQ
+First pass:
+- use biquad filters
+- HPF, LPF, bell bands, shelves later
+- stable coefficients
+- smooth params later
+
+4. Compressor
+First pass:
+- threshold
+- ratio
+- attack
+- release
+- makeup
+- knee optional
+- gain reduction meter
+
+5. Delay
+- delay buffer
+- feedback
+- wet/dry
+- sync time converted by BPM
+- low/high filter later
+
+6. Saturation
+- simple waveshaper
+- drive/tone/mix
+
+7. Limiter
+- simple peak limiter for master safety
+
+8. Reverb
+First pass:
+- placeholder no-op or very simple Schroeder reverb
+- better algorithm later
+
+9. Optical Compressor
+- can reuse compressor with opto-style envelope
+- slower attack/release characteristics
+
+10. Multiband Dynamics
+- long-term
+- first pass placeholder or split bands later
+
+Rules:
+- Device calls must not panic for unknown params.
+- Unknown params return error or ignored warning.
+- Parameter smoothing should be added for audible params.
+- No allocations inside device process.
+
+Acceptance:
+[ ] Device trait exists
+[ ] Gain/Pan/Compressor/Delay basic devices work or compile as skeleton
+[ ] Unknown params do not crash
+[ ] Device chain processes in order
+
+============================================================
+14. Parameter System
+============================================================
+
+Create typed parameter system.
+
+ParamValue:
+- Float(f32)
+- Int(i32)
+- Bool(bool)
+- Text(String)
+
+ParamInfo:
+- id
+- name
+- min
+- max
+- default
+- unit
+- automatable
+- smoothing
+
+Rules:
+- UI params map to engine params by stable string IDs.
+- Engine validates and clamps params.
+- Realtime-safe param updates should use atomics or command queue later.
+- First pass can apply params outside process.
+
+Acceptance:
+[ ] Device params are stable
+[ ] Param updates clamp values
+[ ] UI can send params without crashing engine
+
+============================================================
+15. Metering and Telemetry
+============================================================
+
+Implement meter foundation.
+
+Meters:
+- track peak
+- track RMS optional
+- master peak
+- gain reduction per compressor optional
+- xrun count
+- CPU/DSP time estimate later
+
+Rules:
+- Meter values should be smoothed.
+- Events to UI throttled to 15-30 FPS.
+- Do not emit meter event every audio sample/block if too frequent.
+
+Acceptance:
+[ ] Engine exposes meter values
+[ ] UI adapter can subscribe
+[ ] Meter events are bounded
+
+============================================================
+16. WASM Runtime
+============================================================
+
+Create wasm-audio crate.
+
+Use wasm-bindgen.
+
+Exports:
+- create_engine(config) -> handle
+- destroy_engine(handle)
+- handle_command(handle, command_json or binary)
+- process(handle, output_ptr, frames) or worklet integration wrapper
+- get_events(handle)
+
+Preferred long-term:
+- AudioWorklet owns WASM module
+- Processor calls engine.process() per block
+- Main thread sends commands via MessagePort
+- Avoid JSON parsing in process()
+- Commands parsed on worklet message handler, not audio process
+
+First pass:
+- Use JSON commands over worklet port for metadata/control
+- Process audio output in AudioWorklet
+- Asset loading can be transferred ArrayBuffer and copied into WASM memory
+
+Files:
+packages/audio-api/src/WasmAudioEngineAdapter.ts
+apps/web/src/audio/futureboard-audio-worklet.ts
+engines/wasm-audio/src/lib.rs
+
+Rules:
+- AudioWorkletProcessor cannot use DOM.
+- WASM module loading must be async before playback.
+- If WASM fails to load, fallback to WebAudio adapter.
+- Keep current WebAudio engine fallback.
+
+Acceptance:
+[ ] WASM crate builds
+[ ] WASM adapter can initialize or fallback safely
+[ ] AudioWorklet can load module skeleton
+[ ] App does not crash if WASM missing
+
+============================================================
+17. Web AudioWorklet Design
+============================================================
+
+AudioWorklet architecture:
+
+Main thread:
+- WasmAudioEngineAdapter
+- creates AudioContext
+- audioContext.audioWorklet.addModule(...)
+- creates AudioWorkletNode
+- sends init command
+- sends project/track/clip commands
+- connects node to destination
+
+Worklet thread:
+- loads/receives WASM
+- owns DSP engine
+- receives commands through port.onmessage
+- applies commands outside process or before next block
+- process(inputs, outputs, parameters) calls DSP engine
+
+Rules:
+- process() must be deterministic and fast.
+- Do not allocate big objects in process().
+- Do not console.log in process().
+- Avoid throwing exceptions inside process().
+- Gracefully output silence on error.
+
+Acceptance:
+[ ] Worklet node can output silence
+[ ] Commands can reach worklet
+[ ] Transport start/stop commands accepted
+[ ] No app crash on worklet init failure
+
+============================================================
+18. Native DSP Service
+============================================================
+
+Create native-dsp-service Rust binary.
+
+First phase transport:
+- stdio JSON-RPC
+- one JSON message per line
+- request/response IDs
+- events emitted as JSON lines
+
+Protocol:
+Request:
+{
+  "id": "uuid",
+  "method": "engine.play",
+  "params": {...}
+}
+
+Response:
+{
+  "id": "uuid",
+  "ok": true,
+  "result": {...}
+}
+
+Error:
+{
+  "id": "uuid",
+  "ok": false,
+  "error": {
+    "code": "ENGINE_ERROR",
+    "message": "..."
+  }
+}
+
+Event:
+{
+  "event": "meter.update",
+  "payload": {...}
+}
+
+Rules:
+- Service never trusts renderer paths blindly.
+- Electron main spawns service.
+- Renderer talks to main via preload IPC.
+- Main talks to service.
+- Service crash should not kill UI.
+- UI can restart service.
+
+Acceptance:
+[ ] Service starts and responds to ping
+[ ] Service can init engine
+[ ] Service can receive play/stop/setVolume commands
+[ ] Service can emit status events
+[ ] Service crash handled gracefully
+
+============================================================
+19. Native Audio Backend
+============================================================
+
+First native backend:
+- NullBackend for tests
+- CPAL backend if safe
+
+Backend trait:
+pub trait AudioBackend {
+    fn open(config) -> Result<Self>;
+    fn start(callback) -> Result<()>;
+    fn stop(&mut self) -> Result<()>;
+}
+
+Initial plan:
+1. NullBackend generates/processes silently for protocol testing.
+2. CPAL backend outputs audio to default device.
+3. Later platform-specific:
+   - WASAPI
+   - ASIO
+   - CoreAudio
+   - JACK/PipeWire
+
+Rules:
+- Do not block service protocol on CPAL if CPAL setup is complex.
+- NullBackend must work first.
+- Native service should run without audio device for tests.
+
+Acceptance:
+[ ] NullBackend works
+[ ] CPAL backend optional and guarded
+[ ] Service can run without audio device
+
+============================================================
+20. Electron NativeServiceAudioEngineAdapter
+============================================================
+
+TypeScript adapter:
+packages/audio-api/src/NativeServiceAudioEngineAdapter.ts
+
+Responsibilities:
+- request service start via Electron preload
+- send commands with request IDs
+- handle responses
+- subscribe to events
+- reconnect/restart if service dies
+- fallback to WebAudio/WASM if service unavailable
+
+Electron main:
+- spawn native-dsp-service executable
+- locate binary:
+  - dev: engines/native-dsp-service/target/debug/...
+  - packaged: resources/native-dsp-service/...
+- pipe stdin/stdout
+- parse JSON lines
+- route messages to renderer
+- kill service on app quit
+- restart service on request
+
+Preload:
+window.futureboard.audioService = {
+  start()
+  stop()
+  send(command)
+  onEvent(callback)
+}
+
+Rules:
+- Renderer never spawns processes directly.
+- Renderer never gets raw Node child_process.
+- Service messages are validated.
+- Timeouts on requests.
+- Backpressure for message spam.
+
+Acceptance:
+[ ] Electron adapter can ping service
+[ ] Adapter implements AudioEngineAdapter
+[ ] Service unavailable fallback works
+[ ] App does not crash if binary missing
+
+============================================================
+21. IPC Performance Strategy
+============================================================
+
+Phase 1:
+- stdio JSON-RPC for commands/status
+- simple and debuggable
+
+Phase 2:
+- named pipe / Unix domain socket
+- less overhead
+
+Phase 3:
+- shared memory ring buffers
+- meter/telemetry and audio buffers
+
+Never use JSON for:
+- realtime audio buffers
+- high-frequency sample data
+- huge waveform data
+
+JSON is okay for:
+- project metadata
+- transport commands
+- parameter changes
+- status/events
+
+Acceptance:
+[ ] Phase 1 JSON-RPC works
+[ ] Design leaves room for binary/shared memory later
+
+============================================================
+22. Asset Loading Strategy
+============================================================
+
+Web:
+- UI receives File/ArrayBuffer
+- decode via WebCodecs/WebAudio decodeAudioData first if needed
+- send PCM or compressed data to WASM depending phase
+- First pass can use decoded PCM Float32Array
+
+Electron:
+Options:
+1. Main process gives file path to native service
+2. Service decodes audio using symphonia or other Rust decoder later
+3. First pass can keep WebAudio decode path and send PCM metadata only
+
+Long-term native:
+- service decodes audio files itself
+- caches decoded audio/waveform
+- supports streaming from disk
+
+Rules:
+- Do not send huge PCM over JSON.
+- If sending PCM to service, use binary IPC later.
+- For first native service skeleton, asset loading can be stubbed.
+
+Acceptance:
+[ ] Web asset path has clear design
+[ ] Electron asset path has clear design
+[ ] No huge binary JSON plan
+
+============================================================
+23. Offline Rendering
+============================================================
+
+Design offline render.
+
+Command:
+- startOfflineRender(options)
+- cancelOfflineRender(renderId)
+
+Options:
+- startBeat
+- endBeat
+- sampleRate
+- channels
+- bitDepth
+- format: wav first
+- normalize optional later
+
+Core:
+- process graph faster than realtime into buffer
+- emit progress events
+- output PCM/WAV
+
+First pass:
+- skeleton command and progress events
+- no full export if too large
+
+Acceptance:
+[ ] Offline render API exists
+[ ] Skeleton does not crash
+[ ] Future implementation path clear
+
+============================================================
+24. Error Handling
+============================================================
+
+Define error codes.
+
+Examples:
+- ENGINE_NOT_INITIALIZED
+- INVALID_COMMAND
+- INVALID_TRACK_ID
+- INVALID_CLIP_ID
+- INVALID_DEVICE_ID
+- INVALID_PARAM
+- ASSET_NOT_LOADED
+- AUDIO_DEVICE_ERROR
+- DSP_PANIC_RECOVERED
+- SERVICE_UNAVAILABLE
+- WASM_LOAD_FAILED
+- WORKLET_INIT_FAILED
+
+Rules:
+- Rust errors return Result, not panic.
+- WASM adapter catches failures and falls back.
+- Native adapter handles service crash.
+- UI receives readable errors.
+
+Acceptance:
+[ ] Engine errors are typed
+[ ] Unknown command returns error
+[ ] Missing asset does not crash playback
+[ ] Service crash does not kill UI
+
+============================================================
+25. Testing Strategy
+============================================================
+
+Rust dsp-core tests:
+- create engine
+- process silence
+- set volume
+- pan math
+- mute/solo
+- clip scheduling
+- loop wrap
+- device param clamping
+- simple compressor no NaN
+- delay buffer no panic
+- graph rejects self route
+
+WASM tests:
+- module builds
+- engine init
+- command handling
+
+Native service tests:
+- ping
+- init
+- play/stop
+- invalid command response
+- service does not panic
+
+TypeScript tests if project supports:
+- adapter request/response
+- command serialization
+- engine snapshot mapping
+- fallback behavior
+
+Acceptance:
+[ ] cargo test passes for core
+[ ] cargo build passes for wasm/native crates
+[ ] TypeScript build passes
+[ ] Basic service ping works
+
+============================================================
+26. Build Scripts
+============================================================
+
+Add package scripts carefully.
+
+Root package scripts:
+- build:audio:core
+- build:audio:wasm
+- build:audio:service
+- dev:audio:service
+- test:audio
+
+Examples:
+bun run build:audio:core
+bun run build:audio:wasm
+bun run build:audio:service
+
+Rust:
+- cargo build -p dsp-core
+- wasm-pack build engines/wasm-audio --target web
+- cargo build -p native-dsp-service
+
+Rules:
+- Do not make normal UI build fail if optional native service is not built yet unless intentionally required.
+- Dev should still run without native service.
+
+Acceptance:
+[ ] Scripts exist
+[ ] UI can run without native service
+[ ] Audio builds can run independently
+
+============================================================
+27. Packaging Electron Service
+============================================================
+
+Electron packaging plan:
+- native service binary copied to resources
+- platform-specific binary names
+- win: futureboard-dsp-service.exe
+- linux/mac: futureboard-dsp-service
+- electron-builder extraResources config
+
+Rules:
+- Do not package debug-only paths.
+- Dev path and packaged path separate.
+- If binary missing, adapter falls back and shows status.
+
+Acceptance:
+[ ] Packaging path planned or configured safely
+[ ] Missing service binary does not crash app
+
+============================================================
+28. Realtime Safety Checklist
+============================================================
+
+Realtime audio thread must avoid:
+- heap allocations
+- locks/mutex waits
+- blocking IO
+- JSON parsing
+- logging
+- panics
+- dynamic graph rebuilds
+- file decoding
+- channel receives that block
+- unbounded event creation
+
+Allowed:
+- preallocated buffers
+- atomic param reads
+- bounded command queues
+- deterministic DSP operations
+- fixed-size temp buffers
+
+Acceptance:
+[ ] process() path is reviewed for realtime-safety
+[ ] Heavy work occurs outside process()
+
+============================================================
+29. Feature Scope by Phase
+============================================================
+
+Phase A: API + Skeleton
+- TypeScript AudioEngineAdapter
+- Rust dsp-core skeleton
+- WASM skeleton
+- Native service ping/init skeleton
+- WebAudio fallback remains
+
+Phase B: Basic DSP
+- transport
+- track gain/pan/mute/solo
+- audio asset registry
+- basic audio clip scheduling
+- meters
+
+Phase C: Device Chain
+- gain
+- EQ
+- compressor
+- delay
+- saturation placeholder
+- insert params
+
+Phase D: Routing
+- bus/group/return graph
+- sends
+- output routing
+
+Phase E: Native Service Audio
+- null backend
+- CPAL output
+- service lifecycle
+- Electron adapter
+
+Phase F: WASM AudioWorklet
+- worklet loading
+- process in WASM
+- command bridge
+- fallback on failure
+
+Phase G: Offline Render
+- render range to buffer
+- WAV export
+
+Phase H: Advanced
+- automation
+- MIDI synth/sampler
+- time stretch
+- pitch shift
+- plugin hosting
+- shared memory
+- native backends
+
+Rules:
+- Do not skip directly to Phase H.
+- Each phase must build and run.
+
+============================================================
+30. Implementation Priority for First Patch
+============================================================
+
+For the first real implementation patch, do only:
+
+1. Add packages/audio-api interface and protocol types.
+2. Add engines/dsp-core Rust crate skeleton.
+3. Add basic DspEngine with config/process/command/events/status.
+4. Add simple Gain/Pan/Meter primitives if small.
+5. Add engines/native-dsp-service with stdio ping/init skeleton.
+6. Add WasmAudioEngineAdapter skeleton that falls back if unavailable.
+7. Add NativeServiceAudioEngineAdapter skeleton that falls back if service unavailable.
+8. Do not replace current WebAudio playback yet.
+9. Add build scripts.
+10. Run TypeScript build and cargo check where possible.
+
+Acceptance first patch:
+[ ] TypeScript build passes
+[ ] cargo check for dsp-core passes
+[ ] native service can respond to ping if run manually
+[ ] App still runs using current WebAudio fallback
+[ ] No UI regression
+
+============================================================
+31. Manual Smoke Test
+============================================================
+
+After skeleton:
+[ ] App starts
+[ ] Existing WebAudio path still works
+[ ] Engine selector can choose WebAudio fallback
+[ ] Native service missing does not crash
+[ ] WASM missing does not crash
+[ ] Console has no repeated fatal errors
+
+After native ping:
+[ ] Start service in dev
+[ ] Adapter ping returns ok
+[ ] Stop service
+[ ] Adapter reports service unavailable
+[ ] App continues running
+
+After DSP scheduling:
+[ ] Import audio
+[ ] Add clip
+[ ] Play
+[ ] Stop
+[ ] Seek
+[ ] Track volume changes output
+[ ] Mute changes output
+[ ] No obvious memory leak
+
+============================================================
+32. Final Acceptance Checklist
+============================================================
+
+[ ] AudioEngineAdapter API exists
+[ ] Protocol types exist
+[ ] Rust dsp-core crate exists
+[ ] DspEngine skeleton exists
+[ ] DspEngine can process silence
+[ ] Engine commands/events/status exist
+[ ] WASM crate skeleton exists
+[ ] WASM adapter skeleton exists
+[ ] AudioWorklet design path exists
+[ ] Native service crate exists
+[ ] Native service responds to ping/init
+[ ] NativeServiceAudioEngineAdapter skeleton exists
+[ ] Electron main/preload service bridge planned or implemented safely
+[ ] Current WebAudio adapter remains fallback
+[ ] No React component directly imports Rust/native internals
+[ ] No direct Node/Electron APIs in renderer
+[ ] No huge binary data over JSON
+[ ] TypeScript passes
+[ ] Rust cargo check passes for created crates
+[ ] App runs in Electron
+[ ] Existing UI is not redesigned
+[ ] No DSP panic on empty project
+
+Important:
+This task is intentionally long-term and heavy.
+Implement incrementally.
+Prefer a small building skeleton with clean boundaries over a huge broken rewrite.
+WebAudio remains the fallback until WASM/native are stable.
