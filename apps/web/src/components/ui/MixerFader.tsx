@@ -117,7 +117,6 @@ export function MixerFader({
   muted,
   solo,
   isMaster = false,
-  color = "#48a6a7",
   onChange,
   onCommit,
   onMute,
