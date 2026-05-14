@@ -1,3 +1,5 @@
+<img width="2111" height="684" alt="banner_ft" src="https://github.com/user-attachments/assets/aa5916cb-1e47-4fe8-a6c3-43099a38ee95" />
+
 # FutureBoard Studio
 
 A modern DAW experiment built around a fast editor-like workflow.
