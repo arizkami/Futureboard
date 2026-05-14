@@ -489,30 +489,42 @@ export class UpdateClipCommand implements DawCommand {
 
 export class AddMidiNotesCommand implements DawCommand {
   readonly label = "Add MIDI Note";
-  constructor(private clipId: string, private notes: MidiNote[]) {}
+  private clipId: string;
+  private notes: MidiNote[];
+
+  constructor(clipId: string, notes: MidiNote[]) {
+    this.clipId = clipId;
+    this.notes = notes;
+  }
   execute() { store().addMidiNotes(this.clipId, this.notes); }
   undo()    { store().removeMidiNotes(this.clipId, this.notes.map((n) => n.id)); }
 }
 
 export class RemoveMidiNotesCommand implements DawCommand {
   readonly label = "Delete MIDI Notes";
-  constructor(private clipId: string, private notes: MidiNote[]) {}
+  private clipId: string;
+  private notes: MidiNote[];
+
+  constructor(clipId: string, notes: MidiNote[]) {
+    this.clipId = clipId;
+    this.notes = notes;
+  }
   execute() { store().removeMidiNotes(this.clipId, this.notes.map((n) => n.id)); }
   undo()    { store().addMidiNotes(this.clipId, this.notes); }
 }
 
 export class UpdateMidiNotesCommand implements DawCommand {
   readonly label: string;
+  private _clipId: string;
   private prevNotes: MidiNote[];
   private nextNotes: MidiNote[];
 
   constructor(clipId: string, prevNotes: MidiNote[], nextNotes: MidiNote[], label = "Edit MIDI Notes") {
     this.label = label;
+    this._clipId = clipId;
     this.prevNotes = prevNotes;
     this.nextNotes = nextNotes;
-    this._clipId = clipId;
   }
-  private _clipId: string;
 
   execute() {
     store().updateMidiNotes(this._clipId, this.nextNotes);
