@@ -1,0 +1,689 @@
+Task: Implement Windowed Floating Panels, Dialog Windows, Electron External Floating Windows, Project Wizard, and Unsaved Changes Dialog.
+
+Goal:
+Build a reusable window/dialog system for Futureboard Studio that works across Web and Electron, with optional real external windows in Electron.
+
+This system will support:
+- Internal floating panels inside the app
+- Internal dialog windows inside the app
+- Electron external floating BrowserWindow windows
+- Project Wizard
+- Unsaved Changes confirmation dialog
+- Future plugin floating windows
+- Future mixer/editor detached panels
+
+Do not redesign the whole app.
+Do not replace the current app shell.
+Do not introduce a huge window manager dependency.
+Build a small focused system that fits the current DAW UI.
+
+============================================================
+1. Window System Concepts
+============================================================
+
+Support three window modes:
+
+1. Internal Floating Window
+- Works in Web and Electron
+- Rendered inside React app
+- Draggable
+- Resizable
+- Focusable
+- Z-index managed
+- Useful for plugin windows, utility panels, small tools
+
+2. Internal Dialog Window
+- Works in Web and Electron
+- Modal or non-modal
+- Used for Project Wizard, Unsaved Changes, Preferences, Export dialogs
+- Has backdrop if modal
+- Keyboard handling: Esc, Enter where appropriate
+
+3. Electron External Floating Window
+- Electron only
+- Creates real BrowserWindow through preload/main IPC
+- Used later for detached mixer/plugin/editor windows
+- Web fallback should open internal floating window instead
+
+Important:
+Web and Electron should share the same high-level window API.
+Platform differences must be behind an adapter.
+
+============================================================
+2. Window Manager Store
+============================================================
+
+Create a window manager store.
+
+Suggested file:
+src/stores/windowStore.ts
+or integrate into existing UI store if appropriate.
+
+Types:
+
+type AppWindowKind =
+  | "floating"
+  | "dialog"
+  | "external";
+
+type AppWindowContentType =
+  | "projectWizard"
+  | "unsavedChanges"
+  | "preferences"
+  | "plugin"
+  | "mixer"
+  | "editor"
+  | "effectEditor"
+  | "about"
+  | "generic";
+
+type AppWindowState = {
+  id: string;
+  kind: AppWindowKind;
+  contentType: AppWindowContentType;
+  title: string;
+  modal?: boolean;
+  external?: boolean;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  minWidth?: number;
+  minHeight?: number;
+  focused: boolean;
+  zIndex: number;
+  resizable?: boolean;
+  draggable?: boolean;
+  closable?: boolean;
+  payload?: Record<string, unknown>;
+};
+
+Store actions:
+- openWindow(config)
+- closeWindow(id)
+- focusWindow(id)
+- updateWindowBounds(id, bounds)
+- bringToFront(id)
+- closeAllDialogs()
+- isWindowOpen(contentType)
+- openDialog(config)
+- openFloating(config)
+
+Rules:
+- only one modal dialog should be focused at a time
+- z-index must increment predictably
+- closing modal restores focus to app
+- internal windows must not exceed viewport completely
+
+Acceptance:
+[ ] Window store exists
+[ ] Can open/focus/close/update internal windows
+[ ] Z-index works
+[ ] Modal dialogs block background interaction
+[ ] Non-modal floating windows do not block background
+
+============================================================
+3. Internal FloatingWindow Component
+============================================================
+
+Create reusable component:
+
+src/components/windows/FloatingWindow.tsx
+
+Features:
+- title bar
+- draggable header
+- close button
+- optional minimize placeholder
+- optional detach/externalize button in Electron
+- resizable edges/corner
+- z-index/focus handling
+- compact DAW style
+- no browser default window look
+
+Props:
+- window: AppWindowState
+- children
+- onClose
+- onFocus
+- onBoundsChange
+- onDetach?
+
+Behavior:
+- pointer down on titlebar starts drag
+- pointer down on resize handle starts resize
+- focus window on pointer down
+- clamp position to viewport
+- minimum width/height respected
+- Escape closes if closable and non-critical
+- content should not accidentally drag window
+
+Styling:
+- dark surface
+- subtle border
+- titlebar 28-34px
+- 11-13px text
+- soft shadow
+- small buttons
+- no huge rounded cards
+
+Acceptance:
+[ ] Floating window can drag
+[ ] Floating window can resize
+[ ] Close works
+[ ] Focus/z-index works
+[ ] Looks native to Futureboard
+[ ] Works in Web and Electron
+
+============================================================
+4. Internal DialogWindow Component
+============================================================
+
+Create reusable component:
+
+src/components/windows/DialogWindow.tsx
+
+Features:
+- modal backdrop optional
+- centered by default
+- draggable optional
+- titlebar optional
+- actions footer
+- Esc handling
+- Enter primary action where appropriate
+- focus trap if easy
+- compact DAW/editor style
+
+Use cases:
+- Project Wizard
+- Unsaved Changes Dialog
+- Preferences later
+- Export dialog later
+
+Props:
+- title
+- children
+- actions
+- modal
+- width
+- height
+- onClose
+- onConfirm optional
+- danger optional
+
+Acceptance:
+[ ] Dialog can open/close
+[ ] Modal backdrop works
+[ ] Esc closes non-critical dialogs
+[ ] Unsaved dialog cannot be bypassed accidentally
+[ ] Style matches app
+
+============================================================
+5. WindowHost
+============================================================
+
+Create WindowHost that renders all internal floating/dialog windows.
+
+File:
+src/components/windows/WindowHost.tsx
+
+Place it near app root, above main app layout:
+
+<AppShell />
+<WindowHost />
+
+Requirements:
+- render windows from windowStore
+- render dialogs above floating windows if modal
+- handle z-index layer contract
+- use portal if needed
+- no clipping by parent overflow
+
+Layer suggestion:
+- app shell: normal
+- internal floating windows: z-1000
+- dialogs: z-2000
+- context menus/popovers: should still work inside windows
+- modal backdrop: z-1900
+
+Acceptance:
+[ ] Windows are not clipped by panels
+[ ] Dialogs appear above app
+[ ] Floating windows appear above app but below modal dialogs
+
+============================================================
+6. Platform Window Adapter
+============================================================
+
+Create platform adapter:
+
+src/platform/windows/windowAdapter.ts
+
+Interface:
+
+interface WindowAdapter {
+  supportsExternalWindows: boolean;
+  openExternalWindow(config: ExternalWindowConfig): Promise<string | null>;
+  closeExternalWindow(id: string): Promise<void>;
+  focusExternalWindow(id: string): Promise<void>;
+}
+
+Web adapter:
+- supportsExternalWindows = false
+- openExternalWindow returns null
+- fallback should open internal floating window
+
+Electron adapter:
+- supportsExternalWindows = true
+- calls preload IPC:
+  window.futureboard.windows.openExternal(...)
+  window.futureboard.windows.closeExternal(...)
+  window.futureboard.windows.focusExternal(...)
+
+Do not call Electron APIs directly in React.
+
+Acceptance:
+[ ] Web fallback works
+[ ] Electron path uses preload IPC only
+[ ] No direct Node/Electron in renderer
+
+============================================================
+7. Electron External FloatingWindow IPC
+============================================================
+
+Electron only.
+
+Add preload bridge:
+
+window.futureboard.windows = {
+  openExternal(config),
+  closeExternal(id),
+  focusExternal(id)
+}
+
+Main process:
+- handle ipcMain.handle("windows:openExternal", ...)
+- create BrowserWindow
+- track windows by id
+- load same app URL with route/hash/query to render external content
+- set parent window if useful
+- destroy cleanup on closed
+
+ExternalWindowConfig:
+- id?
+- title
+- contentType
+- payload
+- width
+- height
+- minWidth
+- minHeight
+- alwaysOnTop?
+- frame?
+- transparent?
+- resizable?
+
+Security:
+- contextIsolation true
+- nodeIntegration false
+- sandbox true if possible
+- preload still used
+- no arbitrary URLs from renderer
+- main decides URL/path
+
+Suggested routing:
+app URL:
+#/external/plugin?windowId=...
+or
+?externalWindow=plugin&windowId=...
+
+If route system is not ready:
+- create minimal ExternalWindowRoot component that reads query params.
+
+Acceptance:
+[ ] Electron can open an external BrowserWindow
+[ ] External window loads app content
+[ ] External window uses safe preload
+[ ] Closing external window cleans state
+[ ] Web build does not break
+
+============================================================
+8. External Window Fallback
+============================================================
+
+If user clicks detach/floating external on Web:
+- open internal FloatingWindow instead
+- do not show error
+
+If Electron external creation fails:
+- fallback to internal FloatingWindow
+- show status message if status bar exists
+
+Acceptance:
+[ ] Web fallback works
+[ ] Electron fallback works on failure
+[ ] No crash
+
+============================================================
+9. Project Wizard
+============================================================
+
+Create ProjectWizard dialog.
+
+Purpose:
+- Create a new project
+- Choose basic project settings
+- Optionally create first tracks
+
+File:
+src/components/project/ProjectWizard.tsx
+
+Open from:
+- File > New Project
+- startup if no project exists later
+- command palette
+
+Layout:
+Step 1: Project Info
+- project name
+- location placeholder
+- template dropdown
+- sample rate
+- bit depth
+- BPM
+- time signature
+
+Step 2: Starter Tracks
+- audio tracks count
+- MIDI tracks count
+- bus/return optional
+- create master default
+- template presets:
+  - Empty Project
+  - Recording
+  - Beat Making
+  - Mixing
+  - Scoring
+
+Step 3: Confirm
+- summary
+- Create Project button
+- Cancel button
+
+For first pass:
+- can be single-page instead of true multi-step if simpler
+- must still look like a wizard
+
+Behavior:
+- Create Project calls existing project creation/reset store action if available
+- If no action exists, add minimal createNewProject(settings)
+- Must mark project as clean/saved state after creation
+- Must close dialog after create
+
+Acceptance:
+[ ] File > New Project opens Project Wizard
+[ ] User can set project name/BPM/time signature/sample rate
+[ ] Create Project resets/creates project
+[ ] Dialog closes
+[ ] App state reflects new project
+[ ] TypeScript passes
+
+============================================================
+10. Unsaved Changes Dialog
+============================================================
+
+Create UnsavedChangesDialog.
+
+Use when:
+- New Project while dirty
+- Open Project while dirty
+- Close Project while dirty
+- Quit app while dirty
+- Window close in Electron while dirty
+
+Dialog title:
+Unsaved Changes
+
+Message:
+“You have unsaved changes in this project.”
+
+Actions:
+- Save
+- Don’t Save
+- Cancel
+
+Behavior:
+- Save: run save action, then continue pending action
+- Don’t Save: continue pending action without saving
+- Cancel: abort pending action
+
+Need a pending action mechanism:
+type PendingProjectAction =
+  | "newProject"
+  | "openProject"
+  | "closeProject"
+  | "quitApp";
+
+or generic callback/ref if safe.
+
+Store/state:
+- projectDirty: boolean
+- saveStatus: "saved" | "dirty" | "saving" | "error"
+
+Rules:
+- Do not lose changes without explicit Don’t Save
+- Escape should act like Cancel
+- Enter should default to Save or Cancel depending design; safer: Save
+- Danger action Don’t Save should be visually clear
+
+Acceptance:
+[ ] Dirty project triggers dialog before New Project
+[ ] Save continues action
+[ ] Don’t Save continues without save
+[ ] Cancel aborts
+[ ] Clean project skips dialog
+[ ] Electron window close can be intercepted if implemented
+
+============================================================
+11. Dirty State
+============================================================
+
+Ensure project dirty state exists and is updated.
+
+Dirty when:
+- add/remove track
+- move/edit clip
+- add/edit MIDI notes
+- add/remove device
+- change mixer params
+- change project settings
+
+Clean when:
+- save succeeds
+- new project created
+- project loaded
+
+If dirty tracking already exists:
+- use it
+If not:
+- add minimal markDirty() / markClean()
+
+Acceptance:
+[ ] App title/save status updates when dirty
+[ ] Unsaved dialog uses actual dirty state
+[ ] Common editing actions mark project dirty
+
+============================================================
+12. File Menu Integration
+============================================================
+
+Update File menu:
+
+- New Project -> guarded by unsaved dialog -> ProjectWizard
+- Open Project -> guarded by unsaved dialog -> open flow
+- Save -> save action
+- Save As -> save as action if available
+- Close Project -> guarded by unsaved dialog
+
+Enabled state:
+- Save enabled only when dirty or always allowed
+- Save As enabled when project exists
+- Close Project enabled when project exists
+
+Acceptance:
+[ ] File > New Project opens wizard or unsaved dialog first
+[ ] File > Save updates dirty status
+[ ] File menu does not call fake actions silently
+
+============================================================
+13. Window Menu Integration
+============================================================
+
+Update Window menu with:
+
+- New Floating Window > Mixer
+- New Floating Window > Effect Editor
+- New Floating Window > Selected Plugin
+- Detach Selected Plugin
+- Close Floating Window
+- Bring All to Front
+- Reset Window Layout
+
+Rules:
+- Web uses internal floating windows
+- Electron can offer External Floating Window if supported
+- Disabled if content unavailable
+
+Acceptance:
+[ ] Window menu opens internal floating panels
+[ ] Electron external option appears/works if adapter ready
+[ ] Web fallback does not crash
+
+============================================================
+14. Plugin Floating Window Support
+============================================================
+
+Add ability to open selected plugin/device as a floating window.
+
+Internal:
+- FloatingWindow contentType = "plugin"
+- payload = { trackId, deviceId }
+- Render the same selected plugin UI inside floating window
+- Params still update project state
+
+External Electron:
+- external window receives trackId/deviceId in payload/query
+- can render plugin UI if project state is accessible
+- If shared state to external window is hard now, show placeholder:
+  “External plugin window shell ready”
+  and keep internal floating fully functional
+
+Acceptance:
+[ ] Selected plugin can open internal floating window
+[ ] Plugin controls still update params
+[ ] Floating plugin window can close
+[ ] Electron external path is safe/fallback if not complete
+
+============================================================
+15. Dialog Styling
+============================================================
+
+Style rules:
+- native DAW/dialog feel
+- compact titlebar
+- dark surface
+- subtle border/shadow
+- no giant SaaS modal
+- buttons match current UI
+- danger button for destructive action
+- 11-13px text
+
+Button order:
+Windows/Linux style:
+[Don’t Save] [Cancel] [Save]
+
+macOS could differ later.
+For now keep consistent.
+
+Acceptance:
+[ ] Dialog looks like part of app
+[ ] Buttons are clear
+[ ] No text overflow
+
+============================================================
+16. Accessibility / Input Handling
+============================================================
+
+Basic requirements:
+- Escape closes cancellable dialogs
+- Enter triggers primary action where safe
+- Focus first input in Project Wizard
+- Do not trigger global DAW shortcuts while dialog input is focused
+- Floating window controls are keyboard safe enough
+
+Acceptance:
+[ ] Typing in wizard does not trigger DAW shortcuts
+[ ] Esc behavior works
+[ ] Focus feels sane
+
+============================================================
+17. Build Safety
+============================================================
+
+Run:
+bun run build
+
+Avoid:
+- direct Electron imports in renderer
+- parameter properties if erasableSyntaxOnly is enabled
+- uncontrolled any-heavy code if project is strict
+
+Acceptance:
+[ ] TypeScript passes
+[ ] Web build passes
+[ ] Electron app runs
+
+============================================================
+18. Implementation Priority
+============================================================
+
+Implement in this order:
+
+1. Window store/types
+2. WindowHost + FloatingWindow + DialogWindow
+3. ProjectWizard internal dialog
+4. UnsavedChangesDialog + dirty guard for New Project
+5. File menu New Project integration
+6. Internal plugin floating window support
+7. Platform window adapter
+8. Electron external BrowserWindow IPC skeleton
+9. Window menu entries
+
+If scope is too large:
+Stop after step 5 with all build passing.
+
+============================================================
+19. Final Acceptance Checklist
+============================================================
+
+[ ] Internal floating windows work in Web/Electron
+[ ] Internal dialog windows work in Web/Electron
+[ ] WindowHost renders windows above app
+[ ] Project Wizard opens from File > New Project
+[ ] Project Wizard creates/resets project
+[ ] Dirty project opens Unsaved Changes dialog before destructive actions
+[ ] Save / Don’t Save / Cancel flow works
+[ ] Dirty state updates for common edits
+[ ] Plugin can open in internal floating window
+[ ] Electron external window adapter exists
+[ ] Electron main/preload IPC skeleton exists if possible
+[ ] Web fallback works
+[ ] No direct Electron calls in React UI
+[ ] TypeScript passes
+[ ] App runs in Electron
+
+Important:
+Build the internal Web/Electron window/dialog system first.
+External Electron BrowserWindow support can be a safe skeleton if full cross-window state is too large.
+Do not redesign the whole app.
+Do not break existing panels.

@@ -1,0 +1,226 @@
+Task: Add Waveform Peak Cache for Web and Electron.
+
+Goal:
+Avoid regenerating waveform peaks every time an audio file is imported or reopened.
+
+Implement a platform-aware waveform cache:
+- Web uses IndexedDB for waveform peak data.
+- Electron uses a temp/cache folder through preload IPC.
+- localStorage may only be used for small metadata if needed, not large peak arrays.
+
+Do not rewrite the waveform renderer.
+Do not change audio engine architecture.
+Only add cache read/write integration around waveform peak generation.
+
+============================================================
+1. Waveform Cache Data Model
+============================================================
+
+Create a cache format:
+
+type WaveformCacheEntry = {
+  version: number;
+  fileId: string;
+  fileName?: string;
+  fileSize?: number;
+  fileLastModified?: number;
+  sampleRate: number;
+  channelCount: number;
+  duration: number;
+  samplesPerPeak: number;
+  peakCount: number;
+  createdAt: number;
+  peaks: Float32Array | number[];
+};
+
+Cache key should include:
+- fileId if stable
+- file size
+- lastModified
+- samplesPerPeak
+- cache version
+
+Example:
+waveform:v1:{fileId}:{fileSize}:{lastModified}:{samplesPerPeak}
+
+If fileId is not stable, create a hash from:
+- name
+- size
+- lastModified
+- duration if known
+
+============================================================
+2. Platform Adapter
+============================================================
+
+Create a common interface:
+
+interface WaveformCacheAdapter {
+  get(key: string): Promise<WaveformCacheEntry | null>;
+  set(key: string, entry: WaveformCacheEntry): Promise<void>;
+  delete(key: string): Promise<void>;
+  clear(): Promise<void>;
+}
+
+Implement:
+- WebWaveformCacheAdapter
+- ElectronWaveformCacheAdapter
+- MemoryWaveformCacheAdapter fallback
+
+============================================================
+3. Web Cache
+============================================================
+
+Use IndexedDB.
+
+Database:
+futureboard-waveform-cache
+
+Store:
+waveforms
+
+Key:
+cacheKey
+
+Rules:
+- Do not store large peak arrays in localStorage.
+- Serialize Float32Array safely.
+- If IndexedDB fails, fallback to memory cache.
+- Keep errors non-fatal.
+
+Acceptance:
+[ ] Web can save waveform peaks
+[ ] Web can load cached waveform peaks
+[ ] Failed cache does not break import
+
+============================================================
+4. Electron Cache
+============================================================
+
+Use Electron preload IPC.
+
+Renderer:
+waveformCache.get(key)
+waveformCache.set(key, entry)
+waveformCache.delete(key)
+waveformCache.clear()
+
+Main process:
+Store files under:
+app.getPath("userData")/cache/waveforms
+
+or temp for first pass:
+app.getPath("temp")/futureboard/waveforms
+
+Recommended:
+Use userData cache for persistence.
+Use temp only if you want disposable cache.
+
+File format:
+- JSON for first pass is okay
+- Binary later for performance
+
+Filename:
+safe hash of cache key + ".json"
+
+Rules:
+- Sanitize filenames
+- Never allow arbitrary paths from renderer
+- Renderer sends only cache key and data
+- Main process decides actual file path
+
+Acceptance:
+[ ] Electron writes cache file
+[ ] Electron reads cache file
+[ ] Cache survives app reload if using userData
+[ ] No raw filesystem path is exposed to renderer
+
+============================================================
+5. Waveform Generation Flow
+============================================================
+
+Current flow should become:
+
+1. Import audio file
+2. Build waveform cache key
+3. Try cache.get(key)
+4. If cache hit:
+   - use cached peaks
+   - skip generation
+5. If cache miss:
+   - decode audio
+   - generate peaks
+   - cache.set(key, peaks)
+   - render waveform
+
+Add UI states:
+- "Loading waveform"
+- "Using cached waveform" optional dev log
+- "Generating waveform"
+- "Waveform ready"
+
+Acceptance:
+[ ] First import generates waveform
+[ ] Second import/load uses cached waveform
+[ ] UI does not freeze on medium files
+[ ] Existing waveform rendering still works
+
+============================================================
+6. Cache Versioning
+============================================================
+
+Add a cache version constant:
+
+const WAVEFORM_CACHE_VERSION = 1;
+
+If peak format changes later:
+- increment version
+- old cache keys become invalid automatically
+
+Acceptance:
+[ ] Changing version invalidates old cache
+
+============================================================
+7. Cache Size / Cleanup
+============================================================
+
+Add simple cleanup later, but include basic functions now:
+- clearWaveformCache()
+- deleteWaveformCacheEntry(key)
+
+Optional first pass:
+- keep max entries count
+- remove oldest entries
+
+Do not over-engineer LRU yet.
+
+============================================================
+8. Performance
+============================================================
+
+Avoid keeping huge duplicated arrays in React state.
+
+Prefer:
+- keep peaks in waveform store/cache
+- render from cached peaks
+- do not repeatedly JSON.stringify huge data on every render
+- only serialize when writing cache
+
+If JSON is too large:
+- leave TODO for binary format
+
+============================================================
+9. Acceptance Checklist
+============================================================
+
+[ ] WaveformCacheAdapter exists
+[ ] Web IndexedDB cache works
+[ ] Electron IPC cache works or has safe fallback
+[ ] Cache key includes file identity and peak settings
+[ ] First import generates peaks
+[ ] Subsequent import loads cached peaks
+[ ] Cache failures do not crash app
+[ ] Waveform renderer still works
+[ ] TypeScript passes
+[ ] App runs in Electron
+[ ] No unrelated redesign

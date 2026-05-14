@@ -1,0 +1,937 @@
+Task: Rebuild Built-in Plugin UI, Insert Chain, PluginShell, and Effect Editor as a horizontal usable DAW device system.
+
+Goal:
+Create a proper built-in device/plugin system for the DAW.
+
+This pass must replace the current disconnected/mock plugin UI attempt with a working UI/state integration:
+- Built-in devices can be added from Mixer INSERTS
+- Added devices appear in the insert chain
+- Selecting a device opens it in Effect Editor
+- Plugin controls read/write real device params in project state
+- Plugin UI must be horizontal and usable inside the bottom Effect Editor panel
+- No DSP/audio processing yet
+
+Important:
+Do not implement real audio DSP.
+Do not implement VST/CLAP/plugin hosting.
+Do not create vertical full-page plugin cards.
+Do not make gallery-only mockups.
+Do not redesign the whole app.
+Do not create duplicate fake state.
+
+Single source of truth:
+project.tracks[].inserts[]
+
+============================================================
+0. First: Remove / Replace Broken Plugin Mock System
+============================================================
+
+Audit existing plugin UI/components.
+
+If current plugin components are only mock gallery UI and not connected to:
+- track.inserts
+- selected insert device
+- Effect Editor
+- project store params
+
+Then refactor or replace them.
+
+Do not keep two competing systems.
+
+Remove or stop using:
+- disconnected plugin gallery
+- fake local-only insert list
+- insert popup that does not mutate project state
+- Effect Editor placeholder that ignores selected device
+
+Acceptance:
+[ ] There is one plugin/device state system
+[ ] Mixer inserts and Effect Editor read from the same track.inserts
+[ ] No duplicate fake chain state exists
+
+============================================================
+1. Device Data Model
+============================================================
+
+Add or update shared DAW types.
+
+Required types:
+
+type BuiltInDeviceType =
+  | "eq"
+  | "compressor"
+  | "reverb"
+  | "delay"
+  | "saturation"
+  | "optical-compressor"
+  | "multiband-dynamics";
+
+type InsertDevice = {
+  id: string;
+  type: BuiltInDeviceType;
+  name: string;
+  enabled: boolean;
+  order: number;
+  params: Record<string, number | string | boolean>;
+};
+
+Each track must support:
+
+track.inserts: InsertDevice[]
+
+Rules:
+- inserts array order is the device chain order
+- enabled = bypass state
+- params store plugin UI values
+- newly created tracks default to inserts: []
+- do not store plugin params anywhere else
+
+Acceptance:
+[ ] Track type includes inserts
+[ ] New tracks get inserts: []
+[ ] Existing tracks safely fallback to inserts: []
+[ ] TypeScript passes
+
+============================================================
+2. Built-in Device Registry
+============================================================
+
+Create central registry:
+
+src/daw/devices/builtInDevices.ts
+
+Registry entry:
+
+type BuiltInDeviceDefinition = {
+  type: BuiltInDeviceType;
+  name: string;
+  shortName: string;
+  category: "eq" | "dynamics" | "space" | "modulation" | "utility";
+  icon: DawIconName;
+  color?: string;
+  defaultParams: Record<string, number | string | boolean>;
+};
+
+Required devices:
+
+1. EQ
+type: "eq"
+name: "Parametric EQ"
+shortName: "EQ"
+defaultParams:
+- band1Freq: 80
+- band1Gain: 0
+- band1Q: 0.8
+- band2Freq: 250
+- band2Gain: 0
+- band2Q: 1.0
+- band3Freq: 1000
+- band3Gain: 0
+- band3Q: 1.0
+- band4Freq: 5000
+- band4Gain: 0
+- band4Q: 0.9
+- hpEnabled: false
+- lpEnabled: false
+- output: 0
+- analyzer: true
+
+2. Compressor
+type: "compressor"
+name: "Compressor"
+shortName: "Comp"
+defaultParams:
+- threshold: -18
+- ratio: 4
+- attack: 10
+- release: 120
+- knee: 6
+- makeup: 0
+- mix: 100
+- autoGain: false
+
+3. Reverb
+type: "reverb"
+name: "Reverb"
+shortName: "Verb"
+defaultParams:
+- size: 45
+- decay: 2.4
+- preDelay: 20
+- damping: 55
+- width: 100
+- lowCut: 120
+- highCut: 12000
+- mix: 25
+- output: 0
+
+4. Delay
+type: "delay"
+name: "Delay"
+shortName: "Delay"
+defaultParams:
+- sync: true
+- timeL: "1/4"
+- timeR: "1/8"
+- feedback: 35
+- pingPong: true
+- width: 80
+- lowCut: 180
+- highCut: 9000
+- mix: 20
+- output: 0
+
+5. Saturation
+type: "saturation"
+name: "Saturation"
+shortName: "Sat"
+defaultParams:
+- drive: 20
+- tone: 50
+- character: "soft"
+- mix: 100
+- output: 0
+
+6. Optical Compressor
+type: "optical-compressor"
+name: "Optical Compressor"
+shortName: "Opto"
+defaultParams:
+- peakReduction: 35
+- gain: 0
+- mode: "compress"
+- emphasis: 50
+- mix: 100
+- meter: "gr"
+
+7. Multiband Dynamics
+type: "multiband-dynamics"
+name: "Multiband Dynamics"
+shortName: "Multi"
+defaultParams:
+- depth: 50
+- time: 50
+- input: 0
+- output: 0
+- mix: 100
+- lowAmount: 50
+- midAmount: 50
+- highAmount: 50
+- upward: 50
+- downward: 50
+- crossoverLow: 120
+- crossoverHigh: 5000
+
+Acceptance:
+[ ] Central registry exists
+[ ] Add Device menu uses registry
+[ ] PluginShell uses registry display info
+[ ] No hardcoded duplicate device names scattered everywhere
+
+============================================================
+3. Project Store Actions
+============================================================
+
+Add focused project store actions:
+
+- addInsertDevice(trackId, deviceType)
+- removeInsertDevice(trackId, deviceId)
+- toggleInsertDevice(trackId, deviceId)
+- updateInsertDeviceParams(trackId, deviceId, paramsPatch)
+- selectInsertDevice(trackId, deviceId)
+- clearSelectedInsertDevice()
+- reorderInsertDevices(trackId, fromIndex, toIndex)
+
+Selection state:
+selectedInsertDevice:
+{
+  trackId: string;
+  deviceId: string;
+} | null
+
+Rules:
+- addInsertDevice creates device from registry defaultParams
+- id must be unique
+- order must follow current inserts length
+- newly added device becomes selected
+- adding device should switch bottom panel to Effect Editor if panel state supports it
+- removing selected device should select adjacent device or clear selection
+- updateInsertDeviceParams must update project state immutably
+
+Acceptance:
+[ ] Add device mutates track.inserts
+[ ] Remove device works
+[ ] Toggle bypass works
+[ ] Params persist after switching selected device
+[ ] Newly added device is selected
+[ ] TypeScript passes
+
+============================================================
+4. Add Device Popup Integration
+============================================================
+
+Fix the existing INSERTS plus button popup.
+
+Current popup has:
+- Add EQ
+- Add Compressor
+- Add Reverb
+- Add Delay
+- Add Saturation
+- Browse Devices
+- Plugin Manager
+
+Wire these actions:
+
+Add EQ -> addInsertDevice(trackId, "eq")
+Add Compressor -> addInsertDevice(trackId, "compressor")
+Add Reverb -> addInsertDevice(trackId, "reverb")
+Add Delay -> addInsertDevice(trackId, "delay")
+Add Saturation -> addInsertDevice(trackId, "saturation")
+
+Also add if reasonable:
+Add Optical Compressor
+Add Multiband Dynamics
+
+After adding:
+- close popup
+- select new device
+- switch bottom tab to Effect Editor if available
+
+Disabled:
+- Browse Devices disabled
+- Plugin Manager disabled
+
+Rules:
+- Popup must know which track/channel it belongs to
+- Do not add device to wrong track
+- If no track is selected, use the channel strip trackId that opened the popup
+
+Acceptance:
+[ ] Clicking Add EQ adds EQ to that channel
+[ ] Clicking Add Reverb adds Reverb to that channel
+[ ] Popup closes after add
+[ ] Effect Editor updates to selected device
+[ ] No refresh needed
+
+============================================================
+5. Mixer Insert Chain UI
+============================================================
+
+Update Mixer channel INSERTS section.
+
+Behavior:
+- If no inserts: show subtle "empty"
+- If inserts exist: show compact horizontal/vertical list inside channel strip
+- Each device item shows:
+  - icon
+  - shortName
+  - enabled/bypass state
+  - selected state
+  - small remove or context button if space allows
+
+Click device:
+- selectInsertDevice(trackId, deviceId)
+- switch bottom tab to Effect Editor if available
+
+Alt/Option click or small power button:
+- toggleInsertDevice
+
+Remove:
+- removeInsertDevice
+
+Do not make channel strip wider.
+
+Suggested compact display:
+[EQ]
+[Comp]
+[Verb]
+
+or rows:
+icon shortName power
+
+Acceptance:
+[ ] Added devices appear immediately in mixer insert section
+[ ] Clicking insert selects device
+[ ] Selected insert is visually highlighted
+[ ] Bypass state visible
+[ ] Remove works if implemented
+[ ] Empty state is clean
+
+============================================================
+6. Effect Editor Layout: Horizontal Only
+============================================================
+
+Rebuild Effect Editor as a horizontal device editor.
+
+Important:
+All plugin UIs must be horizontal and fit the bottom panel.
+No tall vertical plugin pages.
+No gallery cards as the primary UI.
+
+Effect Editor structure:
+
+EffectEditor
+├─ DeviceChainBar
+│  ├─ Add Device button
+│  ├─ Device chips in order
+│  ├─ Bypass toggle
+│  ├─ Remove
+│  └─ Selected highlight
+│
+└─ Horizontal Plugin Area
+   └─ Selected plugin UI
+
+Layout direction:
+- device chain bar at top of Effect Editor
+- plugin UI below it
+- plugin UI uses full width horizontally
+- plugin controls arranged left-to-right
+- scrolling should be horizontal only if needed, not giant vertical page
+
+Height:
+- Must work in current bottom panel height
+- Avoid requiring huge height
+- Use compact rows/sections
+
+Empty states:
+- No track selected: "Select a track to edit effects"
+- Track selected, no devices: "Add a device to start shaping this track"
+- Device selected: show plugin UI
+
+Acceptance:
+[ ] Effect Editor shows selected track's insert chain
+[ ] Effect Editor shows selected device plugin UI
+[ ] UI is horizontal
+[ ] No vertical full-page plugin cards
+[ ] Empty states are useful
+[ ] Mixer and Editor tabs still work
+
+============================================================
+7. PluginShell: Horizontal Device Shell
+============================================================
+
+Create or rebuild PluginShell.
+
+File:
+src/components/plugins/PluginShell.tsx
+
+Design:
+- horizontal compact shell
+- header strip on left or top
+- title, enabled toggle, preset placeholder
+- device content area fills width
+- no tall modal style
+
+Suggested layout:
+
+[Power] [Plugin Name] [Preset] [A/B] | controls horizontally...
+
+or:
+
+┌───────────────────────────────────────────────┐
+│ Power Name Preset A/B                         │
+├───────────────────────────────────────────────┤
+│ horizontal plugin controls                    │
+└───────────────────────────────────────────────┘
+
+Props:
+- device
+- definition
+- onToggleEnabled
+- onParamChange
+- children
+
+Rules:
+- Shell must be reusable
+- Shell must not own project state
+- Shell receives params and callbacks
+
+Acceptance:
+[ ] PluginShell is horizontal
+[ ] Bypass toggle works
+[ ] Preset button placeholder exists
+[ ] Children layout is compact
+
+============================================================
+8. Shared Plugin Controls
+============================================================
+
+Create controls that are compact and horizontal-friendly.
+
+File:
+src/components/plugins/PluginControls.tsx
+
+Components:
+- PluginKnob
+- PluginSlider
+- PluginMiniSlider
+- PluginToggle
+- PluginSegmented
+- PluginNumberBox
+- PluginSection
+- PluginMeter
+- PluginMiniGraph
+
+Requirements:
+- label 10-11px
+- value 10-11px
+- control fits compact DAW UI
+- no giant knobs
+- range input can be styled
+- knobs can be simple circular UI with drag/wheel later
+- must support controlled values
+
+Props:
+value
+min
+max
+step
+unit
+onChange
+
+Acceptance:
+[ ] Controls are reusable
+[ ] Controls are compact
+[ ] Controls update params through callbacks
+[ ] No local-only state unless purely UI hover/drag state
+
+============================================================
+9. Plugin UI Components: Horizontal, Usable, Connected
+============================================================
+
+Create plugin UIs that read/write InsertDevice params.
+
+Each plugin receives:
+type PluginViewProps = {
+  device: InsertDevice;
+  onParamChange: (patch: Record<string, number | string | boolean>) => void;
+  onToggleEnabled: () => void;
+};
+
+No plugin should keep core params only in local state.
+All parameter changes must call onParamChange.
+
+============================================================
+9.1 Parametric EQ
+============================================================
+
+Horizontal layout:
+- Left: EQ graph wide area
+- Right: compact band controls in rows or mini columns
+- Far right: output/analyzer controls
+
+Graph:
+- SVG or canvas placeholder
+- draw frequency grid
+- draw EQ curve placeholder
+- draw nodes from params
+- no drag required yet
+
+Controls:
+- HP enable
+- LP enable
+- Band freq/gain/Q for 4 bands
+- Output
+- Analyzer toggle
+
+Acceptance:
+[ ] EQ fills horizontal area
+[ ] Params update project state
+[ ] Graph responds visually to params if easy
+[ ] No vertical giant layout
+
+============================================================
+9.2 Compressor
+============================================================
+
+Horizontal layout:
+- Left: transfer curve
+- Center: threshold, ratio, attack, release, knee
+- Right: GR meter, makeup, mix, auto gain
+
+Controls:
+- threshold
+- ratio
+- attack
+- release
+- knee
+- makeup
+- mix
+- autoGain
+
+Acceptance:
+[ ] Compressor is usable in bottom panel
+[ ] Core controls are visible without vertical scrolling
+[ ] Params persist
+
+============================================================
+9.3 Reverb
+============================================================
+
+Horizontal layout:
+- Left: decay/space visualization
+- Center: size, decay, preDelay, damping
+- Right: width, lowCut, highCut, mix, output
+
+Controls:
+- size
+- decay
+- preDelay
+- damping
+- width
+- lowCut
+- highCut
+- mix
+- output
+
+Acceptance:
+[ ] Reverb UI is horizontal
+[ ] Main controls readable
+[ ] Params persist
+
+============================================================
+9.4 Delay
+============================================================
+
+Horizontal layout:
+- Left: delay tap visual
+- Center: sync, timeL, timeR, feedback, pingPong
+- Right: width, filters, mix, output
+
+Controls:
+- sync
+- timeL
+- timeR
+- feedback
+- pingPong
+- width
+- lowCut
+- highCut
+- mix
+- output
+
+Acceptance:
+[ ] Delay UI is horizontal
+[ ] Sync/time controls usable
+[ ] Params persist
+
+============================================================
+9.5 Saturation
+============================================================
+
+Horizontal layout:
+- Left: waveshaper curve
+- Center: drive, tone, character
+- Right: mix, output
+
+Controls:
+- drive
+- tone
+- character
+- mix
+- output
+
+Acceptance:
+[ ] Saturation UI exists
+[ ] Params persist
+[ ] Visual fits style
+
+============================================================
+9.6 Optical Compressor
+============================================================
+
+Horizontal layout:
+- Left: VU/GR meter
+- Center: peak reduction and gain
+- Right: mode, emphasis, mix, output, meter mode
+
+Controls:
+- peakReduction
+- gain
+- mode
+- emphasis
+- mix
+- output
+- meter
+
+Style:
+- subtle warm accent okay
+- no hardware clone
+- no copied branding
+
+Acceptance:
+[ ] Optical compressor UI exists
+[ ] Large but compact VU meter
+[ ] Params persist
+
+============================================================
+9.7 Multiband Dynamics
+============================================================
+
+Horizontal layout:
+- Left: macro controls depth, time, mix
+- Center: 3 horizontal band columns/lanes low/mid/high
+- Right: input/output/crossover controls
+
+Controls:
+- depth
+- time
+- input
+- output
+- mix
+- lowAmount
+- midAmount
+- highAmount
+- upward
+- downward
+- crossoverLow
+- crossoverHigh
+
+Acceptance:
+[ ] Multiband UI exists
+[ ] 3 bands are visible horizontally
+[ ] Params persist
+[ ] Does not look like a vertical dashboard
+
+============================================================
+10. Device Chain Bar
+============================================================
+
+Create DeviceChainBar.
+
+Shows selected track insert chain horizontally:
+
+[ + ] [EQ] [Comp] [Verb] [Delay]
+
+Device chip:
+- icon
+- shortName
+- enabled state
+- selected state
+- remove button on hover
+- drag handle placeholder if reorder not implemented
+
+Actions:
+- click chip selects device
+- power toggles enabled
+- x removes device
+- plus opens Add Device menu
+
+Acceptance:
+[ ] Chain bar shows inserts in order
+[ ] Selecting chip changes plugin UI
+[ ] Removing chip updates UI
+[ ] Adding chip updates UI
+[ ] Empty chain shows add prompt
+
+============================================================
+11. Reorder Insert Devices
+============================================================
+
+Implement basic reorder only if easy.
+
+Option A:
+- drag and drop chips
+
+Option B:
+- move left/right buttons in chip context menu
+
+If too much:
+- add store action and TODO UI
+
+Do not let reorder block the main integration.
+
+Acceptance:
+[ ] Existing order is stable
+[ ] Reorder action exists or TODO is clear
+[ ] No broken order values
+
+============================================================
+12. Inspector Integration
+============================================================
+
+Track inspector inserts section should reflect same devices.
+
+At minimum:
+- list inserts by short name
+- click selects insert device and opens Effect Editor
+- bypass toggle if easy
+
+Do not create separate insert state.
+
+Acceptance:
+[ ] Inspector insert list matches mixer insert list
+[ ] Selecting from inspector updates Effect Editor
+
+============================================================
+13. Menu / Command Integration
+============================================================
+
+Add commands if command registry exists:
+
+device.addEQ
+device.addCompressor
+device.addReverb
+device.addDelay
+device.addSaturation
+device.removeSelected
+device.toggleSelectedBypass
+device.selectNext
+device.selectPrevious
+
+Menu placement:
+Tools or Audio:
+- Add Device
+  - Parametric EQ
+  - Compressor
+  - Reverb
+  - Delay
+  - Saturation
+  - Optical Compressor
+  - Multiband Dynamics
+
+Enabled rules:
+- Add device commands enabled when a track is selected
+- Remove/toggle commands enabled when selected insert device exists
+
+Acceptance:
+[ ] Commands can add devices
+[ ] Menu item can add device to selected track
+[ ] No crash when no track selected
+
+============================================================
+14. Audio Engine Boundary
+============================================================
+
+Do not implement DSP.
+
+But add placeholder adapter calls if already exists:
+- audioEngine.addInsertDevice(trackId, device)
+- audioEngine.removeInsertDevice(trackId, deviceId)
+- audioEngine.setInsertParam(trackId, deviceId, param, value)
+- audioEngine.setInsertEnabled(trackId, deviceId, enabled)
+
+If adapter does not exist:
+- do not build full engine
+- add TODO comments
+- keep UI/store working
+
+Acceptance:
+[ ] UI/store works without DSP
+[ ] No runtime crash if engine methods absent
+
+============================================================
+15. Visual Rules
+============================================================
+
+Everything must look like Futureboard DAW.
+
+Rules:
+- dark native DAW style
+- compact
+- horizontal
+- 11-13px text
+- no giant plugin windows
+- no generic SaaS cards
+- no vertical full-page controls
+- no random colors
+- no overdone gradients
+- no hardware clone
+- no copied plugin branding
+
+Use:
+- existing theme tokens
+- current border/surface/accent colors
+- DawIcon registry
+- compact controls
+
+============================================================
+16. State Rules
+============================================================
+
+The state flow must be:
+
+Add Device Menu
+→ addInsertDevice(trackId, type)
+→ project.tracks[].inserts updated
+→ selectedInsertDevice updated
+→ Mixer insert list renders device
+→ DeviceChainBar renders device
+→ Effect Editor renders selected plugin
+→ Plugin controls update device.params
+→ UI persists params when switching devices/tabs
+
+Any other state flow is wrong.
+
+Acceptance:
+[ ] This full flow works
+
+============================================================
+17. Testing Checklist
+============================================================
+
+Manual test:
+
+1. Create or select Audio Track 1
+2. Open Mixer tab
+3. Click INSERTS +
+4. Add EQ
+5. Confirm EQ appears in mixer insert list
+6. Confirm Effect Editor opens/shows EQ
+7. Change EQ parameter
+8. Switch to Mixer and back
+9. Confirm parameter persists
+10. Add Compressor
+11. Confirm chain shows EQ -> Comp
+12. Select EQ/Comp from chain
+13. Remove EQ
+14. Confirm chain updates
+15. Add Reverb and Delay
+16. Confirm all devices render horizontally
+17. Select another track
+18. Confirm different track has separate insert chain
+
+Acceptance:
+[ ] All manual steps pass
+
+============================================================
+18. Build
+============================================================
+
+Run:
+bun run build
+
+Fix TypeScript errors.
+
+Avoid TypeScript syntax incompatible with erasableSyntaxOnly.
+
+============================================================
+19. Final Acceptance Checklist
+============================================================
+
+[ ] Built-in device registry exists
+[ ] InsertDevice model exists
+[ ] track.inserts is the source of truth
+[ ] Store actions exist
+[ ] Add Device popup mutates track.inserts
+[ ] Mixer insert list updates
+[ ] DeviceChainBar updates
+[ ] Effect Editor shows selected plugin
+[ ] Plugin controls update device.params
+[ ] Params persist when switching
+[ ] All plugin UIs are horizontal
+[ ] No DSP added
+[ ] No duplicate fake state
+[ ] Inspector optionally reflects inserts
+[ ] Commands/menu optionally add devices
+[ ] TypeScript passes
+[ ] App runs in Electron
+
+Important:
+This is a rebuild/integration pass.
+Focus on real UI/state wiring.
+Every plugin UI must be horizontal and usable in the bottom Effect Editor.
+No mock gallery-only UI.
+No DSP.
+No unrelated redesign.
