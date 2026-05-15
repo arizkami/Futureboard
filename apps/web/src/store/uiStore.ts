@@ -25,6 +25,20 @@ export type PanelLayout = {
   maxSize: number;
 };
 
+export type DOMRectLike = { x: number; y: number; width: number; height: number; left: number; top: number; right: number; bottom: number };
+
+export type MarqueeSelectionState = {
+  active: boolean;
+  pointerId: number;
+  startClientX: number;
+  startClientY: number;
+  currentClientX: number;
+  currentClientY: number;
+  rect: DOMRectLike;
+  affectedClipIds: string[];
+  affectedTrackIds: string[];
+};
+
 type UIStore = {
   pixelsPerSecond: number;
   scrollX: number;
@@ -82,6 +96,9 @@ type UIStore = {
   // Project save status — driven by App-level save/dirty detection
   saveStatus: "saved" | "unsaved" | "saving" | "error";
   setSaveStatus: (status: UIStore["saveStatus"]) => void;
+  // Marquee Selection gesture
+  marqueeSelection: MarqueeSelectionState | null;
+  setMarqueeSelection: (marqueeSelection: MarqueeSelectionState | null) => void;
 };
 
 export const useUIStore = create<UIStore>((set) => ({
@@ -173,4 +190,6 @@ export const useUIStore = create<UIStore>((set) => ({
   })),
   saveStatus: "saved",
   setSaveStatus: (saveStatus) => set({ saveStatus }),
+  marqueeSelection: null,
+  setMarqueeSelection: (marqueeSelection) => set({ marqueeSelection }),
 }));

@@ -4,12 +4,14 @@ import { useProjectStore } from "../../store/projectStore";
 import { useUIStore } from "../../store/uiStore";
 import { useHistoryStore } from "../../store/historyStore";
 import {
+  DuplicateClipsCommand,
   GlueClipsCommand,
   MoveClipCommand,
   ResizeClipCommand,
   SplitClipCommand,
   UpdateClipCommand,
 } from "../../commands";
+import { isPrimaryModifier } from "../../hooks/useModifierKeys";
 import { TRACK_HEIGHT } from "../../theme";
 import { formatBeatLength, secondsPerBeat, snapTime } from "../../utils/musicalTime";
 import { showToast } from "../ui/Toast";
@@ -169,9 +171,17 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
   };
 
   // ── Pointer drag ──────────────────────────────────────────────────────────
-  const startPointerDrag = (e: React.MouseEvent) => {
+  const startPointerDrag = (e: React.PointerEvent) => {
+    const primaryMod = isPrimaryModifier(e);
+
     if (e.shiftKey) {
       useUIStore.getState().toggleClipSelection(clip.id);
+    } else if (primaryMod) {
+      if (!selectedClipIds.includes(clip.id)) {
+        useUIStore.getState().setSelectedClipIds([...selectedClipIds, clip.id]);
+      }
+      // ABORT: Primary modifier + drag is reserved for the global Snip gesture in Timeline.tsx.
+      return;
     } else if (!selectedClipIds.includes(clip.id)) {
       useUIStore.getState().setSelectedClipIds([clip.id]);
     }
@@ -183,9 +193,45 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
     dragStartTime.current = clip.startTime;
     setDragging(true);
 
+    let draggedClipId = clip.id;
+    let draggedTrackId = clip.trackId;
+    let duplicated = false;
     let lastSeconds = clip.startTime;
 
     const onMove = (ev: MouseEvent) => {
+      // Duplicate on threshold when Alt was held at drag start.
+      const altPressed = ev.altKey;
+      if (altPressed && !duplicated && Math.abs(ev.clientX - dragStartX.current) >= 4) {
+        duplicated = true;
+        const ui = useUIStore.getState();
+        const clipsToDup = ui.selectedClipIds.includes(clip.id)
+          ? ui.selectedClipIds
+          : [clip.id];
+
+        const cmd = new DuplicateClipsCommand(clipsToDup);
+        useHistoryStore.getState().execute(cmd);
+        const newIds = cmd.newClipIds;
+
+        const dupClip = useProjectStore.getState().project.tracks
+          .flatMap((t) => t.clips)
+          .find(
+            (c) =>
+              newIds.includes(c.id) &&
+              c.trackId === clip.trackId &&
+              Math.abs(c.startTime - (clip.startTime + clip.duration)) < 0.001,
+          );
+
+        if (dupClip) {
+          moveClip(dupClip.id, dupClip.trackId, clip.startTime);
+          draggedClipId  = dupClip.id;
+          draggedTrackId = dupClip.trackId;
+          dragStartTime.current = clip.startTime;
+          dragStartX.current    = ev.clientX;
+        }
+
+        ui.setSelectedClipIds(newIds);
+      }
+
       let t = Math.max(
         0,
         dragStartTime.current + (ev.clientX - dragStartX.current) / pixelsPerSecond,
@@ -195,7 +241,7 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
         t = snapTime(t, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb);
       }
       lastSeconds = t;
-      moveClip(clip.id, clip.trackId, t);
+      moveClip(draggedClipId, draggedTrackId, t);
 
       const slot = Math.round((ev.clientY - dragStartY.current) / TRACK_HEIGHT);
       useUIStore.getState().setDraggingClipTargetIdx(Math.max(0, Math.min(allTracks.length - 1, trackIndex + slot)));
@@ -210,20 +256,20 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
       const slot        = Math.round((ev.clientY - dragStartY.current) / TRACK_HEIGHT);
       const idx         = Math.max(0, Math.min(allTracks.length - 1, trackIndex + slot));
       const targetTrack = allTracks[idx];
-      const crossTrack  = targetTrack && targetTrack.id !== track.id;
+      const crossTrack  = targetTrack && targetTrack.id !== draggedTrackId;
 
       if (crossTrack) {
         const currentTime = useProjectStore.getState().project.tracks
-          .flatMap((t) => t.clips).find((c) => c.id === clip.id)?.startTime ?? lastSeconds;
-        moveClipToTrack(clip.id, targetTrack.id, currentTime);
+          .flatMap((t) => t.clips).find((c) => c.id === draggedClipId)?.startTime ?? lastSeconds;
+        moveClipToTrack(draggedClipId, targetTrack.id, currentTime);
       }
 
       useHistoryStore.getState().push(
         new MoveClipCommand(
-          clip.id, clip.trackId,
+          draggedClipId, draggedTrackId,
           lastSeconds, dragStartTime.current,
           crossTrack ? targetTrack.id : undefined,
-          crossTrack ? track.id       : undefined,
+          crossTrack ? draggedTrackId : undefined,
         ),
       );
     };
@@ -232,26 +278,33 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
     window.addEventListener("mouseup", onUp);
   };
 
-  // ── Main mouseDown dispatcher ─────────────────────────────────────────────
-  const handleMouseDown = (e: React.MouseEvent) => {
+  // ── Main pointerDown dispatcher ─────────────────────────────────────────────
+  const handlePointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
-    e.stopPropagation();
 
     const tool = useUIStore.getState().currentTool;
 
-    if (tool === "cut")  { handleCutTool(e); return; }
-    if (tool === "mute") { handleMuteTool();  return; }
-    if (tool === "glue") { handleGlueTool();  return; }
-    if (tool === "time") { handleTimeTool();  return; }
+    if (tool === "cut")  { e.stopPropagation(); handleCutTool(e); return; }
+    if (tool === "mute") { e.stopPropagation(); handleMuteTool();  return; }
+    if (tool === "glue") { e.stopPropagation(); handleGlueTool();  return; }
+    if (tool === "time") { e.stopPropagation(); handleTimeTool();  return; }
 
     if (tool === "pen") {
+      e.stopPropagation();
       if (!selectedClipIds.includes(clip.id)) useUIStore.getState().setSelectedClipIds([clip.id]);
       useUIStore.getState().setSelectedTrackId(track.id);
       useUIStore.getState().setFocusedPanel("timeline");
       return;
     }
 
-    startPointerDrag(e);
+    if (tool === "pointer") {
+      if (isPrimaryModifier(e)) {
+        startPointerDrag(e);
+      } else {
+        e.stopPropagation();
+        startPointerDrag(e);
+      }
+    }
   };
 
   // ── Resize left ───────────────────────────────────────────────────────────
@@ -338,7 +391,9 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
 
   return (
     <div
-      onMouseDown={handleMouseDown}
+      data-clip-id={clip.id}
+      data-track-id={track.id}
+      onPointerDown={handlePointerDown}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();

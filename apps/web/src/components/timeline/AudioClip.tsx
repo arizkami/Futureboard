@@ -165,7 +165,7 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
   };
 
   // ── Pointer drag ──────────────────────────────────────────────────────────
-  const startPointerDrag = (e: React.MouseEvent) => {
+  const startPointerDrag = (e: React.PointerEvent) => {
     const primaryMod = isPrimaryModifier(e);
 
     // Selection at mousedown:
@@ -176,12 +176,19 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
       if (!selectedClipIds.includes(clip.id)) {
         useUIStore.getState().setSelectedClipIds([...selectedClipIds, clip.id]);
       }
+      // ABORT: Primary modifier + drag is reserved for the global Snip gesture in Timeline.tsx.
+      // We only perform the selection toggle and then let the event bubble up.
+      return;
     } else if (!selectedClipIds.includes(clip.id)) {
       useUIStore.getState().setSelectedClipIds([clip.id]);
     }
     useUIStore.getState().setSelectedTrackId(track.id);
     useUIStore.getState().setFocusedPanel("timeline");
 
+    // Capture the event to prevent bubbling when we ARE dragging.
+    // (We didn't return early above, so we are in a normal or Alt-duplicate drag).
+    // Actually, we use stopPropagation in the caller handlePointerDown.
+    
     dragStartX.current    = e.clientX;
     dragStartY.current    = e.clientY;
     dragStartTime.current = clip.startTime;
@@ -193,8 +200,9 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
     let lastSeconds = clip.startTime;
 
     const onMove = (ev: MouseEvent) => {
-      // Duplicate on threshold when primary modifier was held at drag start.
-      if (primaryMod && !duplicated && Math.abs(ev.clientX - dragStartX.current) >= 4) {
+      // Duplicate on threshold when Alt was held at drag start.
+      const altPressed = ev.altKey;
+      if (altPressed && !duplicated && Math.abs(ev.clientX - dragStartX.current) >= 4) {
         duplicated = true;
         const ui = useUIStore.getState();
         const clipsToDup = ui.selectedClipIds.includes(clip.id)
@@ -274,20 +282,20 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
     window.addEventListener("mouseup", onUp);
   };
 
-  // ── Main mouseDown dispatcher ─────────────────────────────────────────────
-  const handleMouseDown = (e: React.MouseEvent) => {
+  // ── Main pointerDown dispatcher ─────────────────────────────────────────────
+  const handlePointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
-    e.stopPropagation();
 
     const tool = useUIStore.getState().currentTool;
 
-    if (tool === "cut")  { handleCutTool(e); return; }
-    if (tool === "mute") { handleMuteTool();  return; }
-    if (tool === "glue") { handleGlueTool();  return; }
-    if (tool === "time") { handleTimeTool();  return; }
+    if (tool === "cut")  { e.stopPropagation(); handleCutTool(e); return; }
+    if (tool === "mute") { e.stopPropagation(); handleMuteTool();  return; }
+    if (tool === "glue") { e.stopPropagation(); handleGlueTool();  return; }
+    if (tool === "time") { e.stopPropagation(); handleTimeTool();  return; }
 
     // pen tool on existing clip falls through to pointer (select, no drag)
     if (tool === "pen") {
+      e.stopPropagation();
       if (!selectedClipIds.includes(clip.id)) useUIStore.getState().setSelectedClipIds([clip.id]);
       useUIStore.getState().setSelectedTrackId(track.id);
       useUIStore.getState().setFocusedPanel("timeline");
@@ -295,7 +303,17 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
     }
 
     // pointer (default) — full drag behavior
-    startPointerDrag(e);
+    if (tool === "pointer") {
+      if (isPrimaryModifier(e)) {
+        // DO NOT stop propagation here if Ctrl/Cmd is held.
+        // We want the event to bubble up to Timeline.tsx so it can start the Snip gesture
+        // if the user drags. We still call startPointerDrag to handle the selection toggle.
+        startPointerDrag(e);
+      } else {
+        e.stopPropagation();
+        startPointerDrag(e);
+      }
+    }
   };
 
   // ── Resize left ───────────────────────────────────────────────────────────
@@ -382,7 +400,9 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
 
   return (
     <div
-      onMouseDown={handleMouseDown}
+      data-clip-id={clip.id}
+      data-track-id={track.id}
+      onPointerDown={handlePointerDown}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();

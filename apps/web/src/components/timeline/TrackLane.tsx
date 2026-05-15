@@ -8,6 +8,7 @@ import { snapTime, secondsPerBeat } from "../../utils/musicalTime";
 import { useProjectStore } from "../../store/projectStore";
 import { useHistoryStore } from "../../store/historyStore";
 import { AddClipCommand } from "../../commands";
+import { isPrimaryModifier } from "../../hooks/useModifierKeys";
 import { addFileToTimeline, decodeAndAddAudioFile } from "../../utils/importAudioToProject";
 import { showToast } from "../ui/Toast";
 import { useState } from "react";
@@ -121,14 +122,21 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
     }
 
     if (currentTool === "automation") {
+      e.stopPropagation();
       selectTrack();
       return;
     }
 
     // pointer / cut / glue / mute / time — lane click selects track, clears clips
-    useUIStore.getState().setSelectedTrackId(track.id);
-    useUIStore.getState().setSelectedClipIds([]);
-    useUIStore.getState().setFocusedPanel("timeline");
+    if (isPrimaryModifier(e)) {
+      // DO NOT stop propagation here if Ctrl/Cmd is held.
+      // We want the event to bubble up to Timeline.tsx so it can start the Snip gesture.
+      selectTrack();
+    } else {
+      e.stopPropagation();
+      useUIStore.getState().setSelectedClipIds([]);
+      selectTrack();
+    }
   };
 
   return (

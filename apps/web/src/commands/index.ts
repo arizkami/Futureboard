@@ -409,6 +409,35 @@ export class SplitClipCommand implements DawCommand {
   }
 }
 
+export class SplitClipsCommand implements DawCommand {
+  readonly label: string;
+  private commands: SplitClipCommand[] = [];
+  /** IDs of the newly created right-side clips */
+  newClipIds: string[] = [];
+
+  constructor(clipIds: string[], time: number) {
+    this.label = clipIds.length === 1 ? "Split Clip" : `Split ${clipIds.length} Clips`;
+    this.commands = clipIds.map(id => new SplitClipCommand(id, time));
+  }
+
+  execute() {
+    const before = new Set(
+      store().project.tracks.flatMap((t) => t.clips.map((c) => c.id)),
+    );
+    
+    this.commands.forEach(cmd => cmd.execute());
+    
+    this.newClipIds = store()
+      .project.tracks.flatMap((t) => t.clips.map((c) => c.id))
+      .filter((id) => !before.has(id));
+  }
+
+  undo() {
+    // Undo in reverse order
+    [...this.commands].reverse().forEach(cmd => cmd.undo());
+  }
+}
+
 export class DeleteClipsCommand implements DawCommand {
   readonly label: string;
   private clipIds: string[];

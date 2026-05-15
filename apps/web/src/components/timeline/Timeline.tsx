@@ -6,8 +6,9 @@ import { TimelineRuler } from "./TimelineRuler";
 import { TrackList } from "./TrackList";
 import { Playhead } from "./Playhead";
 import { FloatingToolsBar } from "./FloatingToolsBar";
-import { useUIStore, type ArrangementTool } from "../../store/uiStore";
+import { useUIStore, type ArrangementTool, type MarqueeSelectionState } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
+import { isPrimaryModifier } from "../../hooks/useModifierKeys";
 import { secondsPerBeat, snapTime, timelineXToTime } from "../../utils/musicalTime";
 import { decodeAndAddAudioFile, addFileToTimeline } from "../../utils/importAudioToProject";
 import { TIMELINE_Z } from "../../utils/timelineZ";
@@ -19,7 +20,7 @@ export function Timeline() {
   const [addTrackOpen, setAddTrackOpen] = useState(false);
   const [dropHighlight, setDropHighlight] = useState(false);
   const fileDragDepth = useRef(0);
-  const { pixelsPerSecond, setPixelsPerSecond, setScrollX, snapToGrid, toggleSnapToGrid, currentTool } = useUIStore();
+  const { pixelsPerSecond, setPixelsPerSecond, setScrollX, snapToGrid, toggleSnapToGrid, currentTool, marqueeSelection, setMarqueeSelection } = useUIStore();
 
   const TOOL_CURSOR: Record<ArrangementTool, string> = {
     pointer:    "default",
@@ -32,6 +33,7 @@ export function Timeline() {
   };
   const { tracks, bpm } = useProjectStore((s) => s.project);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const timelineRef = useRef<HTMLDivElement>(null);
 
   const isFileDrag = (e: React.DragEvent) => {
     const types = [...e.dataTransfer.types];
@@ -120,6 +122,114 @@ export function Timeline() {
     }
   };
 
+  // ── Marquee Selection Gesture ───────────────────────────────────────────────
+  const possibleMarquee = useRef<{ x: number; y: number; initialSelection: string[] } | null>(null);
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    if (currentTool !== "pointer") return;
+    if (!isPrimaryModifier(e)) return;
+
+    possibleMarquee.current = {
+      x: e.clientX,
+      y: e.clientY,
+      initialSelection: e.shiftKey ? useUIStore.getState().selectedClipIds : [],
+    };
+  };
+
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (possibleMarquee.current && !marqueeSelection) {
+      const dx = e.clientX - possibleMarquee.current.x;
+      const dy = e.clientY - possibleMarquee.current.y;
+      if (Math.sqrt(dx * dx + dy * dy) > 4) {
+        setMarqueeSelection({
+          active: true,
+          pointerId: e.pointerId,
+          startClientX: possibleMarquee.current.x,
+          startClientY: possibleMarquee.current.y,
+          currentClientX: e.clientX,
+          currentClientY: e.clientY,
+          rect: { x: 0, y: 0, width: 0, height: 0, left: 0, top: 0, right: 0, bottom: 0 },
+          affectedClipIds: [...possibleMarquee.current.initialSelection],
+          affectedTrackIds: [],
+        });
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }
+    }
+
+    if (marqueeSelection && possibleMarquee.current) {
+      const startX = marqueeSelection.startClientX;
+      const startY = marqueeSelection.startClientY;
+      const currentX = e.clientX;
+      const currentY = e.clientY;
+
+      const rect = {
+        left: Math.min(startX, currentX),
+        top: Math.min(startY, currentY),
+        right: Math.max(startX, currentX),
+        bottom: Math.max(startY, currentY),
+        width: Math.abs(currentX - startX),
+        height: Math.abs(currentY - startY),
+        x: Math.min(startX, currentX),
+        y: Math.min(startY, currentY),
+      };
+
+      // Hit test all clips in the DOM
+      const intersectingClipIds = new Set<string>();
+      const clipElements = document.querySelectorAll("[data-clip-id]");
+
+      for (let i = 0; i < clipElements.length; i++) {
+        const el = clipElements[i] as HTMLElement;
+        const elRect = el.getBoundingClientRect();
+        
+        const intersects =
+          rect.left < elRect.right &&
+          rect.right > elRect.left &&
+          rect.top < elRect.bottom &&
+          rect.bottom > elRect.top;
+
+        if (intersects) {
+          const id = el.getAttribute("data-clip-id");
+          if (id) intersectingClipIds.add(id);
+        }
+      }
+
+      const newSelection = new Set([
+        ...possibleMarquee.current.initialSelection,
+        ...Array.from(intersectingClipIds)
+      ]);
+
+      setMarqueeSelection({
+        ...marqueeSelection,
+        currentClientX: currentX,
+        currentClientY: currentY,
+        rect,
+        affectedClipIds: Array.from(newSelection),
+      });
+
+      // Visually update the selection during drag without committing
+      useUIStore.getState().setSelectedClipIds(Array.from(newSelection));
+    }
+  };
+
+  const onPointerUp = (e: React.PointerEvent) => {
+    if (marqueeSelection) {
+      // The selection is already updated in the store during onPointerMove.
+      setMarqueeSelection(null);
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    possibleMarquee.current = null;
+  };
+
+  const onPointerCancel = () => {
+    if (marqueeSelection && possibleMarquee.current) {
+      // Revert selection if cancelled
+      useUIStore.getState().setSelectedClipIds(possibleMarquee.current.initialSelection);
+    }
+    possibleMarquee.current = null;
+    setMarqueeSelection(null);
+  };
+
   // ── Global safety reset ─────────────────────────────────────────────────────
   // Covers cases where React's drop/dragleave never fires:
   //  - drop handled by a descendant (e.g. TrackLane) that calls stopPropagation
@@ -128,7 +238,11 @@ export function Timeline() {
   //  - window loses focus
   // Use CAPTURE phase so descendants' stopPropagation cannot block these.
   useEffect(() => {
-    const reset = () => resetDragState();
+    const reset = () => {
+      resetDragState();
+      setMarqueeSelection(null);
+      possibleMarquee.current = null;
+    };
     window.addEventListener("dragend", reset, true);
     window.addEventListener("drop", reset, true);
     window.addEventListener("blur", reset);
@@ -144,7 +258,7 @@ export function Timeline() {
       document.removeEventListener("mouseleave", reset);
       window.removeEventListener("keydown", onKey);
     };
-  }, [resetDragState]);
+  }, [resetDragState, setMarqueeSelection]);
 
   // Keep a stable ref so the wheel handler never goes stale
   const ppsRef = useRef(pixelsPerSecond);
@@ -198,6 +312,10 @@ export function Timeline() {
       onDragLeave={onTimelineDragLeave}
       onDragOver={onTimelineDragOver}
       onDrop={onTimelineDrop}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
     >
       {dropHighlight && (
         <div
@@ -210,6 +328,8 @@ export function Timeline() {
           </span>
         </div>
       )}
+
+      {marqueeSelection && <MarqueeSelectionOverlay state={marqueeSelection} containerRect={timelineRef.current?.getBoundingClientRect() || null} />}
 
       <TimelineRuler
         width={timelineWidth}
@@ -265,6 +385,27 @@ export function Timeline() {
         >
           <ZoomIn size={12} />
         </button>
+      </div>
+    </div>
+  );
+}
+
+function MarqueeSelectionOverlay({ state, containerRect }: { state: MarqueeSelectionState, containerRect: DOMRect | null }) {
+  if (!state.rect || !containerRect) return null;
+
+  return (
+    <div
+      className="pointer-events-none absolute border border-cyan-400 bg-cyan-400/20 shadow-[0_0_12px_rgba(34,211,238,0.2)]"
+      style={{
+        left: state.rect.left - containerRect.left,
+        top: state.rect.top - containerRect.top,
+        width: state.rect.width,
+        height: state.rect.height,
+        zIndex: TIMELINE_Z.modal,
+      }}
+    >
+      <div className="absolute top-0 left-0 rounded-br-sm bg-cyan-500/80 px-1 py-[1px] text-[8px] font-bold text-black uppercase">
+        Select
       </div>
     </div>
   );
