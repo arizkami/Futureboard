@@ -7,6 +7,8 @@
     "dev": "vite",
     "build:audio:wasm": "wasm-pack build ../../frameworks/SphereWebAudioCore --target web --out-dir ../../apps/web/src/engine/wasm-pkg",
     "build": "tsc -b && vite build",
+    "build:audio:wasm:prod": "curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh && cd ../../frameworks/SphereWebAudioCore && wasm-pack build --target web --out-dir ../../apps/web/src/wasm/audio",
+    "vercel-build": "bun run build:audio:wasm:prod && bun run build:web",
     "lint": "eslint .",
     "preview": "vite preview"
   },
