@@ -4,7 +4,8 @@
   "type": "module",
   "workspaces": [
     "apps/*",
-    "packages/*"
+    "packages/*",
+    "frameworks/*"
   ],
   "scripts": {
     "dev:web": "bun run --cwd apps/web dev",
