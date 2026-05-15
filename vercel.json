@@ -1,0 +1,7 @@
+{
+  "scripts": {
+    "build:audio:wasm": "curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh && cd frameworks/SphereWebAudioCore && wasm-pack build --target web --out-dir ../../apps/web/src/wasm/audio",
+    "build:web": "cd apps/web && bun run build",
+    "vercel-build": "bun run build:audio:wasm && bun run build:web"
+  }
+}

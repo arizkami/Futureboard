@@ -7,8 +7,12 @@ import { WindowHost } from "./components/windows/WindowHost";
 import { audioEngine } from "./engine/AudioEngine";
 import { transport } from "./engine/Transport";
 import { metronomeScheduler } from "./engine/MetronomeScheduler";
+import { webAudioEngineAdapter } from "./engine/WebAudioEngineAdapter";
 import { useProjectStore } from "./store/projectStore";
 import { useUIStore } from "./store/uiStore";
+import { audioProcessingService } from "./audio/AudioProcessingService";
+import { audioCacheManager } from "./audio/AudioCacheManager";
+import { buildDecodedCacheKey } from "./audio/audioCacheKeys";
 import { useMetronomeStore } from "./store/metronomeStore";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { importAudioFilesAsNewTracks } from "./utils/importAudioToProject";
@@ -38,6 +42,10 @@ metronomeScheduler.setConfigGetter(() => {
 export default function App() {
   const { setPeaks, loadLocal, project } = useProjectStore();
   useKeyboardShortcuts();
+
+  useEffect(() => {
+    webAudioEngineAdapter.init().catch(console.error);
+  }, []);
 
   const handleImportClick = async () => {
     try {
@@ -90,6 +98,47 @@ export default function App() {
     };
     window.addEventListener("wheel", blockRootZoom, { passive: false, capture: true });
     return () => window.removeEventListener("wheel", blockRootZoom, { capture: true });
+  }, []);
+
+  // Dev debug helper — only installed in development builds.
+  useEffect(() => {
+    if (import.meta.env.DEV) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).__futureboardAudioDebug = {
+        testTsPitch: async (semitones = 12) => {
+          const _semitones = semitones;
+          const sine = new Float32Array(44100).map((_, i) => Math.sin(i * 0.01));
+          const decoded = { fileId: "test", sampleRate: 44100, channels: 1, length: sine.length, duration: 1, channelData: [sine] };
+          const result = await audioProcessingService.processClipAudio(decoded, { speedRatio: 1, pitchSemitones: _semitones, preservePitch: true, quality: "draft" });
+          console.log(`[Debug] TS pitch ${_semitones}st → length ${result.length}`);
+          return result;
+        },
+        testRustPitch: async (_semitones = 12) => {
+          const { ensureRustDsp, isRustDspReady } = await import("./audio/RustDspProcessor");
+          await ensureRustDsp();
+          console.log("[Debug] Rust DSP ready:", isRustDspReady());
+          return audioProcessingService.getProcessingCapabilities();
+        },
+        testProcessSelectedClip: async () => {
+          const { project } = useProjectStore.getState();
+          const { selectedClipIds } = useUIStore.getState();
+          const clipId = selectedClipIds[0];
+          if (!clipId) { console.warn("[Debug] No clip selected"); return; }
+          const clip = project.tracks.flatMap((t) => t.clips).find((c) => c.id === clipId);
+          if (!clip || !clip.audioProcess) { console.warn("[Debug] No audioProcess on clip"); return; }
+          const loaded = audioEngine.getBuffer(clip.fileId);
+          if (!loaded) { console.warn("[Debug] Buffer not loaded for", clip.fileId); return; }
+          const key = buildDecodedCacheKey(clip.fileId, loaded.audioBuffer.sampleRate);
+          const decoded = audioCacheManager.getDecodedAudio(key);
+          if (!decoded) { console.warn("[Debug] No decoded audio in cache for", clip.fileId); return; }
+          const result = await audioProcessingService.processClipAudio(decoded, clip.audioProcess);
+          console.log(`[Debug] Processed clip "${clip.name}": ${result.length} samples, ${result.duration.toFixed(3)}s`);
+          return result;
+        },
+        cacheStats: () => audioCacheManager.getStats?.(),
+      };
+      console.debug("[Debug] window.__futureboardAudioDebug installed");
+    }
   }, []);
 
   // After project files are known, restore their AudioBuffers from IndexedDB

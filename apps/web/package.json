@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "build:audio:wasm": "wasm-pack build ../../frameworks/SphereWebAudioCore --target web --out-dir ../../apps/web/src/engine/wasm-pkg",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"

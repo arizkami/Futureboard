@@ -4,6 +4,7 @@ import { FloatingWindow } from "./FloatingWindow";
 import { DialogWindow } from "./DialogWindow";
 import { ProjectWizard } from "../project/ProjectWizard";
 import { UnsavedChangesDialog } from "./UnsavedChangesDialog";
+import { SettingsDialog } from "../settings/SettingsDialog";
 
 export function WindowHost() {
   const { windows, closeWindow, focusWindow, updateWindowBounds } = useWindowStore();
@@ -49,12 +50,19 @@ type ContentProps = {
   payload?: Record<string, unknown>;
 };
 
-function WindowContent({ contentType, id }: ContentProps) {
+function WindowContent({ contentType, id, payload }: ContentProps) {
   switch (contentType) {
     case "projectWizard":
       return <ProjectWizard windowId={id} />;
     case "unsavedChanges":
       return <UnsavedChangesDialog windowId={id} />;
+    case "preferences":
+      return (
+        <SettingsDialog
+          windowId={id}
+          initialTab={(payload?.initialTab as "general" | "audio" | "midi" | "project" | "appearance" | "advanced") ?? "general"}
+        />
+      );
     default:
       return (
         <div className="flex items-center justify-center h-full text-[11px] text-daw-text-muted">

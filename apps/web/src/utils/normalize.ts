@@ -2,7 +2,7 @@
  * Normalization helpers — fill in default values for older project state
  * so UI and engine code never crash on missing fields.
  */
-import type { DawProject, DawTrack, DawClip, InsertDevice, TrackSend, ProjectLoop, ProjectMarker, AutomationLane, AutomationPoint } from "../types/daw";
+import type { DawProject, DawTrack, DawClip, InsertDevice, TrackSend, ProjectLoop, ProjectMarker, AutomationLane, AutomationPoint, AudioClipProcess } from "../types/daw";
 
 export function normalizeLoop(raw: Partial<ProjectLoop> | undefined): ProjectLoop | undefined {
   if (!raw) return undefined;
@@ -103,11 +103,29 @@ export function normalizeTrack(raw: Partial<DawTrack>): DawTrack {
   };
 }
 
+export const DEFAULT_AUDIO_PROCESS: AudioClipProcess = {
+  speedRatio: 1,
+  pitchSemitones: 0,
+  preservePitch: true,
+  quality: "balanced",
+};
+
+function normalizeAudioProcess(raw?: Partial<AudioClipProcess>): AudioClipProcess {
+  if (!raw) return DEFAULT_AUDIO_PROCESS;
+  return {
+    speedRatio: Math.max(0.25, Math.min(4, raw.speedRatio ?? 1)),
+    pitchSemitones: Math.max(-24, Math.min(24, raw.pitchSemitones ?? 0)),
+    preservePitch: raw.preservePitch ?? true,
+    quality: raw.quality ?? "balanced",
+  };
+}
+
 export function normalizeClip(raw: Partial<DawClip>): DawClip {
+  const clipType = raw.type ?? (raw.fileId ? "audio" : "midi");
   return {
     id: raw.id ?? crypto.randomUUID(),
     name: raw.name ?? "Clip",
-    type: raw.type ?? (raw.fileId ? "audio" : "midi"),
+    type: clipType,
     fileId: raw.fileId ?? "",
     trackId: raw.trackId ?? "",
     startTime: raw.startTime ?? 0,
@@ -120,6 +138,9 @@ export function normalizeClip(raw: Partial<DawClip>): DawClip {
     muted: raw.muted ?? false,
     locked: raw.locked ?? false,
     notes: raw.notes ?? [],
+    audioProcess: clipType === "audio"
+      ? normalizeAudioProcess(raw.audioProcess)
+      : undefined,
   };
 }
 

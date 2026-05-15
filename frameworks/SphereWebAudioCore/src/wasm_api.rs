@@ -1,129 +1,225 @@
-//! WASM bindings for the DSP engine.
+//! WASM bindings — struct-based, numeric-only interface.
 //!
-//! Exports functions via wasm-bindgen for use from JavaScript/TypeScript.
-//! Commands and results use JSON serialization for the first pass.
+//! Uses a `WasmAudioEngine` struct instead of global JSON functions.
+//! All exported methods use numeric primitive types and typed arrays only.
+//! This means **TextEncoder and TextDecoder are not required** at the WASM
+//! boundary, avoiding `ReferenceError: TextEncoder is not defined` in
+//! AudioWorklet contexts where those globals may be absent.
 //!
-//! Uses thread_local storage since WASM runs single-threaded in an
-//! AudioWorklet context.
+//! # WASM export name convention (wasm-bindgen)
+//! Struct `WasmAudioEngine` → prefix `wasmaudioengine`
+//! Method `play` → export `wasmaudioengine_play`
+//! Constructor `new` → export `wasmaudioengine_new`
+//! Drop → export `__wbg_wasmaudioengine_free`
 
-use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
 
-use crate::commands::{CommandResult, EngineCommand};
+use crate::commands::EngineCommand;
+use crate::dsp::{granular::time_stretch_granular, pitch::pitch_shift_draft, resample::resample_linear};
 use crate::engine::{DspEngine, EngineConfig};
 
-thread_local! {
-    static ENGINE: RefCell<Option<DspEngine>> = RefCell::new(None);
+// ── Standalone DSP exports ────────────────────────────────────────────────────
+
+/// Resample a mono f32 buffer by speed_ratio.
+/// speed_ratio 2.0 → half length (plays twice as fast).
+/// speed_ratio 0.5 → double length (plays at half speed).
+#[wasm_bindgen]
+pub fn process_speed_mono(input: &[f32], speed_ratio: f32) -> Vec<f32> {
+    resample_linear(input, speed_ratio)
 }
 
-/// Helper to run a closure with the engine, returning a JSON error if not initialized.
-fn with_engine_mut<F>(f: F) -> String
-where
-    F: FnOnce(&mut DspEngine) -> String,
-{
-    ENGINE.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        match borrow.as_mut() {
-            Some(engine) => f(engine),
-            None => serde_json::to_string(&CommandResult::error(
-                "ENGINE_NOT_INITIALIZED",
-                "Call create_engine first",
-            ))
-            .unwrap_or_default(),
-        }
-    })
+/// Pitch-shift a mono f32 buffer by semitones (±24), preserving duration.
+#[wasm_bindgen]
+pub fn process_pitch_mono(input: &[f32], semitones: f32) -> Vec<f32> {
+    pitch_shift_draft(input, semitones)
 }
 
-fn with_engine_ref<F>(f: F) -> String
-where
-    F: FnOnce(&DspEngine) -> String,
-{
-    ENGINE.with(|cell| {
-        let borrow = cell.borrow();
-        match borrow.as_ref() {
-            Some(engine) => f(engine),
-            None => r#"{"initialized":false}"#.to_string(),
-        }
-    })
+/// Time-stretch a mono f32 buffer by stretch_ratio without changing pitch.
+/// stretch_ratio 2.0 → twice as long (slower). 0.5 → half length (faster).
+#[wasm_bindgen]
+pub fn process_time_stretch_mono(input: &[f32], stretch_ratio: f32) -> Vec<f32> {
+    time_stretch_granular(input, stretch_ratio, 2048)
 }
 
-/// Create the engine with a JSON config string.
+// ── Panic hook ────────────────────────────────────────────────────────────────
+
+/// Called by wasm-bindgen on module init.
+/// Sets up the console error panic hook when the feature is enabled so that
+/// Rust panics produce readable stack traces in the browser DevTools.
+#[wasm_bindgen(start)]
+pub fn wasm_start() {
+    #[cfg(feature = "console_panic")]
+    console_error_panic_hook::set_once();
+}
+
+// ── Engine struct ─────────────────────────────────────────────────────────────
+
+/// Rust WASM DSP engine — numeric-only WASM interface.
 ///
-/// Config JSON: `{ "sample_rate": 44100, "max_block_size": 512, "channel_count": 2, "bpm": 120 }`
+/// Construct with `new WasmAudioEngine(sampleRate, blockSize, channels, bpm)`.
+/// All methods take/return numbers or Float32Arrays — no strings, no JSON.
 #[wasm_bindgen]
-pub fn create_engine(config_json: &str) -> String {
-    let config: EngineConfig = match serde_json::from_str(config_json) {
-        Ok(c) => c,
-        Err(e) => {
-            return serde_json::to_string(&CommandResult::error(
-                "INVALID_CONFIG",
-                e.to_string(),
-            ))
-            .unwrap_or_default();
-        }
-    };
-
-    ENGINE.with(|cell| {
-        *cell.borrow_mut() = Some(DspEngine::new(config));
-    });
-
-    serde_json::to_string(&CommandResult::ok()).unwrap_or_default()
+pub struct WasmAudioEngine {
+    inner: DspEngine,
+    /// Smoothed peak meters (stereo).
+    last_peak_l: f32,
+    last_peak_r: f32,
+    /// Throttle counter for transport-position events.
+    pos_tick: u32,
+    /// Emit a position event every N process() calls (≈15 Hz at 128 frames / 44.1 kHz).
+    pos_tick_max: u32,
 }
 
-/// Destroy the engine instance.
 #[wasm_bindgen]
-pub fn destroy_engine() {
-    ENGINE.with(|cell| {
-        *cell.borrow_mut() = None;
-    });
-}
-
-/// Handle a JSON command string. Returns a JSON result string.
-#[wasm_bindgen]
-pub fn handle_command(command_json: &str) -> String {
-    with_engine_mut(|engine| {
-        let command: EngineCommand = match serde_json::from_str(command_json) {
-            Ok(c) => c,
-            Err(e) => {
-                return serde_json::to_string(&CommandResult::error(
-                    "INVALID_COMMAND",
-                    e.to_string(),
-                ))
-                .unwrap_or_default();
-            }
+impl WasmAudioEngine {
+    /// Create and initialize the engine.
+    ///
+    /// All parameters are clamped to safe ranges so invalid input cannot panic.
+    #[wasm_bindgen(constructor)]
+    pub fn new(sample_rate: f64, block_size: usize, channels: usize, bpm: f64) -> WasmAudioEngine {
+        let config = EngineConfig {
+            sample_rate: sample_rate.clamp(8_000.0, 384_000.0),
+            max_block_size: block_size.clamp(16, 8192),
+            channel_count: channels.clamp(1, 64),
+            bpm: bpm.clamp(20.0, 999.0),
         };
-        let result = engine.handle_command(command);
-        serde_json::to_string(&result).unwrap_or_default()
-    })
-}
-
-/// Process audio. Fills the provided float buffer with interleaved audio.
-///
-/// Called from AudioWorkletProcessor.process().
-#[wasm_bindgen]
-pub fn process_audio(output: &mut [f32], frames: usize) {
-    ENGINE.with(|cell| {
-        if let Some(engine) = cell.borrow_mut().as_mut() {
-            engine.process(output, frames);
+        WasmAudioEngine {
+            inner: DspEngine::new(config),
+            last_peak_l: 0.0,
+            last_peak_r: 0.0,
+            pos_tick: 0,
+            pos_tick_max: 8,
         }
-        // If no engine, output stays silent (all zeros from JS side)
-    });
-}
+    }
 
-/// Drain pending events as a JSON array string.
-#[wasm_bindgen]
-pub fn get_events() -> String {
-    with_engine_mut(|engine| {
-        let events = engine.drain_events();
-        serde_json::to_string(&events).unwrap_or_else(|_| "[]".to_string())
-    })
-}
+    // ── Transport controls ────────────────────────────────────────────────────
 
-/// Get engine status as JSON string.
-#[wasm_bindgen]
-pub fn get_status() -> String {
-    with_engine_ref(|engine| {
-        let status = engine.get_status();
-        serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string())
-    })
+    /// Start playback from current position.
+    pub fn play(&mut self) {
+        self.inner.handle_command(EngineCommand::Play { position_beat: None });
+    }
+
+    /// Pause playback (position is preserved).
+    pub fn pause(&mut self) {
+        self.inner.handle_command(EngineCommand::Pause);
+    }
+
+    /// Stop playback and reset position to zero.
+    pub fn stop(&mut self) {
+        self.inner.handle_command(EngineCommand::Stop);
+    }
+
+    /// Seek to a beat position.
+    pub fn seek_beat(&mut self, beat: f64) {
+        self.inner.handle_command(EngineCommand::SeekBeat { beat: beat.max(0.0) });
+    }
+
+    /// Set BPM (clamped to 20–999).
+    pub fn set_bpm(&mut self, bpm: f64) {
+        self.inner.handle_command(EngineCommand::SetBpm { bpm });
+    }
+
+    /// Enable or disable the loop region without changing its bounds.
+    pub fn set_loop_enabled(&mut self, enabled: bool) {
+        let s = self.inner.get_status();
+        self.inner.handle_command(EngineCommand::SetLoop {
+            enabled,
+            start_beat: s.loop_start_beat,
+            end_beat: s.loop_end_beat,
+        });
+    }
+
+    /// Set the loop region bounds (in beats) without changing the enabled flag.
+    pub fn set_loop_range(&mut self, start_beat: f64, end_beat: f64) {
+        let s = self.inner.get_status();
+        self.inner.handle_command(EngineCommand::SetLoop {
+            enabled: s.loop_enabled,
+            start_beat,
+            end_beat,
+        });
+    }
+
+    // ── Transport status (numeric getters — no JSON) ──────────────────────────
+
+    /// Returns `true` while the engine is playing.
+    pub fn is_playing(&self) -> bool {
+        self.inner.get_status().playing
+    }
+
+    /// Returns `true` while paused (stopped and position > 0).
+    pub fn is_paused(&self) -> bool {
+        self.inner.get_status().paused
+    }
+
+    /// Current beat position.
+    pub fn beat_position(&self) -> f64 {
+        self.inner.get_status().beat_position
+    }
+
+    /// Current BPM.
+    pub fn bpm(&self) -> f64 {
+        self.inner.get_status().bpm
+    }
+
+    /// Low 32 bits of the sample position.
+    ///
+    /// Combine with `sample_position_high()` to reconstruct the full u64 position:
+    /// ```js
+    /// const pos = BigInt(engine.sample_position_high()) * 2n**32n + BigInt(engine.sample_position_low());
+    /// ```
+    pub fn sample_position_low(&self) -> u32 {
+        (self.inner.get_status().sample_position & 0xFFFF_FFFF) as u32
+    }
+
+    /// High 32 bits of the sample position.
+    pub fn sample_position_high(&self) -> u32 {
+        (self.inner.get_status().sample_position >> 32) as u32
+    }
+
+    /// Smoothed peak level for the left channel (0.0–1.0).
+    pub fn last_peak_l(&self) -> f32 {
+        self.last_peak_l
+    }
+
+    /// Smoothed peak level for the right channel (0.0–1.0).
+    pub fn last_peak_r(&self) -> f32 {
+        self.last_peak_r
+    }
+
+    // ── Audio processing ──────────────────────────────────────────────────────
+
+    /// Fill `output` with interleaved f32 audio for `frames` frames.
+    ///
+    /// Returns `true` approximately every 8 calls when the engine is playing,
+    /// signalling the caller to emit a transport-position event. This throttling
+    /// keeps the per-block cost minimal.
+    pub fn process_interleaved(&mut self, output: &mut [f32], frames: usize) -> bool {
+        // Run the DSP graph (outputs silence for an empty project, no panic).
+        self.inner.process(output, frames);
+
+        // Update smoothed stereo peak meters from the just-written output.
+        let ch = 2_usize;
+        if output.len() >= ch {
+            let n = frames.min(output.len() / ch);
+            let mut pl = 0.0_f32;
+            let mut pr = 0.0_f32;
+            for i in 0..n {
+                let l = output[i * ch].abs();
+                let r = output[i * ch + 1].abs();
+                if l > pl { pl = l; }
+                if r > pr { pr = r; }
+            }
+            // Exponential decay so the meter falls smoothly between calls.
+            self.last_peak_l = self.last_peak_l.mul_add(0.85, pl * 0.15);
+            self.last_peak_r = self.last_peak_r.mul_add(0.85, pr * 0.15);
+        }
+
+        // Throttle: signal JS to emit a position event only every N blocks.
+        self.pos_tick += 1;
+        if self.pos_tick >= self.pos_tick_max {
+            self.pos_tick = 0;
+            return self.inner.get_status().playing;
+        }
+        false
+    }
 }

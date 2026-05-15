@@ -1,3 +1,4 @@
+import { useState, useEffect, useRef } from "react";
 import { Activity, ArrowUpDown, CornerDownLeft, Cpu, GitFork, GitMerge, Layers, Mic2, Music, PhoneIncoming, PhoneOutgoing, RotateCcw, Scissors, Sliders, Trash2, Volume2, X } from "lucide-react";
 import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
@@ -6,9 +7,15 @@ import { SetTrackVolumeCommand, SetTrackPanCommand, SetTrackMuteCommand, SetTrac
 import { mixer } from "../engine/Mixer";
 import { INSPECTOR_WIDTH } from "../theme";
 import { formatBeatLength } from "../utils/musicalTime";
-import type { TrackType } from "../types/daw";
+import type { TrackType, AudioClipProcess, DawClip } from "../types/daw";
 import { clipType } from "../types/daw";
 import { getOutputTargets, getSendTargets } from "../utils/routingHelpers";
+import { DEFAULT_AUDIO_PROCESS } from "../utils/normalize";
+import { audioProcessingService } from "../audio/AudioProcessingService";
+import { audioCacheManager } from "../audio/AudioCacheManager";
+import { buildDecodedCacheKey } from "../audio/audioCacheKeys";
+import { audioEngine } from "../engine/AudioEngine";
+import { DawSelect } from "./ui/DawSelect";
 
 const TYPE_ICONS: Record<TrackType, React.ElementType> = {
   audio:      Mic2,
@@ -221,39 +228,7 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
               </div>
 
               {isAudio && (
-                <>
-                  {/* Pitch (dimmed placeholders) */}
-                  <SectionLabel label="Pitch" />
-                  <div className="flex flex-col gap-0 border-b border-daw-border opacity-45">
-                    <DimRow label="SEMI" value="0 st" title="Semitone pitch offset (coming soon)" />
-                    <DimRow label="FINE" value="0 ¢" title="Fine tune in cents (coming soon)" />
-                  </div>
-
-                  {/* Process buttons (dimmed) */}
-                  <SectionLabel label="Process" />
-                  <div className="grid grid-cols-2 gap-1 px-3 pb-3 opacity-45">
-                    <button
-                      type="button"
-                      disabled
-                      className="flex h-7 cursor-not-allowed items-center justify-center gap-1 rounded border border-dashed text-[9px]"
-                      style={{ borderColor: "rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.02)", color: "rgba(180,192,204,0.6)" }}
-                      title="Reverse (coming soon)"
-                    >
-                      <RotateCcw size={9} />
-                      Reverse
-                    </button>
-                    <button
-                      type="button"
-                      disabled
-                      className="flex h-7 cursor-not-allowed items-center justify-center gap-1 rounded border border-dashed text-[9px]"
-                      style={{ borderColor: "rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.02)", color: "rgba(180,192,204,0.6)" }}
-                      title="Normalize (coming soon)"
-                    >
-                      <ArrowUpDown size={9} />
-                      Normalize
-                    </button>
-                  </div>
-                </>
+                <ClipProcessSection clip={clip} />
               )}
             </>
           );
@@ -355,22 +330,16 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
               <div className="flex items-center gap-2">
                 <PhoneOutgoing size={9} className="shrink-0 text-daw-faint" />
                 <span className="w-8 shrink-0 text-[9px] text-daw-faint">OUT</span>
-                <select
+                <DawSelect
                   value={track.output ?? "master"}
-                  onChange={(e) => {
-                    const next = e.target.value;
+                  onChange={(next) => {
                     history().execute(new SetTrackOutputCommand(track.id, next, track.output ?? "master"));
                   }}
-                  className="h-6 flex-1 cursor-pointer rounded px-1.5 text-[10px] text-daw-text outline-none"
-                  style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.09)" }}
-                >
-                  {getOutputTargets(project, track.id).map((t) => (
-                    <option key={t.id} value={t.id}
-                      style={{ background: "#1a1e26" }}>
-                      {t.name}
-                    </option>
-                  ))}
-                </select>
+                  options={getOutputTargets(project, track.id).map((t) => ({
+                    value: t.id,
+                    label: t.name,
+                  }))}
+                />
               </div>
             </div>
 
@@ -571,6 +540,246 @@ function InspectorTrackBtn({
     >
       {label}
     </button>
+  );
+}
+
+// ── Audio process section ─────────────────────────────────────────────────────
+
+type ProcessStatus = "idle" | "processing" | "cached" | "failed";
+
+function ClipProcessSection({ clip }: { clip: DawClip }) {
+  const history = useHistoryStore.getState;
+  const proc = clip.audioProcess ?? DEFAULT_AUDIO_PROCESS;
+
+  // Local draft so slider drags don't spam history until mouseup
+  const [draft, setDraft] = useState<AudioClipProcess>(proc);
+  const [processStatus, setProcessStatus] = useState<ProcessStatus>("idle");
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Keep draft in sync when a different clip is selected
+  const procKey = `${clip.id}:${proc.speedRatio}:${proc.pitchSemitones}:${proc.preservePitch}`;
+  const [lastKey, setLastKey] = useState(procKey);
+  if (lastKey !== procKey) {
+    setLastKey(procKey);
+    setDraft(proc);
+  }
+
+  const commit = (patch: Partial<AudioClipProcess>) => {
+    const next: AudioClipProcess = { ...draft, ...patch };
+    setDraft(next);
+    history().execute(new UpdateClipCommand(clip.id, { audioProcess: next }, "Set Clip Process"));
+  };
+
+  // Trigger processing whenever committed params change (debounced 300ms).
+  useEffect(() => {
+    const hasEffect = proc.speedRatio !== 1 || proc.pitchSemitones !== 0;
+    if (!hasEffect) { setProcessStatus("idle"); return; }
+
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      const audioBuffer = audioEngine.getBuffer(clip.fileId);
+      if (!audioBuffer) return;
+      const key = buildDecodedCacheKey(clip.fileId, audioBuffer.audioBuffer.sampleRate);
+      const decoded = audioCacheManager.getDecodedAudio(key);
+      if (!decoded) return;
+
+      setProcessStatus("processing");
+      try {
+        await audioProcessingService.processClipAudio(decoded, {
+          speedRatio: proc.speedRatio,
+          pitchSemitones: proc.pitchSemitones,
+          preservePitch: proc.preservePitch,
+          quality: proc.quality,
+        });
+        setProcessStatus("cached");
+      } catch {
+        setProcessStatus("failed");
+      }
+    }, 300);
+
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+  }, [clip.fileId, proc.speedRatio, proc.pitchSemitones, proc.preservePitch, proc.quality]);
+
+  const isModified =
+    draft.speedRatio !== 1 ||
+    draft.pitchSemitones !== 0;
+
+  const inputCls =
+    "flex h-5 flex-1 items-center rounded px-2 text-[10px] text-daw-text bg-daw-bg border border-daw-border focus:outline-none focus:border-blue-500 tabular-nums";
+
+  return (
+    <>
+      <SectionLabel label="Speed & Pitch" />
+      <div className="flex flex-col gap-0 border-b border-daw-border">
+        {/* Speed */}
+        <div className="flex items-center gap-2.5 border-b border-daw-border px-3 py-2">
+          <span className="w-9 shrink-0 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
+            SPEED
+          </span>
+          <input
+            type="range"
+            min={0.25}
+            max={4}
+            step={0.01}
+            value={draft.speedRatio}
+            onChange={(e) => setDraft((s) => ({ ...s, speedRatio: parseFloat(e.target.value) }))}
+            onMouseUp={() => commit({ speedRatio: draft.speedRatio })}
+            className="flex-1 cursor-ew-resize appearance-none"
+            style={{ accentColor: "#5fced0", height: "3px" }}
+          />
+          <input
+            type="number"
+            min={0.25}
+            max={4}
+            step={0.05}
+            value={draft.speedRatio.toFixed(2)}
+            onChange={(e) => {
+              const v = Math.max(0.25, Math.min(4, parseFloat(e.target.value) || 1));
+              commit({ speedRatio: v });
+            }}
+            className={`${inputCls} w-14`}
+          />
+        </div>
+
+        {/* Pitch semitones */}
+        <div className="flex items-center gap-2.5 border-b border-daw-border px-3 py-2">
+          <span className="w-9 shrink-0 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
+            PITCH
+          </span>
+          <input
+            type="range"
+            min={-24}
+            max={24}
+            step={1}
+            value={draft.pitchSemitones}
+            onChange={(e) => setDraft((s) => ({ ...s, pitchSemitones: parseInt(e.target.value, 10) }))}
+            onMouseUp={() => commit({ pitchSemitones: draft.pitchSemitones })}
+            className="flex-1 cursor-ew-resize appearance-none"
+            style={{ accentColor: "#a99cff", height: "3px" }}
+          />
+          <input
+            type="number"
+            min={-24}
+            max={24}
+            step={1}
+            value={draft.pitchSemitones}
+            onChange={(e) => {
+              const v = Math.max(-24, Math.min(24, parseInt(e.target.value, 10) || 0));
+              commit({ pitchSemitones: v });
+            }}
+            className={`${inputCls} w-14`}
+          />
+        </div>
+
+        {/* Preserve pitch toggle */}
+        <div className="flex items-center gap-2.5 border-b border-daw-border px-3 py-2">
+          <span className="w-9 shrink-0 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
+            PRES
+          </span>
+          <span className="flex-1 text-[10px] text-daw-dim">Preserve Pitch</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={draft.preservePitch}
+            onClick={() => commit({ preservePitch: !draft.preservePitch })}
+            className={`relative inline-flex h-4 w-8 items-center rounded-full transition-colors ${
+              draft.preservePitch
+                ? "bg-blue-600"
+                : "border border-daw-border bg-daw-surface"
+            }`}
+          >
+            <span
+              className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${
+                draft.preservePitch ? "translate-x-4" : "translate-x-0.5"
+              }`}
+            />
+          </button>
+        </div>
+
+        {/* Quality */}
+        <div className="flex items-center gap-2.5 px-3 py-2">
+          <span className="w-9 shrink-0 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
+            QUAL
+          </span>
+          <DawSelect
+            value={draft.quality}
+            onChange={(val) => commit({ quality: val as AudioClipProcess["quality"] })}
+            options={[
+              { value: "draft", label: "Draft" },
+              { value: "balanced", label: "Balanced" },
+              { value: "high", label: "High (coming soon)", disabled: true },
+            ]}
+          />
+        </div>
+      </div>
+
+      {/* Process status */}
+      {isModified && processStatus !== "idle" && (
+        <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-daw-border">
+          <span
+            className="text-[9px] tabular-nums"
+            style={{
+              color:
+                processStatus === "cached"
+                  ? "#7bd88f"
+                  : processStatus === "failed"
+                  ? "#f06a61"
+                  : "#a99cff",
+            }}
+          >
+            {processStatus === "processing" && "⏳ Processing…"}
+            {processStatus === "cached" && "✓ Ready"}
+            {processStatus === "failed" && "✗ Failed"}
+          </span>
+        </div>
+      )}
+
+      {/* Reset row */}
+      {isModified && (
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-daw-border">
+          <span className="flex-1 text-[10px] text-daw-text-muted">
+            {draft.speedRatio !== 1 ? `${draft.speedRatio.toFixed(2)}×` : ""}
+            {draft.speedRatio !== 1 && draft.pitchSemitones !== 0 ? " · " : ""}
+            {draft.pitchSemitones !== 0
+              ? `${draft.pitchSemitones > 0 ? "+" : ""}${draft.pitchSemitones} st`
+              : ""}
+          </span>
+          <button
+            type="button"
+            onClick={() => commit({ speedRatio: 1, pitchSemitones: 0, preservePitch: true })}
+            className="flex items-center gap-1 rounded px-2 py-0.5 text-[9px] text-daw-faint hover:text-daw-text hover:bg-white/5 border border-daw-border"
+            title="Reset speed and pitch to defaults"
+          >
+            <RotateCcw size={8} />
+            Reset
+          </button>
+        </div>
+      )}
+
+      {/* Dimmed future process actions */}
+      <div className="grid grid-cols-2 gap-1 px-3 pb-3 pt-2 opacity-40">
+        <button
+          type="button"
+          disabled
+          className="flex h-7 cursor-not-allowed items-center justify-center gap-1 rounded border border-dashed text-[9px]"
+          style={{ borderColor: "rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.02)", color: "rgba(180,192,204,0.6)" }}
+          title="Reverse (coming soon)"
+        >
+          <RotateCcw size={9} />
+          Reverse
+        </button>
+        <button
+          type="button"
+          disabled
+          className="flex h-7 cursor-not-allowed items-center justify-center gap-1 rounded border border-dashed text-[9px]"
+          style={{ borderColor: "rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.02)", color: "rgba(180,192,204,0.6)" }}
+          title="Normalize (coming soon)"
+        >
+          <ArrowUpDown size={9} />
+          Normalize
+        </button>
+      </div>
+    </>
   );
 }
 

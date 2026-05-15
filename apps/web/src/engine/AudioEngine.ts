@@ -2,6 +2,9 @@ import type { DawFile, FileId, WaveformPeaks } from "../types/daw";
 import { audioStorage } from "./AudioStorage";
 import { generatePeaks } from "./WaveformGenerator";
 import { waveformCache, buildCacheKey, entryPeaksAsFloat32, SAMPLES_PER_PEAK, WAVEFORM_CACHE_VERSION } from "./waveformCache";
+import { audioCacheManager } from "../audio/AudioCacheManager";
+import { audioBufferToDecodedAudio } from "../audio/audioCacheTypes";
+import { buildDecodedCacheKey } from "../audio/audioCacheKeys";
 
 type OnPeaks = (fileId: FileId, peaks: WaveformPeaks) => void;
 
@@ -31,6 +34,10 @@ class AudioEngine {
     onPeaks: OnPeaks
   ): Promise<AudioBuffer> {
     const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer.slice(0));
+
+    // Store in the DSP cache so AudioProcessingService can find it for processing.
+    const decoded = audioBufferToDecodedAudio(file.id, audioBuffer);
+    audioCacheManager.setDecodedAudio(buildDecodedCacheKey(file.id, audioBuffer.sampleRate), decoded);
 
     // Placeholder entry so callers can check existence immediately
     this.bufferCache.set(file.id, {

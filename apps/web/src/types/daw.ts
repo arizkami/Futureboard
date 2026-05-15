@@ -109,6 +109,15 @@ export type DawTrack = {
 
 export type ClipType = "audio" | "midi";
 
+export type AudioProcessQuality = "draft" | "balanced" | "high";
+
+export type AudioClipProcess = {
+  speedRatio: number;
+  pitchSemitones: number;
+  preservePitch: boolean;
+  quality: AudioProcessQuality;
+};
+
 export type MidiNote = {
   id: string;
   pitch: number;    // 0–127
@@ -133,6 +142,7 @@ export type DawClip = {
   color?: string;
   muted?: boolean;
   locked?: boolean;
+  audioProcess?: AudioClipProcess;
 };
 
 /** Returns the effective clip type, defaulting to "audio" for pre-existing clips. */

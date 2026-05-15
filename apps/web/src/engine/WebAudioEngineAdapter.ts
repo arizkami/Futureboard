@@ -11,6 +11,7 @@ import { audioEngine } from "./AudioEngine";
 import { transport } from "./Transport";
 import { mixer } from "./Mixer";
 import { clipScheduler } from "./ClipScheduler";
+import { WasmAudioEngineAdapter } from "./WasmAudioEngineAdapter";
 
 class WebAudioEngineAdapter implements AudioEngineAdapter {
   private _meterCallbacks = new Set<MeterCallback>();
@@ -18,17 +19,38 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
   private _meterRafId: number | null = null;
   private _transportRafId: number | null = null;
   private _initialized = false;
+  private _wasmAdapter: WasmAudioEngineAdapter | null = null;
+  private _useWasm = false;
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   async init(): Promise<void> {
     if (this._initialized) return;
+
+    // Try to load WASM engine first
+    try {
+      this._wasmAdapter = new WasmAudioEngineAdapter();
+      await this._wasmAdapter.init();
+      this._useWasm = true;
+      console.log("[AudioEngine] Using WASM DSP core");
+    } catch (e) {
+      console.warn("[AudioEngine] WASM core failed to load, falling back to WebAudio:", e);
+      this._wasmAdapter = null;
+      this._useWasm = false;
+    }
+
+    if (!this._useWasm) {
+      this._startMeterLoop();
+      this._startTransportLoop();
+    }
+    
     this._initialized = true;
-    this._startMeterLoop();
-    this._startTransportLoop();
   }
 
   dispose(): void {
+    if (this._useWasm && this._wasmAdapter) {
+      this._wasmAdapter.dispose();
+    }
     if (this._meterRafId !== null) cancelAnimationFrame(this._meterRafId);
     if (this._transportRafId !== null) cancelAnimationFrame(this._transportRafId);
     this._meterCallbacks.clear();
@@ -37,6 +59,9 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
   }
 
   getStatus(): AudioEngineStatus {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.getStatus();
+    }
     const ctx = audioEngine.ctx;
     if (!ctx) return "uninitialized";
     switch (ctx.state) {
@@ -50,6 +75,9 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
   // ── Project sync ───────────────────────────────────────────────────────────
 
   async loadProject(project: DawProject): Promise<void> {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.loadProject(project);
+    }
     transport.stop();
     clipScheduler.cancelAll();
     for (const track of project.tracks) {
@@ -60,6 +88,9 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
   }
 
   syncProject(project: DawProject): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.syncProject(project);
+    }
     for (const track of project.tracks) {
       mixer.getOrCreateTrack(track.id, track.volume, track.pan);
     }
@@ -68,6 +99,9 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
   // ── Transport ──────────────────────────────────────────────────────────────
 
   async play(positionSeconds?: number): Promise<void> {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.play(positionSeconds);
+    }
     if (positionSeconds !== undefined) {
       transport.seek(positionSeconds);
     }
@@ -75,103 +109,171 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
   }
 
   pause(): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.pause();
+    }
     transport.pause();
   }
 
   stop(): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.stop();
+    }
     transport.stop();
   }
 
   seekSeconds(seconds: number): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.seekSeconds(seconds);
+    }
     transport.seek(seconds);
   }
 
-  setBpm(_bpm: number): void {
+  setBpm(bpm: number): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.setBpm(bpm);
+    }
     // BPM is read from project state at scheduling time; no runtime change needed
   }
 
-  setLoop(_enabled: boolean, _startSeconds: number, _endSeconds: number): void {
+  setLoop(enabled: boolean, startSeconds: number, endSeconds: number): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.setLoop(enabled, startSeconds, endSeconds);
+    }
     // Placeholder — loop scheduling not yet implemented in ClipScheduler
   }
 
   // ── Track management ───────────────────────────────────────────────────────
 
   createTrack(track: DawTrack): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.createTrack(track);
+    }
     mixer.getOrCreateTrack(track.id, track.volume, track.pan);
   }
 
   removeTrack(trackId: TrackId): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.removeTrack(trackId);
+    }
     mixer.removeTrack(trackId);
   }
 
   // ── Clip management ────────────────────────────────────────────────────────
 
-  scheduleClip(_trackId: TrackId, _clip: DawClip): void {
+  scheduleClip(trackId: TrackId, clip: DawClip): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.scheduleClip(trackId, clip);
+    }
     // ClipScheduler bulk-schedules on play(); individual scheduling not yet needed
   }
 
-  unscheduleClip(_clipId: string): void {
+  unscheduleClip(clipId: string): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.unscheduleClip(clipId);
+    }
     // placeholder
   }
 
   // ── Audio files ────────────────────────────────────────────────────────────
 
-  loadAudioFile(_fileId: string, _buffer: AudioBuffer): void {
+  loadAudioFile(fileId: string, buffer: AudioBuffer): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.loadAudioFile(fileId, buffer);
+    }
     // AudioEngine manages its own buffer registry; no-op here
   }
 
-  unloadAudioFile(_fileId: string): void {
+  unloadAudioFile(fileId: string): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.unloadAudioFile(fileId);
+    }
     // placeholder
   }
 
   // ── Mixer ──────────────────────────────────────────────────────────────────
 
   setTrackVolume(trackId: TrackId, volume: number): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.setTrackVolume(trackId, volume);
+    }
     mixer.setVolume(trackId, volume);
   }
 
   setTrackPan(trackId: TrackId, pan: number): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.setTrackPan(trackId, pan);
+    }
     mixer.setPan(trackId, pan);
   }
 
   setTrackMute(trackId: TrackId, muted: boolean): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.setTrackMute(trackId, muted);
+    }
     mixer.setMute(trackId, muted);
   }
 
   setTrackSolo(trackId: TrackId, solo: boolean): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.setTrackSolo(trackId, solo);
+    }
     mixer.setSolo(trackId, solo);
   }
 
   setMasterVolume(volume: number): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.setMasterVolume(volume);
+    }
     mixer.setMasterVolume(volume);
   }
 
   // ── Insert devices ─────────────────────────────────────────────────────────
-  // WebAudio first pass: state is persisted in projectStore; no-op here.
-  // Individual WebAudio nodes (BiquadFilter, DynamicsCompressor, etc.)
-  // would be wired per-device in a full implementation.
 
-  addInsertDevice(_trackId: TrackId, _device: InsertDevice): void {}
-  removeInsertDevice(_trackId: TrackId, _deviceId: string): void {}
+  addInsertDevice(trackId: TrackId, device: InsertDevice): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.addInsertDevice(trackId, device);
+    }
+  }
 
-  setInsertEnabled(_trackId: TrackId, _deviceId: string, _enabled: boolean): void {}
+  removeInsertDevice(trackId: TrackId, deviceId: string): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.removeInsertDevice(trackId, deviceId);
+    }
+  }
+
+  setInsertEnabled(trackId: TrackId, deviceId: string, enabled: boolean): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.setInsertEnabled(trackId, deviceId, enabled);
+    }
+  }
 
   setInsertParam(
-    _trackId: TrackId,
-    _deviceId: string,
-    _param: string,
-    _value: number | string | boolean,
-  ): void {}
+    trackId: TrackId,
+    deviceId: string,
+    param: string,
+    value: number | string | boolean,
+  ): void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.setInsertParam(trackId, deviceId, param, value);
+    }
+  }
 
   // ── Metering ───────────────────────────────────────────────────────────────
 
   subscribeMeters(callback: MeterCallback): () => void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.subscribeMeters(callback);
+    }
     this._meterCallbacks.add(callback);
     if (this._meterCallbacks.size === 1) this._startMeterLoop();
     return () => this._meterCallbacks.delete(callback);
   }
 
   subscribeTransport(callback: TransportCallback): () => void {
+    if (this._useWasm && this._wasmAdapter) {
+      return this._wasmAdapter.subscribeTransport(callback);
+    }
     this._transportCallbacks.add(callback);
     if (this._transportCallbacks.size === 1 && this._transportRafId === null) {
       this._startTransportLoop();

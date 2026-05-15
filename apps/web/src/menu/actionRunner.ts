@@ -510,14 +510,33 @@ export function runAction(actionId: string) {
       break;
 
     case "project:new-from-template":
-    case "project:settings":
-    case "project:tempo-settings":
-    case "project:time-signature":
     case "project:snapshot":
     case "project:collect-all-and-save":
     case "project:clean-unused-files":
     case "project:statistics":
       break;
+
+    case "project:settings":
+    case "project:tempo-settings":
+    case "project:time-signature": {
+      const ws = useWindowStore.getState();
+      if (!ws.isWindowOpen("preferences")) {
+        ws.openDialog({
+          contentType: "preferences",
+          title: "Preferences",
+          width: 860,
+          height: 600,
+          minWidth: 720,
+          minHeight: 480,
+          modal: true,
+          closable: true,
+          payload: { initialTab: "project" },
+        });
+      } else {
+        ws.windows.filter((w) => w.contentType === "preferences").forEach((w) => ws.focusWindow(w.id));
+      }
+      break;
+    }
 
     case "project:set-sample-rate-44100":
     case "project:set-sample-rate-48000":
@@ -559,6 +578,26 @@ export function runAction(actionId: string) {
       break;
 
     // ── Audio processing (not yet implemented) ─────────────────────────────
+    case "audio:settings": {
+      const ws = useWindowStore.getState();
+      if (!ws.isWindowOpen("preferences")) {
+        ws.openDialog({
+          contentType: "preferences",
+          title: "Preferences",
+          width: 860,
+          height: 600,
+          minWidth: 720,
+          minHeight: 480,
+          modal: true,
+          closable: true,
+          payload: { initialTab: "audio" },
+        });
+      } else {
+        ws.windows.filter((w) => w.contentType === "preferences").forEach((w) => ws.focusWindow(w.id));
+      }
+      break;
+    }
+
     case "audio:normalize-clip":
     case "audio:reverse-clip":
     case "audio:add-fade-in":
@@ -568,7 +607,6 @@ export function runAction(actionId: string) {
     case "audio:bounce-in-place":
     case "audio:render-selection":
     case "audio:freeze-selected-tracks":
-    case "audio:settings":
     case "audio:set-device-default":
     case "audio:set-device-web-audio":
     case "audio:set-buffer-64":
@@ -782,7 +820,24 @@ export function runAction(actionId: string) {
       window.location.reload();
       break;
 
-    case "app:preferences":
+    case "app:preferences": {
+      const ws = useWindowStore.getState();
+      if (!ws.isWindowOpen("preferences")) {
+        ws.openDialog({
+          contentType: "preferences",
+          title: "Preferences",
+          width: 860,
+          height: 600,
+          minWidth: 720,
+          minHeight: 480,
+          modal: true,
+          closable: true,
+        });
+      } else {
+        ws.windows.filter((w) => w.contentType === "preferences").forEach((w) => ws.focusWindow(w.id));
+      }
+      break;
+    }
     case "app:check-for-updates":
     case "app:about":
       break;

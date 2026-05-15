@@ -40,6 +40,7 @@ import { useProjectStore } from "../store/projectStore";
 import { useTransportStore } from "../store/transportStore";
 import { useMetronomeStore } from "../store/metronomeStore";
 import { useUIStore } from "../store/uiStore";
+import { DawSelect } from "./ui/DawSelect";
 import { formatBarBeatTick } from "../utils/musicalTime";
 import logoApp from "../assets/logo.png";
 import { ProjectDropdown } from "./project/ProjectDropdown";
@@ -848,35 +849,31 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
           </div>
 
           <div className="flex h-7 items-center gap-0.5 px-1">
-            <select
-              value={timeSig.numerator}
-              onChange={(e) =>
-                setTimeSignature({ ...timeSig, numerator: parseInt(e.target.value) })
+            <DawSelect
+              value={String(timeSig.numerator)}
+              onChange={(val) =>
+                setTimeSignature({ ...timeSig, numerator: parseInt(val) })
               }
-              className="w-5 cursor-pointer appearance-none border-none bg-transparent text-center text-[11px] font-semibold text-daw-text outline-none"
-              title="Beats per bar"
-            >
-              {TIME_SIG_NUMERATORS.map((n) => (
-                <option key={n} value={n} className="bg-daw-surface text-daw-text">
-                  {n}
-                </option>
-              ))}
-            </select>
+              className="!h-5 !w-4 !bg-transparent !border-none !px-0"
+              hideChevron
+              options={TIME_SIG_NUMERATORS.map((n) => ({
+                value: String(n),
+                label: String(n),
+              }))}
+            />
             <span className="text-[10px] opacity-25">/</span>
-            <select
-              value={timeSig.denominator}
-              onChange={(e) =>
-                setTimeSignature({ ...timeSig, denominator: parseInt(e.target.value) })
+            <DawSelect
+              value={String(timeSig.denominator)}
+              onChange={(val) =>
+                setTimeSignature({ ...timeSig, denominator: parseInt(val) })
               }
-              className="w-5 cursor-pointer appearance-none border-none bg-transparent text-center text-[11px] font-semibold text-daw-text outline-none"
-              title="Note value per beat"
-            >
-              {TIME_SIG_DENOMINATORS.map((n) => (
-                <option key={n} value={n} className="bg-daw-surface text-daw-text">
-                  {n}
-                </option>
-              ))}
-            </select>
+              className="!h-5 !w-4 !bg-transparent !border-none !px-0"
+              hideChevron
+              options={TIME_SIG_DENOMINATORS.map((n) => ({
+                value: String(n),
+                label: String(n),
+              }))}
+            />
           </div>
 
           <Divider />

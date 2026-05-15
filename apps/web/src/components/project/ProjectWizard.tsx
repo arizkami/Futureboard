@@ -4,6 +4,7 @@ import { useUIStore } from "../../store/uiStore";
 import { useHistoryStore } from "../../store/historyStore";
 import { useWindowStore } from "../../store/windowStore";
 import { useRecentProjectsStore } from "../../store/recentProjectsStore";
+import { DawSelect } from "../ui/DawSelect";
 import { getTrackColor } from "../../theme";
 import type { DawTrack } from "../../types/daw";
 
@@ -122,7 +123,6 @@ export function ProjectWizard({ windowId }: Props) {
 
   const labelClass = "block text-[10px] text-daw-text-muted uppercase tracking-wide mb-1";
   const inputClass = "w-full bg-daw-bg border border-daw-border rounded px-2 py-1 text-[12px] text-daw-text focus:outline-none focus:border-blue-500";
-  const selectClass = inputClass;
 
   return (
     <div className="flex flex-col gap-4 text-[12px]">
@@ -185,30 +185,30 @@ export function ProjectWizard({ windowId }: Props) {
         </div>
         <div>
           <label className={labelClass}>Time Sig. (Den)</label>
-          <select
-            className={selectClass}
-            value={state.timeSignatureDenominator}
-            onChange={(e) => set({ timeSignatureDenominator: Number(e.target.value) })}
-          >
-            {[2, 4, 8, 16].map((d) => (
-              <option key={d} value={d}>{d}</option>
-            ))}
-          </select>
+          <DawSelect
+            className="w-full"
+            value={String(state.timeSignatureDenominator)}
+            onChange={(val) => set({ timeSignatureDenominator: Number(val) })}
+            options={[2, 4, 8, 16].map((d) => ({
+              value: String(d),
+              label: String(d),
+            }))}
+          />
         </div>
       </div>
 
       {/* Sample Rate */}
       <div>
         <label className={labelClass}>Sample Rate</label>
-        <select
-          className={selectClass}
-          value={state.sampleRate}
-          onChange={(e) => set({ sampleRate: Number(e.target.value) })}
-        >
-          {SAMPLE_RATES.map((sr) => (
-            <option key={sr} value={sr}>{sr.toLocaleString()} Hz</option>
-          ))}
-        </select>
+        <DawSelect
+          className="w-full"
+          value={String(state.sampleRate)}
+          onChange={(val) => set({ sampleRate: Number(val) })}
+          options={SAMPLE_RATES.map((sr) => ({
+            value: String(sr),
+            label: `${sr.toLocaleString()} Hz`,
+          }))}
+        />
       </div>
 
       {/* Starter Tracks */}

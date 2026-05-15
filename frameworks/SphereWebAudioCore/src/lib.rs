@@ -22,6 +22,7 @@
 pub mod buffer;
 pub mod commands;
 pub mod devices;
+pub mod dsp;
 pub mod engine;
 pub mod error;
 pub mod events;
