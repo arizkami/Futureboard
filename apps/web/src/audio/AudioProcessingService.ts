@@ -5,6 +5,7 @@ import { resampleChannels } from "./dsp/resample";
 import { timeStretchGranular } from "./dsp/timeStretch";
 import { timeStretchWSOLA } from "./dsp/wsola";
 import { pitchShiftDraft } from "./dsp/pitchShift";
+import { pitchShiftPhaseVocoder } from "./dsp/phaseVocoder";
 import {
   ensureRustDsp,
   isRustDspReady,
@@ -12,7 +13,7 @@ import {
   rustTimeStretchChannels,
 } from "./RustDspProcessor";
 
-export type ProcessorKind = "rust-wasm" | "ts-wsola" | "ts-granular" | "ts-resample";
+export type ProcessorKind = "rust-wasm" | "ts-phase-vocoder" | "ts-wsola" | "ts-granular" | "ts-resample";
 
 // ── AudioProcessingService ────────────────────────────────────────────────────
 
@@ -29,7 +30,7 @@ class AudioProcessingService {
   }
 
   chooseBestProcessor(): ProcessorKind {
-    return isRustDspReady() ? "rust-wasm" : "ts-wsola";
+    return isRustDspReady() ? "rust-wasm" : "ts-phase-vocoder";
   }
 
   getProcessingCapabilities() {
@@ -65,7 +66,7 @@ class AudioProcessingService {
 
     if (params.mode === "resample" || !params.preservePitch) {
       ({ result, processorUsed } = await this._processResample(decoded, params));
-    } else if (isRustDspReady()) {
+    } else if (isRustDspReady() && this._canUseRustPath(params)) {
       ({ result, processorUsed } = await this._processRust(decoded, params));
     } else {
       ({ result, processorUsed } = await this._processTypeScript(decoded, params));
@@ -125,7 +126,7 @@ class AudioProcessingService {
 
     if (speedRatio !== 1) {
       const stretchRatio = 1 / speedRatio;
-      const result = rustTimeStretchChannels(channels, stretchRatio);
+      const result = rustTimeStretchChannels(channels, stretchRatio, quality);
       if (result) {
         channels = result;
       } else {
@@ -135,7 +136,7 @@ class AudioProcessingService {
     }
 
     if (pitchSemitones !== 0) {
-      const result = rustPitchChannels(channels, pitchSemitones);
+      const result = rustPitchChannels(channels, pitchSemitones, quality);
       if (result) {
         channels = result;
       } else {
@@ -168,7 +169,9 @@ class AudioProcessingService {
     await tick();
     const processorUsed = mode === "granular" || mode === "percussive"
       ? "ts-granular"
-      : "ts-wsola";
+      : pitchSemitones !== 0
+        ? "ts-phase-vocoder"
+        : "ts-wsola";
     return { result: makeResult(decoded, channels), processorUsed };
   }
 
@@ -203,7 +206,7 @@ class AudioProcessingService {
 
   /**
    * Pitch-shift channels.
-   * polyphonic/monophonic: resample + WSOLA stretch (less robotic than OLA path).
+   * polyphonic/monophonic: spectral pitch shift (less grainy than OLA/WSOLA pitch).
    * granular/percussive:   resample + OLA (matches their stretch algorithm).
    */
   private _tsPitch(
@@ -220,10 +223,16 @@ class AudioProcessingService {
 
   private _processorForMode(params: AudioProcessParams): ProcessorKind {
     if (!params.preservePitch || params.mode === "resample") return "ts-resample";
-    if (isRustDspReady()) return "rust-wasm";
+    if (isRustDspReady() && this._canUseRustPath(params)) return "rust-wasm";
     return params.mode === "granular" || params.mode === "percussive"
       ? "ts-granular"
-      : "ts-wsola";
+      : params.pitchSemitones !== 0
+        ? "ts-phase-vocoder"
+        : "ts-wsola";
+  }
+
+  private _canUseRustPath(params: AudioProcessParams): boolean {
+    return params.mode === "granular" || params.mode === "percussive";
   }
 }
 
@@ -233,40 +242,9 @@ export const audioProcessingService = new AudioProcessingService();
 
 type F32A = Float32Array<ArrayBufferLike>;
 
-/** Pitch-shift using WSOLA for the stretch step (polyphonic/monophonic). */
+/** Pitch-shift using a spectral phase-vocoder path for polyphonic/monophonic clips. */
 function pitchShiftWSola(channels: F32A[], semitones: number, quality: "draft" | "balanced" | "high"): Float32Array[] {
-  const clamped = Math.max(-24, Math.min(24, semitones));
-  if (clamped === 0 || channels.length === 0) return channels.map((ch) => new Float32Array(ch));
-
-  const pitchRatio    = Math.pow(2, clamped / 12);
-  const originalLength = channels[0].length;
-
-  // 1. Resample to change pitch (also changes duration)
-  const resampled = channels.map((ch) => {
-    const ratio  = pitchRatio;
-    const inLen  = ch.length;
-    const outLen = Math.max(1, Math.ceil(inLen / ratio));
-    const out    = new Float32Array(outLen);
-    const last   = inLen - 1;
-    for (let i = 0; i < outLen; i++) {
-      const src = i * ratio;
-      const lo  = Math.floor(src) | 0;
-      const hi  = lo < last ? lo + 1 : last;
-      out[i]    = ch[lo] + (ch[hi] - ch[lo]) * (src - lo);
-    }
-    return out as F32A;
-  });
-
-  // 2. WSOLA stretch back to original duration
-  const stretched = timeStretchWSOLA(resampled, pitchRatio, quality);
-
-  // 3. Trim/pad to exactly original length
-  return stretched.map((ch) => {
-    if (ch.length === originalLength) return ch;
-    const out = new Float32Array(originalLength);
-    out.set(ch.subarray(0, Math.min(ch.length, originalLength)));
-    return out;
-  });
+  return pitchShiftPhaseVocoder(channels, semitones, quality);
 }
 
 function makeResult(decoded: DecodedAudioData, channels: F32A[]): DecodedAudioData {

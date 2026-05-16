@@ -10,8 +10,12 @@ import type { F32 } from "./audioCacheTypes";
 type WasmDspModule = {
   process_speed_mono(input: Float32Array, speedRatio: number): Float32Array;
   process_pitch_mono(input: Float32Array, semitones: number): Float32Array;
+  process_pitch_mono_quality?(input: Float32Array, semitones: number, grainSize: number): Float32Array;
   process_time_stretch_mono(input: Float32Array, stretchRatio: number): Float32Array;
+  process_time_stretch_mono_quality?(input: Float32Array, stretchRatio: number, grainSize: number): Float32Array;
 };
+
+type DspQuality = "draft" | "balanced" | "high";
 
 let _module: WasmDspModule | null = null;
 let _initPromise: Promise<WasmDspModule | null> | null = null;
@@ -51,10 +55,20 @@ export function rustSpeedChannels(channels: F32[], speedRatio: number): Float32A
 }
 
 /** Apply pitch shift to all channels via WASM. Returns null if WASM unavailable. */
-export function rustPitchChannels(channels: F32[], semitones: number): Float32Array[] | null {
+export function rustPitchChannels(
+  channels: F32[],
+  semitones: number,
+  quality: DspQuality = "balanced",
+): Float32Array[] | null {
   if (!_module) return null;
   try {
-    const result = channels.map((ch) => _module!.process_pitch_mono(new Float32Array(ch), semitones));
+    const grainSize = grainSizeForQuality(quality);
+    const result = channels.map((ch) => {
+      const input = new Float32Array(ch);
+      return _module!.process_pitch_mono_quality
+        ? _module!.process_pitch_mono_quality(input, semitones, grainSize)
+        : _module!.process_pitch_mono(input, semitones);
+    });
     if (import.meta.env.DEV && semitones !== 0 && result.length > 0) {
       const inLen  = channels[0].length;
       const outLen = result[0].length;
@@ -81,11 +95,15 @@ function _rms(buf: Float32Array): number {
 export function rustTimeStretchChannels(
   channels: F32[],
   stretchRatio: number,
+  quality: DspQuality = "balanced",
 ): Float32Array[] | null {
   if (!_module) return null;
   try {
+    const grainSize = grainSizeForQuality(quality);
     const result = channels.map((ch) =>
-      _module!.process_time_stretch_mono(new Float32Array(ch), stretchRatio),
+      _module!.process_time_stretch_mono_quality
+        ? _module!.process_time_stretch_mono_quality(new Float32Array(ch), stretchRatio, grainSize)
+        : _module!.process_time_stretch_mono(new Float32Array(ch), stretchRatio),
     );
     if (import.meta.env.DEV && result.length > 0) {
       console.debug(`[RustDsp] stretch ×${stretchRatio.toFixed(3)} — in:${channels[0].length} out:${result[0].length}`);
@@ -94,5 +112,17 @@ export function rustTimeStretchChannels(
   } catch (e) {
     console.warn("[RustDsp] process_time_stretch_mono error:", e);
     return null;
+  }
+}
+
+function grainSizeForQuality(quality: DspQuality): number {
+  switch (quality) {
+    case "draft":
+      return 1024;
+    case "high":
+      return 4096;
+    case "balanced":
+    default:
+      return 2048;
   }
 }

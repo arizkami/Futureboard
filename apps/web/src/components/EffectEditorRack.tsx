@@ -1,44 +1,38 @@
 import { useEffect, useRef, useState } from "react";
-import { GripVertical, Plus, Power, Sliders, X } from "lucide-react";
+import { GripVertical, Plus, Sliders, X } from "lucide-react";
 import { useUIStore } from "../store/uiStore";
 import { useProjectStore } from "../store/projectStore";
 import { getTrackInserts } from "../store/selectors";
 import type { InsertDevice } from "../types/daw";
+import { BUILT_IN_PLUGINS, findPlugin } from "../plugins/registry";
 
 type Param = { name: string; value: number; min: number; max: number; unit: string };
 
-const DEVICE_TEMPLATES: Record<string, Param[]> = {
-  EQ: [
-    { name: "Low", value: 0, min: -12, max: 12, unit: "dB" },
-    { name: "Mid", value: 0, min: -12, max: 12, unit: "dB" },
-    { name: "High", value: 0, min: -12, max: 12, unit: "dB" },
-  ],
+const GENERIC_TEMPLATES: Record<string, Param[]> = {
   Compressor: [
-    { name: "Thresh", value: -24, min: -60, max: 0, unit: "dB" },
-    { name: "Ratio", value: 4, min: 1, max: 20, unit: ":1" },
-    { name: "Attack", value: 10, min: 0.1, max: 200, unit: "ms" },
+    { name: "Thresh", value: -24, min: -60, max: 0,   unit: "dB" },
+    { name: "Ratio",  value: 4,   min: 1,   max: 20,  unit: ":1" },
+    { name: "Attack", value: 10,  min: 0.1, max: 200, unit: "ms" },
   ],
   Reverb: [
     { name: "Size", value: 0.5, min: 0, max: 1, unit: "" },
     { name: "Damp", value: 0.5, min: 0, max: 1, unit: "" },
-    { name: "Wet", value: 0.3, min: 0, max: 1, unit: "" },
+    { name: "Wet",  value: 0.3, min: 0, max: 1, unit: "" },
   ],
   Delay: [
-    { name: "Time", value: 250, min: 1, max: 2000, unit: "ms" },
-    { name: "Fdbk", value: 0.3, min: 0, max: 0.95, unit: "" },
-    { name: "Wet", value: 0.25, min: 0, max: 1, unit: "" },
+    { name: "Time", value: 250,  min: 1,   max: 2000, unit: "ms" },
+    { name: "Fdbk", value: 0.3,  min: 0,   max: 0.95, unit: "" },
+    { name: "Wet",  value: 0.25, min: 0,   max: 1,    unit: "" },
   ],
   Saturation: [
     { name: "Drive", value: 0.2, min: 0, max: 1, unit: "" },
-    { name: "Char", value: 0.5, min: 0, max: 1, unit: "" },
+    { name: "Char",  value: 0.5, min: 0, max: 1, unit: "" },
   ],
 };
 
-const BUILT_IN_DEVICES = ["EQ", "Compressor", "Reverb", "Delay", "Saturation"];
-
-function getDefaultParams(name: string): Param[] {
+function getGenericParams(name: string): Param[] {
   return (
-    DEVICE_TEMPLATES[name] ?? [
+    GENERIC_TEMPLATES[name] ?? [
       { name: "Param 1", value: 0.5, min: 0, max: 1, unit: "" },
       { name: "Param 2", value: 0.5, min: 0, max: 1, unit: "" },
     ]
@@ -47,15 +41,13 @@ function getDefaultParams(name: string): Param[] {
 
 export function EffectEditorRack() {
   const { selectedTrackId } = useUIStore();
-  const { project, addInsertDevice, toggleInsertDevice, removeInsertDevice } = useProjectStore();
+  const { project, addInsertDevice, toggleInsertDevice, removeInsertDevice, updateInsertDeviceParams } =
+    useProjectStore();
   const [showAddMenu, setShowAddMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  const track = selectedTrackId
-    ? project.tracks.find((t) => t.id === selectedTrackId)
-    : null;
+  const track = selectedTrackId ? project.tracks.find((t) => t.id === selectedTrackId) : null;
 
-  // Close add-device menu on outside click
   useEffect(() => {
     if (!showAddMenu) return;
     const handler = (e: MouseEvent) => {
@@ -65,15 +57,15 @@ export function EffectEditorRack() {
     return () => document.removeEventListener("mousedown", handler);
   }, [showAddMenu]);
 
-  const addInsert = (deviceName: string) => {
+  const addInsert = (plugin: typeof BUILT_IN_PLUGINS[number]) => {
     if (!selectedTrackId) return;
     const device: InsertDevice = {
       id: crypto.randomUUID(),
-      type: "custom",
-      name: deviceName,
+      type: plugin.type,
+      name: plugin.name,
       enabled: true,
-      order: 0, // store action recomputes order
-      params: {},
+      order: 0,
+      params: plugin.defaultParams(),
     };
     addInsertDevice(selectedTrackId, device);
     setShowAddMenu(false);
@@ -123,10 +115,7 @@ export function EffectEditorRack() {
       </div>
 
       {/* Horizontal rack */}
-      <div
-        className="flex min-h-0 flex-1 overflow-x-auto overflow-y-hidden"
-        style={{ background: "#0f1218" }}
-      >
+      <div className="flex min-h-0 flex-1 overflow-x-auto overflow-y-hidden" style={{ background: "#0f1218" }}>
         <div className="flex h-full gap-1.5 p-2">
           {inserts.map((ins) => (
             <DeviceCard
@@ -134,6 +123,9 @@ export function EffectEditorRack() {
               insert={ins}
               onToggleBypass={() => toggleBypass(ins.id)}
               onRemove={() => removeInsert(ins.id)}
+              onParamsChange={(patch) =>
+                selectedTrackId && updateInsertDeviceParams(selectedTrackId, ins.id, patch)
+              }
             />
           ))}
 
@@ -151,29 +143,33 @@ export function EffectEditorRack() {
 
             {showAddMenu && (
               <div
-                className="absolute bottom-full left-0 z-20 mb-1 w-44 overflow-hidden rounded-lg border shadow-2xl"
+                className="absolute bottom-full left-0 z-20 mb-1 w-52 overflow-hidden rounded-lg border shadow-2xl"
                 style={{
                   background: "#1a1e26",
                   borderColor: "rgba(255,255,255,0.1)",
                   boxShadow: "0 8px 32px rgba(0,0,0,0.55)",
                 }}
               >
-                <div className="px-2.5 py-2 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
-                  Built-in Devices
-                </div>
-                <div className="pb-1">
-                  {BUILT_IN_DEVICES.map((name) => (
-                    <button
-                      key={name}
-                      type="button"
-                      onClick={() => addInsert(name)}
-                      className="flex w-full items-center gap-2 px-2.5 py-1.5 text-[11px] text-daw-dim transition-colors hover:bg-white/[0.06] hover:text-daw-text"
-                    >
-                      <Sliders size={10} className="shrink-0 text-daw-faint" />
-                      {name}
-                    </button>
+                {/* EQ */}
+                <AddMenuSection label="EQ">
+                  {BUILT_IN_PLUGINS.filter((p) => p.category === "eq").map((p) => (
+                    <AddMenuItem key={p.id} plugin={p} onAdd={addInsert} />
                   ))}
-                </div>
+                </AddMenuSection>
+
+                {/* Space */}
+                <AddMenuSection label="Space">
+                  {BUILT_IN_PLUGINS.filter((p) => p.category === "space").map((p) => (
+                    <AddMenuItem key={p.id} plugin={p} onAdd={addInsert} />
+                  ))}
+                </AddMenuSection>
+
+                {/* Dynamics */}
+                <AddMenuSection label="Dynamics">
+                  {BUILT_IN_PLUGINS.filter((p) => p.category === "dynamics").map((p) => (
+                    <AddMenuItem key={p.id} plugin={p} onAdd={addInsert} />
+                  ))}
+                </AddMenuSection>
               </div>
             )}
           </div>
@@ -183,7 +179,71 @@ export function EffectEditorRack() {
   );
 }
 
+function AddMenuSection({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="pb-1">
+      <div className="px-2.5 py-2 text-[9px] font-semibold uppercase tracking-widest text-daw-faint">
+        {label}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function AddMenuItem({
+  plugin,
+  onAdd,
+}: {
+  plugin: typeof BUILT_IN_PLUGINS[number];
+  onAdd: (p: typeof BUILT_IN_PLUGINS[number]) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onAdd(plugin)}
+      className="flex w-full items-center gap-2 px-2.5 py-1.5 text-[11px] text-daw-dim transition-colors hover:bg-white/[0.06] hover:text-daw-text"
+    >
+      <span
+        className="h-[7px] w-[7px] shrink-0 rounded-full"
+        style={{ background: plugin.color, boxShadow: `0 0 6px ${plugin.color}80` }}
+      />
+      <span>{plugin.name}</span>
+      <span className="ml-auto text-[9px] text-daw-faint">{plugin.shortName}</span>
+    </button>
+  );
+}
+
 function DeviceCard({
+  insert,
+  onToggleBypass,
+  onRemove,
+  onParamsChange,
+}: {
+  insert: InsertDevice;
+  onToggleBypass: () => void;
+  onRemove: () => void;
+  onParamsChange: (patch: Record<string, number | string | boolean>) => void;
+}) {
+  // Try to find a built-in plugin editor for this insert
+  const plugin = findPlugin(insert.name) ?? findPlugin(insert.type);
+
+  if (plugin) {
+    return (
+      <plugin.Editor
+        params={insert.params}
+        enabled={insert.enabled}
+        onParamsChange={onParamsChange}
+        onToggleEnabled={onToggleBypass}
+        onReset={() => onParamsChange(plugin.defaultParams())}
+      />
+    );
+  }
+
+  // Generic fallback card for unknown devices
+  return <GenericDeviceCard insert={insert} onToggleBypass={onToggleBypass} onRemove={onRemove} />;
+}
+
+function GenericDeviceCard({
   insert,
   onToggleBypass,
   onRemove,
@@ -192,7 +252,7 @@ function DeviceCard({
   onToggleBypass: () => void;
   onRemove: () => void;
 }) {
-  const [params, setParams] = useState<Param[]>(() => getDefaultParams(insert.name));
+  const [params, setParams] = useState<Param[]>(() => getGenericParams(insert.name));
 
   const setParam = (i: number, v: number) => {
     setParams((prev) => prev.map((p, idx) => (idx === i ? { ...p, value: v } : p)));
@@ -215,15 +275,12 @@ function DeviceCard({
         opacity: !insert.enabled ? 0.55 : 1,
       }}
     >
-      {/* Device header */}
       <div
         className="flex h-8 shrink-0 items-center gap-1 border-b px-1.5"
         style={{ borderColor: "rgba(255,255,255,0.07)", background: "rgba(0,0,0,0.2)" }}
       >
         <GripVertical size={10} className="cursor-grab text-daw-faint opacity-40" />
-        <span className="flex-1 truncate px-0.5 text-[11px] font-semibold text-daw-dim">
-          {insert.name}
-        </span>
+        <span className="flex-1 truncate px-0.5 text-[11px] font-semibold text-daw-dim">{insert.name}</span>
         <button
           type="button"
           onClick={onToggleBypass}
@@ -234,7 +291,7 @@ function DeviceCard({
             background: !insert.enabled ? "transparent" : "rgba(86,199,201,0.12)",
           }}
         >
-          <Power size={9} />
+          <span style={{ fontSize: "9px", fontWeight: 700 }}>⏻</span>
         </button>
         <button
           type="button"
@@ -246,7 +303,6 @@ function DeviceCard({
         </button>
       </div>
 
-      {/* Parameters */}
       <div className="flex flex-1 flex-col justify-center gap-3 overflow-y-auto px-3 py-2">
         {params.map((p, i) => (
           <div key={p.name} className="flex flex-col gap-1">

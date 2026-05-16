@@ -39,6 +39,8 @@ export function timeStretchWSOLA(
   const hopOut      = Math.max(1, Math.round(hopIn * ratio));
   const searchRange = Math.max(1, Math.min(hopIn, grainSize >> 3)); // ±searchRange around expected pos
   const searchStep  = Math.max(1, searchRange >> 3);       // ~8 candidates to evaluate
+  const corrLen     = Math.max(1, Math.min(CORR_LEN, grainSize >> 2));
+  const refOffset   = Math.min(hopIn, Math.max(0, grainSize - corrLen));
 
   const inLen  = channels[0].length;
   const outLen = Math.max(1, Math.ceil(inLen * ratio));
@@ -68,7 +70,7 @@ export function timeStretchWSOLA(
       const hi = Math.min(inLen - grainSize, expectedInPos + searchRange);
 
       for (let pos = lo; pos <= hi; pos += searchStep) {
-        const score = normalizedXCorr(ref0, pos, prevGrain, CORR_LEN);
+        const score = normalizedXCorr(ref0, pos, prevGrain, refOffset, corrLen);
         if (score > bestScore) {
           bestScore = score;
           bestPos   = pos;
@@ -109,6 +111,11 @@ export function timeStretchWSOLA(
       for (const dst of outputs) {
         dst[i] *= inv;
       }
+    } else {
+      const srcPos = Math.min(inLen - 1, Math.floor(i / ratio));
+      for (let ch = 0; ch < channels.length; ch++) {
+        outputs[ch][i] = channels[ch][srcPos];
+      }
     }
   }
 
@@ -117,14 +124,14 @@ export function timeStretchWSOLA(
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/** Normalized cross-correlation between signal[pos..] and ref[0..len]. */
-function normalizedXCorr(signal: F32, pos: number, ref: F32, len: number): number {
+/** Normalized cross-correlation between signal[pos..] and ref[refOffset..]. */
+function normalizedXCorr(signal: F32, pos: number, ref: F32, refOffset: number, len: number): number {
   let sum = 0, eSig = 0, eRef = 0;
-  const n = Math.min(len, signal.length - pos, ref.length);
+  const n = Math.min(len, signal.length - pos, ref.length - refOffset);
   if (n <= 0) return 0;
   for (let i = 0; i < n; i++) {
     const s = signal[pos + i];
-    const r = ref[i];
+    const r = ref[refOffset + i];
     sum  += s * r;
     eSig += s * s;
     eRef += r * r;

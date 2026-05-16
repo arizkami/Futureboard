@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { Activity, ArrowUpDown, CornerDownLeft, Cpu, GitFork, GitMerge, Layers, Mic2, Music, PhoneIncoming, PhoneOutgoing, RotateCcw, Scissors, Sliders, Trash2, Volume2, X } from "lucide-react";
 import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
@@ -560,7 +560,7 @@ function InspectorTrackBtn({
 
 import type { ProcessorKind } from "../audio/AudioProcessingService";
 
-type ProcessStatus = "idle" | "processing" | "cached" | "failed";
+type ProcessStatus = "idle" | "realtime" | "cached" | "failed";
 
 const MODE_LABELS: Record<AudioClipProcess["mode"], string> = {
   resample:    "Resample (tape)",
@@ -572,12 +572,19 @@ const MODE_LABELS: Record<AudioClipProcess["mode"], string> = {
 
 function processorLabel(kind: ProcessorKind, mode: AudioClipProcess["mode"]): string {
   switch (kind) {
+    case "ts-phase-vocoder": return `Spectral Pitch (${mode})`;
     case "rust-wasm":   return "✓ Rust WASM";
     case "ts-wsola":    return `✓ WSOLA (${mode})`;
     case "ts-granular": return `✓ Granular (${mode})`;
     case "ts-resample": return "✓ Resample";
     default:            return "✓ Ready";
   }
+}
+
+function processorKindForParams(params: AudioClipProcess): ProcessorKind {
+  if (!params.preservePitch || params.mode === "resample") return "ts-resample";
+  if (params.mode === "granular" || params.mode === "percussive") return "ts-granular";
+  return params.pitchSemitones !== 0 ? "ts-phase-vocoder" : "ts-wsola";
 }
 
 function ClipProcessSection({ clip }: { clip: DawClip }) {
@@ -588,7 +595,6 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
   const [draft, setDraft] = useState<AudioClipProcess>(proc);
   const [processStatus, setProcessStatus] = useState<ProcessStatus>("idle");
   const [processorUsed, setProcessorUsed] = useState<ProcessorKind | null>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Keep draft in sync when a different clip is selected
   const procKey = `${clip.id}:${proc.speedRatio}:${proc.pitchSemitones}:${proc.preservePitch}:${proc.mode}:${proc.quality}`;
@@ -604,38 +610,35 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
     history().execute(new UpdateClipCommand(clip.id, { audioProcess: next }, "Set Clip Process"));
   };
 
-  // Trigger processing whenever committed params change (debounced 300ms).
+  // Realtime-first: changing pitch/speed never renders the whole file on the UI thread.
   useEffect(() => {
     const hasEffect = proc.speedRatio !== 1 || proc.pitchSemitones !== 0;
     if (!hasEffect) { setProcessStatus("idle"); setProcessorUsed(null); return; }
 
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(async () => {
-      const audioBuffer = audioEngine.getBuffer(clip.fileId);
-      if (!audioBuffer) return;
+    const params = {
+      speedRatio:     proc.speedRatio,
+      pitchSemitones: proc.pitchSemitones,
+      preservePitch:  proc.preservePitch,
+      mode:           proc.mode ?? "polyphonic",
+      quality:        proc.quality,
+    };
+    const audioBuffer = audioEngine.getBuffer(clip.fileId);
+    if (audioBuffer) {
       const key = buildDecodedCacheKey(clip.fileId, audioBuffer.audioBuffer.sampleRate);
       const decoded = audioCacheManager.getDecodedAudio(key);
-      if (!decoded) return;
-
-      setProcessStatus("processing");
-      try {
-        const { processorUsed: kind } = await audioProcessingService.processClipAudio(decoded, {
-          speedRatio:     proc.speedRatio,
-          pitchSemitones: proc.pitchSemitones,
-          preservePitch:  proc.preservePitch,
-          mode:           proc.mode ?? "polyphonic",
-          quality:        proc.quality,
-        });
+      const cached = decoded ? audioProcessingService.getCachedProcessed(decoded, params) : null;
+      if (cached) {
         setProcessStatus("cached");
-        setProcessorUsed(kind);
-        transport.rescheduleIfPlaying();
-      } catch {
-        setProcessStatus("failed");
+        setProcessorUsed(processorKindForParams(params));
+      } else {
+        setProcessStatus("realtime");
         setProcessorUsed(null);
       }
-    }, 300);
-
-    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+    } else {
+      setProcessStatus("realtime");
+      setProcessorUsed(null);
+    }
+    transport.rescheduleIfPlaying();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clip.fileId, proc.speedRatio, proc.pitchSemitones, proc.preservePitch, proc.mode, proc.quality]);
 
@@ -765,7 +768,7 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
                    : "#a99cff",
             }}
           >
-            {processStatus === "processing" && "⏳ Processing…"}
+            {processStatus === "realtime" && "Realtime Preview"}
             {processStatus === "cached" && processorUsed
               ? processorLabel(processorUsed, draft.mode ?? "polyphonic")
               : processStatus === "cached" ? "✓ Ready" : null}

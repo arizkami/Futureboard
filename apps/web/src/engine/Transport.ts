@@ -39,6 +39,9 @@ class Transport {
   async play() {
     if (this._state === "playing") return;
     await audioEngine.resume();
+    await audioEngine.ensureSoundTouchWorklet().catch((error) => {
+      console.warn("[Transport] SoundTouch worklet unavailable:", error);
+    });
     this.transportStartAudioTime = audioEngine.currentTime;
     this.transportStartProjectTime = this._playheadTime;
     this._state = "playing";

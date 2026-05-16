@@ -5,6 +5,8 @@ import { waveformCache, buildCacheKey, entryPeaksAsFloat32, SAMPLES_PER_PEAK, WA
 import { audioCacheManager } from "../audio/AudioCacheManager";
 import { audioBufferToDecodedAudio } from "../audio/audioCacheTypes";
 import { buildDecodedCacheKey } from "../audio/audioCacheKeys";
+import { SoundTouchNode } from "@soundtouchjs/audio-worklet";
+import soundTouchProcessorUrl from "@soundtouchjs/audio-worklet/processor?url";
 
 type OnPeaks = (fileId: FileId, peaks: WaveformPeaks) => void;
 
@@ -16,6 +18,7 @@ type LoadedBuffer = {
 class AudioEngine {
   private _ctx: AudioContext | null = null;
   private bufferCache = new Map<FileId, LoadedBuffer>();
+  private soundTouchWorkletPromise: Promise<void> | null = null;
 
   get ctx(): AudioContext {
     if (!this._ctx) this._ctx = new AudioContext();
@@ -24,6 +27,17 @@ class AudioEngine {
 
   async resume() {
     if (this.ctx.state === "suspended") await this.ctx.resume();
+  }
+
+  async ensureSoundTouchWorklet(): Promise<void> {
+    if (!this.soundTouchWorkletPromise) {
+      this.soundTouchWorkletPromise = SoundTouchNode.register(this.ctx, soundTouchProcessorUrl);
+    }
+    await this.soundTouchWorkletPromise;
+  }
+
+  createSoundTouchNode(): SoundTouchNode {
+    return new SoundTouchNode({ context: this.ctx, outputChannelCount: 2 });
   }
 
   // ── core decode + cache ──────────────────────────────────────────────────────

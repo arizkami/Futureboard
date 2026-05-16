@@ -58,3 +58,6 @@ shadow: soft floating window shadow
 radius: rounded but not bubbly
 titlebar: compact 28-34px
 ```
+
+and read DESIGN.md too
+for WebUI WASM DSP vsersion: frameworks/SphereWebAudioCore

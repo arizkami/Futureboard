@@ -25,6 +25,7 @@ import type { DawFile, DawProject, DawTrack, InsertDevice, TrackSend } from "../
 import { buildTrackContextMenu } from "../menu/trackContextMenu";
 import { getSendTargets } from "../utils/routingHelpers";
 import { AddTrackSendCommand, RemoveTrackSendCommand } from "../commands";
+import { EQUZ8_DEFAULT_PARAMS, serializeEquz8Params } from "../../../../plugins/Equz8";
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -95,7 +96,7 @@ function InsertsAddMenu({ accent, trackId }: { accent: string; trackId?: string 
       name,
       enabled: true,
       order: 0,
-      params: {},
+      params: type === "eq" ? serializeEquz8Params(EQUZ8_DEFAULT_PARAMS) : {},
     };
     addInsertDevice(trackId, device);
   };
@@ -106,7 +107,7 @@ function InsertsAddMenu({ accent, trackId }: { accent: string; trackId?: string 
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" sideOffset={4}>
         <DropdownMenuLabel>Add Device</DropdownMenuLabel>
-        <DropdownMenuItem icon={Activity}    onSelect={() => add("EQ", "eq")}>Add EQ</DropdownMenuItem>
+        <DropdownMenuItem icon={Activity}    onSelect={() => add("Equz8", "eq")}>Add Equz8</DropdownMenuItem>
         <DropdownMenuItem icon={Gauge}       onSelect={() => add("Compressor", "compressor")}>Add Compressor</DropdownMenuItem>
         <DropdownMenuItem icon={Waves}       onSelect={() => add("Reverb", "reverb")}>Add Reverb</DropdownMenuItem>
         <DropdownMenuItem icon={AudioLines}  onSelect={() => add("Delay", "delay")}>Add Delay</DropdownMenuItem>

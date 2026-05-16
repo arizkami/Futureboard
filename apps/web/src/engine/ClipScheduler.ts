@@ -10,6 +10,7 @@ import { buildDecodedCacheKey } from "../audio/audioCacheKeys";
 
 type ScheduledSource = {
   node:     AudioBufferSourceNode;
+  effectNode?: AudioNode;
   gainNode: GainNode;
   clipId:   string;
   clipGain: number; // stored so unmute can restore correct level
@@ -35,8 +36,10 @@ class ClipScheduler {
         if (!loaded) continue;
 
         // Resolve the AudioBuffer to play — use processed version if available.
-        let audioBuffer = loaded.audioBuffer;
-        let speedRatio  = 1;
+        let audioBuffer: AudioBuffer | null = loaded.audioBuffer;
+        let bufferTimeScale = 1;
+        let realtimeRate    = 1;
+        let soundTouchParams: AudioProcessParams | null = null;
 
         if (clip.audioProcess) {
           const proc = clip.audioProcess;
@@ -44,23 +47,33 @@ class ClipScheduler {
             proc.speedRatio !== 1 || proc.pitchSemitones !== 0;
 
           if (hasEffect) {
+            const params: AudioProcessParams = {
+              speedRatio:     proc.speedRatio,
+              pitchSemitones: proc.pitchSemitones,
+              preservePitch:  proc.preservePitch,
+              mode:           proc.mode ?? "polyphonic",
+              quality:        proc.quality,
+            };
             const decoded = audioCacheManager.getDecodedAudio(
               buildDecodedCacheKey(clip.fileId, loaded.audioBuffer.sampleRate),
             );
             if (decoded) {
-              const params: AudioProcessParams = {
-                speedRatio:     proc.speedRatio,
-                pitchSemitones: proc.pitchSemitones,
-                preservePitch:  proc.preservePitch,
-                mode:           proc.mode ?? "polyphonic",
-                quality:        proc.quality,
-              };
               const processed = audioProcessingService.getCachedProcessed(decoded, params);
               if (processed) {
                 audioBuffer = decodedAudioToAudioBuffer(audioEngine.ctx, processed);
-                speedRatio  = proc.speedRatio;
+                bufferTimeScale = proc.speedRatio;
+              } else if (canUseSoundTouch(params)) {
+                soundTouchParams = params;
+              } else {
+                realtimeRate = realtimePlaybackRate(params);
               }
               // If not cached yet, fall through to original buffer.
+            } else {
+              if (canUseSoundTouch(params)) {
+                soundTouchParams = params;
+              } else {
+                realtimeRate = realtimePlaybackRate(params);
+              }
             }
           }
         }
@@ -68,33 +81,55 @@ class ClipScheduler {
         const clipMuted = clip.muted ?? false;
         const effectiveGain = clipMuted ? 0 : clip.gain;
 
-        const node     = audioEngine.ctx.createBufferSource();
-        node.buffer    = audioBuffer;
-
         const gainNode = audioEngine.ctx.createGain();
         gainNode.gain.value = effectiveGain;
-        node.connect(gainNode);
-        gainNode.connect(trackInput);
 
         let clipOffset: number;
         let scheduleAt: number;
 
         if (clip.startTime >= playheadTime) {
-          clipOffset = clip.offset / speedRatio;
+          clipOffset = clip.offset / bufferTimeScale;
           scheduleAt = audioNow + (clip.startTime - playheadTime);
         } else {
           // Playhead is inside the clip — scale offset into processed buffer time.
           const rawOffset = clip.offset + (playheadTime - clip.startTime);
-          clipOffset      = rawOffset / speedRatio;
+          clipOffset      = rawOffset / bufferTimeScale;
           scheduleAt      = audioNow;
         }
 
+        const outputTimeScale = soundTouchParams ? soundTouchParams.speedRatio : bufferTimeScale * realtimeRate;
         const remainingDuration =
-          (clip.duration - (clipOffset * speedRatio - clip.offset)) / speedRatio;
+          (clip.duration - (clipOffset * bufferTimeScale - clip.offset)) / outputTimeScale;
         if (remainingDuration <= 0) continue;
 
-        node.start(scheduleAt, clipOffset, remainingDuration);
-        this.scheduled.push({ node, gainNode, clipId: clip.id, clipGain: clip.gain });
+        let effectNode: AudioNode | undefined;
+        const source = audioEngine.ctx.createBufferSource();
+        source.buffer = audioBuffer ?? loaded.audioBuffer;
+
+        if (soundTouchParams) {
+          try {
+            const soundTouch = audioEngine.createSoundTouchNode();
+            source.playbackRate.value = soundTouchParams.speedRatio;
+            soundTouch.playbackRate.value = soundTouchParams.speedRatio;
+            soundTouch.pitch.value = 1;
+            soundTouch.pitchSemitones.value = soundTouchParams.pitchSemitones;
+            soundTouch.setStretchParameters({ overlapMs: 12, quickSeek: true });
+            source.connect(soundTouch);
+            soundTouch.connect(gainNode);
+            effectNode = soundTouch;
+          } catch (error) {
+            console.warn("[ClipScheduler] SoundTouch unavailable, falling back to playbackRate:", error);
+            source.playbackRate.value = realtimePlaybackRate(soundTouchParams);
+            source.connect(gainNode);
+          }
+        } else {
+          source.playbackRate.value = realtimeRate;
+          source.connect(gainNode);
+        }
+
+        gainNode.connect(trackInput);
+        source.start(scheduleAt, clipOffset, remainingDuration);
+        this.scheduled.push({ node: source, effectNode, gainNode, clipId: clip.id, clipGain: clip.gain });
       }
     }
   }
@@ -126,10 +161,11 @@ class ClipScheduler {
   }
 
   cancelAll() {
-    for (const { node } of this.scheduled) {
+    for (const { node, effectNode } of this.scheduled) {
       try {
         node.stop();
         node.disconnect();
+        effectNode?.disconnect();
       } catch {
         // already stopped
       }
@@ -139,3 +175,17 @@ class ClipScheduler {
 }
 
 export const clipScheduler = new ClipScheduler();
+
+function realtimePlaybackRate(params: AudioProcessParams): number {
+  let rate = params.speedRatio;
+  if (params.pitchSemitones !== 0) {
+    rate *= Math.pow(2, params.pitchSemitones / 12);
+  }
+  return Math.max(0.25, Math.min(4.0, rate));
+}
+
+function canUseSoundTouch(params: AudioProcessParams): boolean {
+  return params.preservePitch
+    && params.mode !== "resample"
+    && (params.pitchSemitones !== 0 || params.speedRatio !== 1);
+}
