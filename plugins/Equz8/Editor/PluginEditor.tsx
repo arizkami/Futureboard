@@ -42,6 +42,8 @@ const SPEC_N   = 128;
 const NODE_R   = 8;
 const NODE_R_SEL = 11;
 const NODE_HIT = 16;
+const EDITOR_WIDTH = 1180;
+const EDITOR_HEIGHT = 430;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -824,8 +826,14 @@ export function Equz8Editor({ params, enabled, onParamsChange, onToggleEnabled, 
 
   return (
     <div
-      className="flex h-full max-h-[520px] min-h-[380px] w-[1100px] max-w-[1400px] flex-col overflow-hidden rounded-[7px] text-[11px]"
+      className="flex flex-col overflow-hidden rounded-[7px] text-[11px]"
       style={{
+        width: EDITOR_WIDTH,
+        minWidth: EDITOR_WIDTH,
+        height: "100%",
+        minHeight: EDITOR_HEIGHT,
+        maxHeight: 520,
+        flex: `0 0 ${EDITOR_WIDTH}px`,
         background: "#0c0f15",
         border: "1px solid rgba(255,255,255,0.09)",
         boxShadow: "0 8px 40px rgba(0,0,0,0.75), 0 1px 0 rgba(255,255,255,0.04) inset",
@@ -908,8 +916,8 @@ export function Equz8Editor({ params, enabled, onParamsChange, onToggleEnabled, 
               band={sel}
               bandIndex={model.selectedBand}
               nodePos={selPos}
-              containerWidth={1100}
-              containerHeight={520}
+              containerWidth={EDITOR_WIDTH}
+              containerHeight={EDITOR_HEIGHT}
               onUpdate={(patch) => updateBand(model.selectedBand, patch)}
               onToggleActive={() => updateBand(model.selectedBand, { active: !sel.active })}
             />
