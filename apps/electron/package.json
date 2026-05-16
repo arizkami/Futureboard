@@ -14,10 +14,10 @@
     "copy:renderer": "node scripts/copy-renderer.cjs",
     "build:all": "bun run build:renderer && bun run build && bun run copy:renderer",
     "pack": "bun run build:all && electron-builder --dir",
-    "dist": "bun run build:all && electron-builder",
-    "dist:win": "bun run build:all && electron-builder --win",
-    "dist:mac": "bun run build:all && electron-builder --mac",
-    "dist:linux": "bun run build:all && electron-builder --linux"
+    "dist": "bun run build:all && electron-builder --publish never",
+    "dist:win": "bun run build:all && electron-builder --win --publish never",
+    "dist:mac": "bun run build:all && electron-builder --mac --publish never",
+    "dist:linux": "bun run build:all && electron-builder --linux --publish never"
   },
   "devDependencies": {
     "@types/node": "^25.8.0",
