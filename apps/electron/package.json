@@ -32,6 +32,7 @@
     "appId": "org.mochilinux.studio",
     "productName": "Futureboard Studio",
     "copyright": "Copyright © ${author}",
+    "publish": null,
     "afterPack": "scripts/after-pack.cjs",
     "asar": true,
     "asarUnpack": [],
@@ -83,7 +84,8 @@
       ],
       "category": "public.app-category.music",
       "icon": "icons/app.png",
-      "hardenedRuntime": true
+      "hardenedRuntime": false,
+      "identity": null
     },
     "linux": {
       "target": [
