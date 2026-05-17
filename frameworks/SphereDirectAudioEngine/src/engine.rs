@@ -11,6 +11,7 @@
 //!     `Relaxed` ordering, which is sufficient for meter display purposes.
 //!   - Stream lifecycle (open/close) is guarded by `parking_lot::Mutex`.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -19,11 +20,13 @@ use cpal::{BufferSize, FromSample, Sample, SampleFormat, SizedSample};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
 
+use crate::audio_file::AudioFileBuffer;
 use crate::command::EngineCommand;
 use crate::device;
 use crate::dsp::{meter::smooth_peak, oscillator::SineOscillator};
 use crate::error::SphereAudioError;
 use crate::graph::{MasterState, TrackState};
+use crate::runtime::RuntimeProject;
 use crate::types::{
     EngineProjectSnapshot, EngineStatus, JsAudioDeviceInfo, JsDeviceOpenConfig, JsMeterSnapshot,
     JsSphereAudioStatus,
@@ -100,6 +103,10 @@ pub struct EngineInner {
 
     // Last loaded project snapshot (optional, for reference/debugging).
     project: Mutex<Option<EngineProjectSnapshot>>,
+
+    // Prepared render graph shared with new streams and pushed to callbacks.
+    runtime: Mutex<RuntimeProject>,
+    audio_cache: Mutex<HashMap<String, Arc<AudioFileBuffer>>>,
 }
 
 #[derive(Clone)]
@@ -144,6 +151,8 @@ impl EngineInner {
             tracks: Mutex::new(Vec::new()),
             master: Mutex::new(MasterState::default()),
             project: Mutex::new(None),
+            runtime: Mutex::new(RuntimeProject::default()),
+            audio_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -155,10 +164,14 @@ impl EngineInner {
 
     pub fn get_status(&self) -> JsSphereAudioStatus {
         let st = self.status.lock().clone();
+        let sample_rate = self.shared.sample_rate.load(Ordering::Relaxed).max(1);
+        let position_samples = self.shared.position_samples.load(Ordering::Relaxed);
         JsSphereAudioStatus {
             available: true,
             running: st.running,
             stream_open: st.stream_open,
+            transport_playing: self.shared.playing.load(Ordering::Relaxed),
+            position_seconds: position_samples as f64 / sample_rate as f64,
             version: ENGINE_VERSION.to_string(),
             backend_name: cpal::default_host().id().name().to_string(),
             sample_rate: st.sample_rate,
@@ -197,6 +210,24 @@ impl EngineInner {
             shared_cb
                 .sample_rate
                 .store(candidate.config.sample_rate.0, Ordering::Relaxed);
+            let initial_runtime = self
+                .project
+                .lock()
+                .as_ref()
+                .map(|snapshot| {
+                    let mut audio_cache = self.audio_cache.lock();
+                    RuntimeProject::build(
+                        snapshot,
+                        candidate.config.sample_rate.0,
+                        &mut audio_cache,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    let mut runtime = self.runtime.lock().clone();
+                    runtime.sample_rate = candidate.config.sample_rate.0;
+                    runtime
+                });
+            *self.runtime.lock() = initial_runtime.clone();
 
             match build_output_stream(
                 &dev,
@@ -204,6 +235,7 @@ impl EngineInner {
                 candidate.sample_format,
                 rx,
                 shared_cb,
+                initial_runtime,
             ) {
                 Ok(stream) => {
                     selected = Some((candidate, tx, stream));
@@ -329,6 +361,10 @@ impl EngineInner {
         param_id: &str,
         value: f64,
     ) -> Result<(), SphereAudioError> {
+        if track_id == "__master__" && param_id == "volume" {
+            return self.set_master_volume(value as f32);
+        }
+
         match param_id {
             "volume" => self.send_command(EngineCommand::SetTrackVolume {
                 track_id: track_id.into(),
@@ -341,6 +377,10 @@ impl EngineInner {
             "muted" => self.send_command(EngineCommand::SetTrackMute {
                 track_id: track_id.into(),
                 muted: value != 0.0,
+            }),
+            "solo" => self.send_command(EngineCommand::SetTrackSolo {
+                track_id: track_id.into(),
+                solo: value != 0.0,
             }),
             other => {
                 // Unknown param — log but don't error (UI might send future params)
@@ -368,6 +408,24 @@ impl EngineInner {
     // ── Project snapshot ───────────────────────────────────────────────────
 
     pub fn load_project(&self, snapshot: EngineProjectSnapshot) -> Result<(), SphereAudioError> {
+        let output_sample_rate = self.shared.sample_rate.load(Ordering::Relaxed).max(1);
+        let runtime = {
+            let mut audio_cache = self.audio_cache.lock();
+            let project = RuntimeProject::build(&snapshot, output_sample_rate, &mut audio_cache);
+
+            // Evict cache entries no longer referenced by any clip in the new snapshot.
+            // This keeps memory bounded when clips are removed between project loads.
+            let active_paths: std::collections::HashSet<&str> = snapshot
+                .clips
+                .iter()
+                .filter_map(|c| c.media_path.as_deref())
+                .filter(|p| !p.is_empty())
+                .collect();
+            audio_cache.retain(|path, _| active_paths.contains(path.as_str()));
+
+            project
+        };
+
         // Build initial track states from snapshot.
         let mut tracks = self.tracks.lock();
         tracks.clear();
@@ -383,6 +441,11 @@ impl EngineInner {
 
         // Store snapshot for future reference.
         *self.project.lock() = Some(snapshot.clone());
+        *self.runtime.lock() = runtime.clone();
+
+        if self.cmd_tx.lock().is_some() {
+            self.send_command(EngineCommand::LoadProject(runtime))?;
+        }
 
         eprintln!(
             "[SphereAudio] Project loaded: id={} tracks={} clips={}",
@@ -455,24 +518,134 @@ fn reported_buffer_size(config: &cpal::StreamConfig) -> u32 {
     }
 }
 
+#[inline]
+fn render_project_sample(
+    runtime: &RuntimeProject,
+    project_sample: u64,
+    master_volume: f32,
+) -> (f32, f32) {
+    let mut out_l = 0.0f32;
+    let mut out_r = 0.0f32;
+
+    for clip in &runtime.clips {
+        if project_sample < clip.start_sample {
+            continue;
+        }
+        let rel = project_sample - clip.start_sample;
+        if rel >= clip.duration_samples {
+            continue;
+        }
+
+        let Some(track) = runtime.tracks.iter().find(|t| t.id == clip.track_id) else {
+            continue;
+        };
+        if track.muted || (runtime.has_solo && !track.solo) {
+            continue;
+        }
+
+        let source_pos_seconds = clip.offset_seconds
+            + (rel as f64 / runtime.sample_rate.max(1) as f64) * clip.speed_ratio as f64;
+        let source_pos = source_pos_seconds * clip.source.sample_rate as f64;
+        let (mut l, mut r) = sample_source_stereo(&clip.source, source_pos);
+        if l == 0.0 && r == 0.0 {
+            continue;
+        }
+
+        let (pan_l, pan_r) = pan_gains(track.pan);
+        let gain = clip.gain * track.volume * master_volume;
+        l *= gain * pan_l;
+        r *= gain * pan_r;
+        out_l += l;
+        out_r += r;
+    }
+
+    (out_l.clamp(-1.0, 1.0), out_r.clamp(-1.0, 1.0))
+}
+
+#[inline]
+fn pan_gains(pan: f32) -> (f32, f32) {
+    let pan = pan.clamp(-1.0, 1.0);
+    if pan < 0.0 {
+        (1.0, 1.0 + pan)
+    } else {
+        (1.0 - pan, 1.0)
+    }
+}
+
+#[inline]
+fn sample_source_stereo(source: &crate::audio_file::AudioFileBuffer, pos: f64) -> (f32, f32) {
+    if pos < 0.0 || source.frames == 0 {
+        return (0.0, 0.0);
+    }
+
+    let idx = pos.floor() as usize;
+    if idx >= source.frames {
+        return (0.0, 0.0);
+    }
+    let frac = (pos - idx as f64) as f32;
+    let next_idx = (idx + 1).min(source.frames - 1);
+
+    let (l0, r0) = read_frame_stereo(source, idx);
+    let (l1, r1) = read_frame_stereo(source, next_idx);
+
+    (l0 + (l1 - l0) * frac, r0 + (r1 - r0) * frac)
+}
+
+#[inline]
+fn read_frame_stereo(source: &crate::audio_file::AudioFileBuffer, frame: usize) -> (f32, f32) {
+    let base = frame * source.channels;
+    match source.channels {
+        0 => (0.0, 0.0),
+        1 => {
+            let v = source.samples.get(base).copied().unwrap_or(0.0);
+            (v, v)
+        }
+        _ => (
+            source.samples.get(base).copied().unwrap_or(0.0),
+            source.samples.get(base + 1).copied().unwrap_or(0.0),
+        ),
+    }
+}
+
 fn build_output_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     sample_format: SampleFormat,
     cmd_rx: Receiver<EngineCommand>,
     shared: Arc<SharedState>,
+    initial_runtime: RuntimeProject,
 ) -> Result<cpal::Stream, String> {
     match sample_format {
-        SampleFormat::I8 => build_output_stream_typed::<i8>(device, config, cmd_rx, shared),
-        SampleFormat::I16 => build_output_stream_typed::<i16>(device, config, cmd_rx, shared),
-        SampleFormat::I32 => build_output_stream_typed::<i32>(device, config, cmd_rx, shared),
-        SampleFormat::I64 => build_output_stream_typed::<i64>(device, config, cmd_rx, shared),
-        SampleFormat::U8 => build_output_stream_typed::<u8>(device, config, cmd_rx, shared),
-        SampleFormat::U16 => build_output_stream_typed::<u16>(device, config, cmd_rx, shared),
-        SampleFormat::U32 => build_output_stream_typed::<u32>(device, config, cmd_rx, shared),
-        SampleFormat::U64 => build_output_stream_typed::<u64>(device, config, cmd_rx, shared),
-        SampleFormat::F32 => build_output_stream_typed::<f32>(device, config, cmd_rx, shared),
-        SampleFormat::F64 => build_output_stream_typed::<f64>(device, config, cmd_rx, shared),
+        SampleFormat::I8 => {
+            build_output_stream_typed::<i8>(device, config, cmd_rx, shared, initial_runtime)
+        }
+        SampleFormat::I16 => {
+            build_output_stream_typed::<i16>(device, config, cmd_rx, shared, initial_runtime)
+        }
+        SampleFormat::I32 => {
+            build_output_stream_typed::<i32>(device, config, cmd_rx, shared, initial_runtime)
+        }
+        SampleFormat::I64 => {
+            build_output_stream_typed::<i64>(device, config, cmd_rx, shared, initial_runtime)
+        }
+        SampleFormat::U8 => {
+            build_output_stream_typed::<u8>(device, config, cmd_rx, shared, initial_runtime)
+        }
+        SampleFormat::U16 => {
+            build_output_stream_typed::<u16>(device, config, cmd_rx, shared, initial_runtime)
+        }
+        SampleFormat::U32 => {
+            build_output_stream_typed::<u32>(device, config, cmd_rx, shared, initial_runtime)
+        }
+        SampleFormat::U64 => {
+            build_output_stream_typed::<u64>(device, config, cmd_rx, shared, initial_runtime)
+        }
+        SampleFormat::F32 => {
+            build_output_stream_typed::<f32>(device, config, cmd_rx, shared, initial_runtime)
+        }
+        SampleFormat::F64 => {
+            build_output_stream_typed::<f64>(device, config, cmd_rx, shared, initial_runtime)
+        }
         format => Err(format!("unsupported output sample format: {format}")),
     }
 }
@@ -482,11 +655,13 @@ fn build_output_stream_typed<T>(
     config: &cpal::StreamConfig,
     cmd_rx: Receiver<EngineCommand>,
     shared: Arc<SharedState>,
+    initial_runtime: RuntimeProject,
 ) -> Result<cpal::Stream, String>
 where
     T: SizedSample + Sample + FromSample<f32>,
 {
-    let sr = config.sample_rate.0 as f64;
+    let output_sample_rate = config.sample_rate.0;
+    let sr = output_sample_rate as f64;
 
     // Oscillator state — local to the audio callback (no lock needed).
     let mut osc_l = SineOscillator::new(440.0, sr);
@@ -502,6 +677,8 @@ where
     let mut prev_peak_r = 0.0f32;
 
     let ch = config.channels as usize;
+    let mut runtime = initial_runtime;
+    runtime.sample_rate = output_sample_rate;
 
     let stream = device
         .build_output_stream::<T, _, _>(
@@ -511,6 +688,10 @@ where
                 // Runs first so commands take effect from the start of this block.
                 while let Ok(cmd) = cmd_rx.try_recv() {
                     match cmd {
+                        EngineCommand::LoadProject(next_runtime) => {
+                            runtime = next_runtime;
+                            runtime.sample_rate = output_sample_rate;
+                        }
                         EngineCommand::SetTestTone { enabled, frequency } => {
                             osc_on = enabled;
                             osc_freq = frequency;
@@ -535,17 +716,20 @@ where
                                 .master_volume
                                 .store(f32_store(value), Ordering::Relaxed);
                         }
-                        // Track/insert param commands: update local track graph
-                        // (track graph lives in EngineInner::tracks behind a Mutex;
-                        //  we intentionally skip updating it in the callback to keep
-                        //  the hot path lock-free.  Commands are applied to the
-                        //  EngineInner::tracks Vec on the control thread instead.)
-                        EngineCommand::SetTrackVolume { .. }
-                        | EngineCommand::SetTrackPan { .. }
-                        | EngineCommand::SetTrackMute { .. }
-                        | EngineCommand::SetInsertParam { .. } => {
-                            // TODO: for MVP the command is logged but not yet applied in
-                            //       the callback — the mix graph is rebuilt at each project load.
+                        EngineCommand::SetTrackVolume { track_id, value } => {
+                            runtime.update_track_volume(&track_id, value);
+                        }
+                        EngineCommand::SetTrackPan { track_id, value } => {
+                            runtime.update_track_pan(&track_id, value);
+                        }
+                        EngineCommand::SetTrackMute { track_id, muted } => {
+                            runtime.update_track_mute(&track_id, muted);
+                        }
+                        EngineCommand::SetTrackSolo { track_id, solo } => {
+                            runtime.update_track_solo(&track_id, solo);
+                        }
+                        EngineCommand::SetInsertParam { .. } => {
+                            // Insert DSP is not part of the native MVP yet.
                         }
                     }
                 }
@@ -568,10 +752,11 @@ where
                 let mut sum_sq_l = 0.0f32;
                 let mut sum_sq_r = 0.0f32;
                 let mut frames = 0u64;
+                let base_sample = shared.position_samples.load(Ordering::Relaxed);
 
                 if ch >= 2 {
                     for frame in data.chunks_mut(ch) {
-                        let (l, r) = if gen_tone {
+                        let (tone_l, tone_r) = if gen_tone {
                             (
                                 osc_l.next_sample() * TEST_TONE_AMPLITUDE * master_vol,
                                 osc_r.next_sample() * TEST_TONE_AMPLITUDE * master_vol,
@@ -579,6 +764,13 @@ where
                         } else {
                             (0.0, 0.0)
                         };
+                        let (project_l, project_r) = if playing_local {
+                            render_project_sample(&runtime, base_sample + frames, master_vol)
+                        } else {
+                            (0.0, 0.0)
+                        };
+                        let l = (tone_l + project_l).clamp(-1.0, 1.0);
+                        let r = (tone_r + project_r).clamp(-1.0, 1.0);
                         frame[0] = T::from_sample(l);
                         frame[1] = T::from_sample(r);
                         // Extra channels get silence.
@@ -593,11 +785,17 @@ where
                     }
                 } else if ch == 1 {
                     for sample in data.iter_mut() {
-                        let value = if gen_tone {
+                        let tone = if gen_tone {
                             osc_l.next_sample() * TEST_TONE_AMPLITUDE * master_vol
                         } else {
                             0.0
                         };
+                        let (project_l, project_r) = if playing_local {
+                            render_project_sample(&runtime, base_sample + frames, master_vol)
+                        } else {
+                            (0.0, 0.0)
+                        };
+                        let value = (tone + (project_l + project_r) * 0.5).clamp(-1.0, 1.0);
                         *sample = T::from_sample(value);
                         peak_l = peak_l.max(value.abs());
                         sum_sq_l += value * value;

@@ -16,7 +16,7 @@ import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
 import { useHistoryStore } from "../store/historyStore";
 import { SetTrackVolumeCommand, SetTrackPanCommand, SetTrackMuteCommand, SetTrackSoloCommand } from "../commands";
-import { mixer } from "../engine/Mixer";
+import { activeAudioEngine } from "../engine/activeAudioEngine";
 import { Knob } from "./ui/Knob";
 import { MixerFader } from "./ui/MixerFader";
 import { useVuStereoLevels } from "../hooks/useVuLevel";
@@ -589,9 +589,9 @@ export function MixerPanel({ height, embedded = false }: { height?: number; embe
             level={stripLevel}
             fixedWidth={fixedWidth}
             files={files}
-            onVolume={(v) => { setTrackVolume(t.id, v); mixer.setVolume(t.id, v); }}
+            onVolume={(v) => { setTrackVolume(t.id, v); activeAudioEngine.setTrackVolume(t.id, v); }}
             onVolumeEnd={(v) => { useHistoryStore.getState().push(new SetTrackVolumeCommand(t.id, v, t.volume)); }}
-            onPan={(v) => { setTrackPan(t.id, v); mixer.setPan(t.id, v); }}
+            onPan={(v) => { setTrackPan(t.id, v); activeAudioEngine.setTrackPan(t.id, v); }}
             onPanEnd={(v) => { useHistoryStore.getState().push(new SetTrackPanCommand(t.id, v, t.pan)); }}
             onMute={() => { useHistoryStore.getState().execute(new SetTrackMuteCommand(t.id, !t.muted)); }}
             onSolo={() => { useHistoryStore.getState().execute(new SetTrackSoloCommand(t.id, !t.solo)); }}
@@ -638,7 +638,7 @@ export function MixerPanel({ height, embedded = false }: { height?: number; embe
                 level={stripLevel}
                 fixedWidth={fixedWidth !== undefined ? Math.max(fixedWidth, 76) : undefined}
                 files={files}
-                onVolume={(v) => { setMasterVolume(v); mixer.setMasterVolume(v); }}
+                onVolume={(v) => { setMasterVolume(v); activeAudioEngine.setMasterVolume(v); }}
                 onResizeDragStart={onStripResizeDragStart}
                 selected={selectedMixerTrackId === "master"}
                 onClick={() => {

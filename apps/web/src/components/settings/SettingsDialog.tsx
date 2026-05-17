@@ -16,7 +16,9 @@ import {
   detectAudioEngineBackends,
   invalidateBackendDetection,
 } from "../../engine/native/detection";
+import { activeAudioEngine } from "../../engine/activeAudioEngine";
 import type { AudioEngineBackendStatus } from "../../engine/native/types";
+import type { DawBridgeSphereDeviceInfo } from "../../platform/dawBridge.types";
 
 type SettingsTab = "general" | "audio" | "midi" | "project" | "appearance" | "advanced" | "shortcuts";
 
@@ -276,12 +278,11 @@ function NativeEngineStatusCard({
   const [testToneOn, setTestToneOn] = useState(false);
 
   const toggleTestTone = () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const sphere = (window as any).dawElectron?.sphereAudio;
+    const sphere = window.dawElectron?.sphereAudio;
     if (!sphere) return;
     const next = !testToneOn;
     setTestToneOn(next);
-    sphere.setTestTone(next, 440).catch(() => setTestToneOn(false));
+    void sphere.setTestTone(next, 440).catch(() => setTestToneOn(false));
   };
   const isElectron = platform.kind === "electron";
 
@@ -407,26 +408,101 @@ function AudioTab({
   const isWeb      = platform.kind === "web";
   const isElectron = platform.kind === "electron";
   const needsPermission = isWeb && audioPermission !== "granted" && audioInputs.length === 0;
+  const [nativeInputs, setNativeInputs] = useState<DawBridgeSphereDeviceInfo[]>([]);
+  const [nativeOutputs, setNativeOutputs] = useState<DawBridgeSphereDeviceInfo[]>([]);
 
-  const inputOptions = [
+  const refreshNativeAudioDevices = useCallback(() => {
+    const sphere = window.dawElectron?.sphereAudio;
+    if (!sphere) {
+      setNativeInputs([]);
+      setNativeOutputs([]);
+      return;
+    }
+    void Promise.all([
+      sphere.listInputDevices(),
+      sphere.listOutputDevices(),
+    ])
+      .then(([inputs, outputs]) => {
+        setNativeInputs(inputs);
+        setNativeOutputs(outputs);
+      })
+      .catch(() => {
+        setNativeInputs([]);
+        setNativeOutputs([]);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (isElectron) refreshNativeAudioDevices();
+  }, [isElectron, refreshNativeAudioDevices, nativeStatus?.available]);
+
+  const useNativeAudioDevices =
+    isElectron &&
+    nativeStatus?.available === true;
+
+  const webInputOptions = [
     { value: "__default__", label: "System Default" },
     ...audioInputs.map((d) => ({ value: d.id, label: d.name })),
   ];
-  const outputOptions = [
+  const nativeInputOptions = [
+    { value: "__default__", label: "System Default" },
+    ...nativeInputs.map((d) => ({
+      value: d.id,
+      label: d.isDefault ? `${d.name} (Default)` : d.name,
+    })),
+  ];
+  const webOutputOptions = [
     { value: "__default__", label: "System Default" },
     ...audioOutputs.map((d) => ({ value: d.id, label: d.name })),
   ];
+  const nativeOutputOptions = [
+    { value: "__default__", label: "System Default" },
+    ...nativeOutputs.map((d) => ({
+      value: d.id,
+      label: d.isDefault ? `${d.name} (Default)` : d.name,
+    })),
+  ];
+  const inputOptions =
+    useNativeAudioDevices && nativeInputs.length > 0
+      ? nativeInputOptions
+      : webInputOptions;
+  const outputOptions =
+    useNativeAudioDevices && nativeOutputs.length > 0
+      ? nativeOutputOptions
+      : webOutputOptions;
+  const inputDeviceValue =
+    audioSettings.audioInputDeviceId &&
+    inputOptions.some((option) => option.value === audioSettings.audioInputDeviceId)
+      ? audioSettings.audioInputDeviceId
+      : "__default__";
+  const outputDeviceValue =
+    audioSettings.audioOutputDeviceId &&
+    outputOptions.some((option) => option.value === audioSettings.audioOutputDeviceId)
+      ? audioSettings.audioOutputDeviceId
+      : "__default__";
+
+  useEffect(() => {
+    if (!useNativeAudioDevices) return;
+    const selectedInput = audioSettings.audioInputDeviceId;
+    if (selectedInput && nativeInputs.length > 0 && !nativeInputs.some((d) => d.id === selectedInput)) {
+      audioSettings.setAudioInputDevice(null);
+    }
+    const selectedOutput = audioSettings.audioOutputDeviceId;
+    if (selectedOutput && nativeOutputs.length > 0 && !nativeOutputs.some((d) => d.id === selectedOutput)) {
+      audioSettings.setAudioOutputDevice(null);
+    }
+  }, [audioSettings, nativeInputs, nativeOutputs, useNativeAudioDevices]);
 
   // Engine options — show native only in Electron
-  const engineOptions: { value: PreferredEngine; label: string }[] = [
-    { value: "auto",    label: "Automatic (Recommended)" },
-    { value: "webAudio", label: "Web Audio (Built-in)" },
-    { value: "wasm",    label: "WASM Engine (High Performance)" },
-    ...(isElectron
-      ? [{ value: "native-sphere-direct" as PreferredEngine, label: "Sphere Direct Native Engine" }]
-      : []
-    ),
-  ];
+  const engineOptions: { value: PreferredEngine; label: string }[] = isElectron
+    ? [{ value: "native-sphere-direct", label: "Sphere Direct Native Engine" }]
+    : [
+        { value: "auto",     label: "Automatic (Recommended)" },
+        { value: "webAudio", label: "Web Audio (Built-in)" },
+        { value: "wasm",     label: "WASM Engine (High Performance)" },
+      ];
+  const engineValue: PreferredEngine =
+    isElectron ? "native-sphere-direct" : draft.preferredEngine;
 
   return (
     <div className="flex flex-col">
@@ -451,13 +527,16 @@ function AudioTab({
         <div className="flex items-center gap-1.5">
           <DawSelect
             className="w-44"
-            value={audioSettings.audioInputDeviceId ?? "__default__"}
+            value={inputDeviceValue}
             onChange={(v) => audioSettings.setAudioInputDevice(v === "__default__" ? null : v)}
             options={inputOptions}
           />
           <button
             title="Refresh devices"
-            onClick={() => audioDeviceService.refreshAudioDevices()}
+            onClick={() => {
+              void audioDeviceService.refreshAudioDevices();
+              refreshNativeAudioDevices();
+            }}
             className="flex h-7 w-7 items-center justify-center rounded border border-[rgba(255,255,255,0.08)] text-daw-faint hover:text-daw-text hover:bg-[rgba(255,255,255,0.06)] transition-colors"
           >
             <RefreshCw size={11} />
@@ -468,7 +547,7 @@ function AudioTab({
       <SettingsRow label="Output Device" description="Global audio output for the master bus">
         <DawSelect
           className="w-44"
-          value={audioSettings.audioOutputDeviceId ?? "__default__"}
+          value={outputDeviceValue}
           onChange={(v) => audioSettings.setAudioOutputDevice(v === "__default__" ? null : v)}
           options={outputOptions}
         />
@@ -483,7 +562,7 @@ function AudioTab({
       <SectionHeader>Engine</SectionHeader>
       <SettingsRow label="Audio Backend" description="Select the audio processing backend">
         <SettingsSelect<PreferredEngine>
-          value={draft.preferredEngine}
+          value={engineValue}
           onChange={(v) => setDraft({ preferredEngine: v })}
           options={engineOptions}
         />
@@ -688,7 +767,15 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
   };
 
   const handleApply = () => {
-    store.applySettings(appDraft);
+    const effectiveAppDraft: AppSettings =
+      platform.kind === "electron"
+        ? { ...appDraft, preferredEngine: "native-sphere-direct" }
+        : appDraft;
+
+    store.applySettings(effectiveAppDraft);
+    if (effectiveAppDraft.preferredEngine !== appDraft.preferredEngine) {
+      setAppDraft(effectiveAppDraft);
+    }
     useProjectStore.setState((s) => ({
       project: {
         ...s.project,
@@ -708,22 +795,25 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const sphere = (window as any).dawElectron?.sphereAudio;
     const wantsNative =
-      appDraft.preferredEngine === "native-sphere-direct" ||
-      appDraft.preferredEngine === "auto";
+      effectiveAppDraft.preferredEngine === "native-sphere-direct" ||
+      effectiveAppDraft.preferredEngine === "auto";
 
     if (sphere && wantsNative && !nativeApplyingRef.current) {
       nativeApplyingRef.current = true;
 
+      const inputDeviceId  = audioSettings.audioInputDeviceId  ?? undefined;
       const outputDeviceId = audioSettings.audioOutputDeviceId ?? undefined;
-      const bufferSize     = appDraft.preferredBufferSize;
+      const bufferSize     = effectiveAppDraft.preferredBufferSize;
 
       // openDevice → start → refresh status display
       Promise.resolve()
         .then(() => sphere.openDevice({
+          inputDeviceId: inputDeviceId || undefined,
           outputDeviceId: outputDeviceId || undefined,
           bufferSize,
         }))
         .then(() => sphere.start())
+        .then(() => activeAudioEngine.reconfigure(effectiveAppDraft.preferredEngine))
         .then(() => refreshNativeStatus())
         .catch((e: unknown) => {
           console.warn("[Settings] Native engine reopen failed:", e);

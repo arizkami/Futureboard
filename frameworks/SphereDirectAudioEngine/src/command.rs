@@ -1,8 +1,12 @@
+use crate::runtime::RuntimeProject;
+
 /// Commands sent from the control thread to the audio callback via a
 /// lock-free bounded channel.  The audio callback drains these with
 /// `try_recv()` at the top of each block — no blocking, no allocation.
 #[derive(Debug)]
 pub enum EngineCommand {
+    /// Replace the callback's render graph with a fully prepared project.
+    LoadProject(RuntimeProject),
     /// Enable or disable the sine test tone.
     SetTestTone { enabled: bool, frequency: f32 },
     /// Set master output gain (linear, 0..2).
@@ -13,6 +17,8 @@ pub enum EngineCommand {
     SetTrackPan { track_id: String, value: f32 },
     /// Mute or unmute a track.
     SetTrackMute { track_id: String, muted: bool },
+    /// Solo or unsolo a track.
+    SetTrackSolo { track_id: String, solo: bool },
     /// Set a plugin/insert parameter.
     SetInsertParam {
         track_id: String,

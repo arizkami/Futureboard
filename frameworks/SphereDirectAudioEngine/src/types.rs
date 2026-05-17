@@ -11,6 +11,8 @@ pub struct JsSphereAudioStatus {
     pub available: bool,
     pub running: bool,
     pub stream_open: bool,
+    pub transport_playing: bool,
+    pub position_seconds: f64,
     pub version: String,
     pub backend_name: String,
     pub sample_rate: u32,
@@ -58,6 +60,7 @@ pub struct JsMeterSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct EngineProjectSnapshot {
     pub project_id: String,
+    #[serde(default)]
     pub project_root: Option<String>,
     pub bpm: f64,
     pub time_signature: [u32; 2],
@@ -71,6 +74,7 @@ pub struct EngineProjectSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct EngineTrackSnapshot {
     pub id: String,
+    #[serde(rename = "type")]
     pub track_type: String,
     pub volume: f32,
     pub pan: f32,
@@ -102,6 +106,29 @@ pub struct EngineClipSnapshot {
     pub duration_beats: f64,
     pub offset_seconds: f64,
     pub gain: f32,
+    #[serde(default)]
+    pub fades: Option<EngineFadeSnapshot>,
+    #[serde(default)]
+    pub audio_process: Option<EngineClipAudioProcess>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineFadeSnapshot {
+    pub in_duration: f64,
+    pub out_duration: f64,
+    pub in_curve: String,
+    pub out_curve: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineClipAudioProcess {
+    pub speed_ratio: f64,
+    pub pitch_semitones: f64,
+    pub preserve_pitch: bool,
+    pub mode: String,
+    pub quality: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

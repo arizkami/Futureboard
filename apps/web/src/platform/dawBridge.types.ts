@@ -143,22 +143,30 @@ export type DawBridgeSphereTransportState = {
 };
 
 export type DawBridgeSphereAudioStatus = {
-  running:      boolean;
-  version:      string;
-  sampleRate:   number;
-  bufferSize:   number;
-  inputDevice:  string | null;
-  outputDevice: string | null;
-  cpuLoad:      number;
-  xrunCount:    number;
+  available:        boolean;
+  running:          boolean;
+  streamOpen:       boolean;
+  transportPlaying: boolean;
+  positionSeconds:  number;
+  version:          string;
+  backendName?:     string;
+  sampleRate:       number;
+  bufferSize:       number;
+  inputDevice:      string | null;
+  outputDevice:     string | null;
+  lastError?:       string | null;
+  cpuLoad?:         number;
+  xrunCount?:       number;
 };
 
 export type DawBridgeSphereDeviceInfo = {
-  id:           string;
-  name:         string;
-  channelCount: number;
-  sampleRates:  number[];
-  isDefault:    boolean;
+  id:                string;
+  name:              string;
+  kind:              "input" | "output" | (string & {});
+  channels:          number;
+  defaultSampleRate: number;
+  isDefault:         boolean;
+  backend:           string;
 };
 
 export type DawBridgeSphereMeterSnapshot = {
@@ -181,6 +189,7 @@ export interface DawBridgeSphereAudio {
   closeDevice():                                                             Promise<void>;
   start():                                                                   Promise<void>;
   stop():                                                                    Promise<void>;
+  setTestTone(enabled: boolean, frequency: number):                          Promise<void>;
   setTransportState(state: DawBridgeSphereTransportState):                   Promise<void>;
   getTransportState():                                                       Promise<{ playing: boolean; positionSeconds: number }>;
   updateTrackParam(trackId: string, paramId: string, value: unknown):        Promise<void>;

@@ -37,6 +37,8 @@ interface NativeStatus {
   available:    boolean;
   running:      boolean;
   streamOpen:   boolean;
+  transportPlaying: boolean;
+  positionSeconds:  number;
   version:      string;
   backendName:  string;
   sampleRate:   number;
@@ -97,17 +99,51 @@ interface SphereAudioAddon {
   SphereDirectAudioEngine: new () => NativeEngine;
 }
 
+function isDefaultDeviceAlias(id: string): boolean {
+  const normalized = id.trim().toLowerCase();
+  return normalized === "" ||
+    normalized === "__default__" ||
+    normalized === "default" ||
+    normalized === "communications";
+}
+
+function resolveNativeDeviceId(
+  requestedId: string | undefined,
+  devices: NativeDeviceInfo[],
+  kind: "input" | "output",
+): string | undefined {
+  if (typeof requestedId !== "string") return undefined;
+  if (isDefaultDeviceAlias(requestedId)) return undefined;
+
+  const exact = devices.find((device) => device.id === requestedId);
+  if (exact) return exact.id;
+
+  const byName = devices.find((device) => device.name === requestedId);
+  if (byName) return byName.id;
+
+  console.warn(
+    `[SphereAudio] Ignoring unknown ${kind} device id '${requestedId}' and using system default`,
+  );
+  return undefined;
+}
+
 function toNativeDeviceOpenConfig(
   config: SphereDeviceOpenConfig | null | undefined = {},
+  devices: {
+    inputs:  NativeDeviceInfo[];
+    outputs: NativeDeviceInfo[];
+  } = { inputs: [], outputs: [] },
 ): NativeDeviceOpenConfig {
   const source = config ?? {};
   const nativeConfig: NativeDeviceOpenConfig = {};
 
-  if (typeof source.inputDeviceId === "string" && source.inputDeviceId.length > 0) {
-    nativeConfig.inputDeviceId = source.inputDeviceId;
+  const inputDeviceId = resolveNativeDeviceId(source.inputDeviceId, devices.inputs, "input");
+  if (inputDeviceId) {
+    nativeConfig.inputDeviceId = inputDeviceId;
   }
-  if (typeof source.outputDeviceId === "string" && source.outputDeviceId.length > 0) {
-    nativeConfig.outputDeviceId = source.outputDeviceId;
+  const outputDeviceId = resolveNativeDeviceId(source.outputDeviceId, devices.outputs, "output");
+  if (outputDeviceId) {
+    nativeConfig.outputDeviceId = outputDeviceId;
   }
   if (
     typeof source.sampleRate === "number" &&
@@ -241,6 +277,8 @@ export class SphereAudioNative {
         available:    false,
         running:      false,
         streamOpen:   false,
+        transportPlaying: false,
+        positionSeconds:  0,
         version:      "0.0.0",
         backendName:  "unavailable",
         sampleRate:   0,
@@ -269,7 +307,10 @@ export class SphereAudioNative {
     if (!this._engine) {
       throw new Error("[SphereAudio] Engine not available — addon failed to load");
     }
-    this._engine.openDevice(toNativeDeviceOpenConfig(config));
+    this._engine.openDevice(toNativeDeviceOpenConfig(config, {
+      inputs:  this._engine.listInputDevices(),
+      outputs: this._engine.listOutputDevices(),
+    }));
   }
 
   closeDevice(): void {

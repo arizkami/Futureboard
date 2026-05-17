@@ -46,24 +46,31 @@ export async function detectAudioEngineBackends(): Promise<AudioEngineBackendSta
     try {
       const [status, version] = await Promise.all([
         sphereBridge.getStatus() as Promise<{
+          available:    boolean;
           running:      boolean;
           sampleRate:   number;
           bufferSize:   number;
           inputDevice:  string | null;
           outputDevice: string | null;
+          lastError:    string | null;
         }>,
         sphereBridge.getVersion() as Promise<string>,
       ]);
 
       results.push({
         backend:      "native-sphere-direct",
-        available:    true,
+        // status.available is false when the native addon failed to load
+        // (the IPC handler is always registered but returns a "not available"
+        // placeholder when the .node file couldn't be found or loaded).
+        available:    status.available,
         running:      status.running,
         version,
         sampleRate:   status.sampleRate,
         bufferSize:   status.bufferSize,
         inputDevice:  status.inputDevice  ?? undefined,
         outputDevice: status.outputDevice ?? undefined,
+        reason:       status.available ? undefined
+          : (status.lastError ?? "Native addon failed to load"),
       });
     } catch (e) {
       // Log once — not a spam source.

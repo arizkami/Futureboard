@@ -18,12 +18,14 @@
 #![deny(clippy::all)]
 #![allow(clippy::needless_pass_by_value)] // napi-rs requires owned String args
 
+mod audio_file;
 mod command;
 pub mod device;
 mod dsp;
 pub mod engine;
 pub mod error;
 mod graph;
+mod runtime;
 pub mod types;
 
 use std::sync::Arc;

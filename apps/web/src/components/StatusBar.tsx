@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useUIStore } from "../store/uiStore";
 import { useProjectStore } from "../store/projectStore";
 import { buildSelectionState, getSelectionSummary } from "../store/selectionSelectors";
-import { transport } from "../engine/Transport";
+import { activeAudioEngine } from "../engine/activeAudioEngine";
 import { C } from "../theme";
 import { formatBarBeat } from "../utils/musicalTime";
 import { pxPerBeat } from "../utils/musicalGrid";
@@ -97,7 +97,7 @@ export function StatusBar() {
         setFps(Math.round((frames * 1000) / elapsed));
         setPos(
           formatBarBeat(
-            transport.projectTime,
+            activeAudioEngine.projectTime,
             bpmRef.current,
             timeSigRef.current ?? { numerator: 4, denominator: 4 },
           ),

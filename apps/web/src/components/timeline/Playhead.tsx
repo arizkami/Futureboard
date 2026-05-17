@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { transport } from "../../engine/Transport";
+import { activeAudioEngine } from "../../engine/activeAudioEngine";
 import { useTransportStore } from "../../store/transportStore";
 import { useUIStore } from "../../store/uiStore";
 import { C } from "../../theme";
@@ -33,10 +33,10 @@ export function Playhead() {
     const tick = () => {
       const { pixelsPerSecond: pps, scrollX, loopEnabled, loopStart, loopEnd } =
         useUIStore.getState();
-      const t = transport.projectTime;
+      const t = activeAudioEngine.projectTime;
 
-      if (transport.isPlaying && loopEnabled && t >= loopEnd) {
-        transport.seek(loopStart);
+      if (activeAudioEngine.isPlaying && loopEnabled && t >= loopEnd) {
+        activeAudioEngine.seekSeconds(loopStart);
         rafRef.current = requestAnimationFrame(tick);
         return;
       }

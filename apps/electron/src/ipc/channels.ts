@@ -52,6 +52,7 @@ export const IpcChannels = {
   SphereAudioCloseDevice:      "daw:sphere:closeDevice",
   SphereAudioStart:            "daw:sphere:start",
   SphereAudioStop:             "daw:sphere:stop",
+  SphereAudioSetTestTone:      "daw:sphere:setTestTone",
   SphereAudioSetTransport:     "daw:sphere:setTransportState",
   SphereAudioGetTransport:     "daw:sphere:getTransportState",
   SphereAudioUpdateTrackParam: "daw:sphere:updateTrackParam",
@@ -166,22 +167,30 @@ export type ExternalWindowConfig = {
 // ── SphereDirectAudioEngine IPC types ─────────────────────────────────────────
 
 export type SphereAudioStatus = {
+  available:         boolean;
   running:      boolean;
+  streamOpen:        boolean;
+  transportPlaying:  boolean;
+  positionSeconds:   number;
   version:      string;
+  backendName?:      string;
   sampleRate:   number;
   bufferSize:   number;
   inputDevice:  string | null;
   outputDevice: string | null;
+  lastError?:        string | null;
   cpuLoad:      number;
   xrunCount:    number;
 };
 
 export type SphereAudioDeviceInfo = {
-  id:           string;
-  name:         string;
-  channelCount: number;
-  sampleRates:  number[];
-  isDefault:    boolean;
+  id:                string;
+  name:              string;
+  kind:              "input" | "output" | (string & {});
+  channels:          number;
+  defaultSampleRate: number;
+  isDefault:         boolean;
+  backend:           string;
 };
 
 export type SphereDeviceOpenConfig = {

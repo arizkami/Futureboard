@@ -35,6 +35,19 @@ parking_lot = "0.12"
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Multi-format audio decoder (MP3, FLAC, OGG Vorbis, WAV, AIFF).
+# WAV is also decoded by our own hand-written parser (fast, zero deps);
+# symphonia handles the compressed and container formats.
+symphonia = { version = "0.5", default-features = false, features = [
+    "wav",      # WAV/RIFF container
+    "pcm",      # PCM codec (WAV)
+    "aiff",     # AIFF container
+    "mp3",      # MP3 format + codec (bundle)
+    "flac",     # FLAC format + codec (bundle)
+    "ogg",      # OGG container
+    "vorbis",   # Vorbis codec (for OGG Vorbis)
+] }
+
 [build-dependencies]
 napi-build = "2"
 

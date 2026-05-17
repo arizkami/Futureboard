@@ -26,24 +26,32 @@ export type AudioEngineBackendStatus = {
 // ── Device info ───────────────────────────────────────────────────────────────
 
 export type SphereAudioDeviceInfo = {
-  id:           string;
-  name:         string;
-  channelCount: number;
-  sampleRates:  number[];
-  isDefault:    boolean;
+  id:                string;
+  name:              string;
+  kind:              "input" | "output" | (string & {});
+  channels:          number;
+  defaultSampleRate: number;
+  isDefault:         boolean;
+  backend:           string;
 };
 
 // ── Runtime status from the native engine ─────────────────────────────────────
 
 export type SphereAudioStatus = {
-  running:      boolean;
-  version:      string;
-  sampleRate:   number;
-  bufferSize:   number;
-  inputDevice:  string | null;
-  outputDevice: string | null;
-  cpuLoad:      number;  // 0–1
-  xrunCount:    number;
+  available:        boolean;
+  running:          boolean;
+  streamOpen:       boolean;
+  transportPlaying: boolean;
+  positionSeconds:  number;
+  version:          string;
+  backendName?:     string;
+  sampleRate:       number;
+  bufferSize:       number;
+  inputDevice:      string | null;
+  outputDevice:     string | null;
+  lastError?:       string | null;
+  cpuLoad?:         number;  // 0–1
+  xrunCount?:       number;
 };
 
 // ── Meter / transport snapshots ───────────────────────────────────────────────
@@ -134,6 +142,7 @@ export type EngineRoutingSnapshot = {
 
 export type EngineProjectSnapshot = {
   projectId:     string;
+  projectRoot:   string | null;
   bpm:           number;
   timeSignature: [number, number];
   sampleRate:    number;

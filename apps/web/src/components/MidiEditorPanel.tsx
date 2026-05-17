@@ -5,7 +5,7 @@ import { useProjectStore } from "../store/projectStore";
 import { useHistoryStore } from "../store/historyStore";
 import { AddMidiNotesCommand, RemoveMidiNotesCommand, UpdateMidiNotesCommand } from "../commands";
 import { midiEditorBridge } from "../menu/midiEditorBridge";
-import { transport } from "../engine/Transport";
+import { activeAudioEngine } from "../engine/activeAudioEngine";
 
 // ── Layout constants (CSS pixels — never scale by DPR for DOM) ───────────────
 const ROW_H     = 14;    // px per semitone
@@ -515,7 +515,7 @@ export function MidiEditorPanel({
       raf = requestAnimationFrame(tick);
       const el = playheadRef.current;
       if (!el) return;
-      const localTime = transport.projectTime - clipStartRef.current + clipOffsetRef.current;
+      const localTime = activeAudioEngine.projectTime - clipStartRef.current + clipOffsetRef.current;
       if (localTime < 0 || localTime > clipDurRef.current) {
         el.style.display = "none";
         return;

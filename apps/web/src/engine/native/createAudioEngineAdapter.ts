@@ -12,7 +12,8 @@
  *     preferredEngine === "auto"                  → native if available, else WebAudio
  *     preferredEngine === "wasm" | "webAudio"     → WebAudioEngineAdapter
  *
- * If the native adapter throws during init(), falls back to WebAudio and logs a warning.
+ * Electron desktop forces native through the caller; WebAudio remains the
+ * browser runtime and the explicit web fallback.
  */
 import type { AudioEngineAdapter } from "../AudioEngineAdapter";
 import type { PreferredEngine } from "../../store/settingsStore";
@@ -57,14 +58,15 @@ export async function createAudioEngineAdapter(
         console.log("[EngineFactory] Using SphereDirectAudioEngine (native)");
         return { adapter, backend: "native-sphere-direct", fallback: false };
       } catch (e) {
-        console.error("[EngineFactory] Native engine init failed, falling back to WebAudio:", e);
-        showToast("Native audio engine failed — using WebAudio fallback", true);
+        console.error("[EngineFactory] Native engine init failed:", e);
+        showToast("Native audio engine failed", true);
+        if (preferredEngine === "native-sphere-direct") throw e;
       }
     } else if (preferredEngine === "native-sphere-direct") {
-      // Explicitly requested but unavailable — warn and still fall back.
       const reason = nativeStatus?.reason ?? "unknown reason";
-      console.warn(`[EngineFactory] Native engine requested but unavailable (${reason}). Falling back.`);
+      console.warn(`[EngineFactory] Native engine requested but unavailable (${reason}).`);
       showToast(`Native audio engine unavailable: ${reason}`, true);
+      throw new Error(`Native audio engine unavailable: ${reason}`);
     }
   }
 

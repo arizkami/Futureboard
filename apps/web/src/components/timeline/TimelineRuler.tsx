@@ -15,7 +15,7 @@ import {
 } from "../../utils/musicalTime";
 import { TIMELINE_Z } from "../../utils/timelineZ";
 import { getArrangementGridLines } from "../../utils/musicalGrid";
-import { transport } from "../../engine/Transport";
+import { activeAudioEngine } from "../../engine/activeAudioEngine";
 import type { TimeSignature } from "../../utils/musicalTime";
 
 type TimelineRulerProps = {
@@ -121,9 +121,9 @@ export function TimelineRuler({ width, onAddTrack, snapToGrid, onToggleSnapToGri
 
       if (snapToGrid) {
         const spb = secondsPerBeat(bpm);
-        transport.seek(snapTime(rawSeconds, bpm, timeSig, pps * spb));
+        activeAudioEngine.seekSeconds(snapTime(rawSeconds, bpm, timeSig, pps * spb));
       } else {
-        transport.seek(rawSeconds);
+        activeAudioEngine.seekSeconds(rawSeconds);
       }
     };
 

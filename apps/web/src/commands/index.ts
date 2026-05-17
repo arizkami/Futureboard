@@ -8,7 +8,7 @@
 
 import type { DawClip, DawTrack, MidiNote, TrackSend } from "../types/daw";
 import { useProjectStore } from "../store/projectStore";
-import { mixer } from "../engine/Mixer";
+import { activeAudioEngine } from "../engine/activeAudioEngine";
 import type { DawCommand } from "./types";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -33,11 +33,11 @@ export class AddTrackCommand implements DawCommand {
   }
   execute() {
     store().addTrack(this.track);
-    mixer.getOrCreateTrack(this.track.id, this.track.volume, this.track.pan);
+    activeAudioEngine.createTrack(this.track);
   }
   undo() {
     store().removeTrack(this.track.id);
-    // Note: mixer nodes intentionally stay alive — they are lightweight
+    activeAudioEngine.removeTrack(this.track.id);
   }
 }
 
@@ -61,7 +61,7 @@ export class DeleteTrackCommand implements DawCommand {
   undo() {
     if (this.snapshot) {
       store().addTrack(this.snapshot);
-      mixer.getOrCreateTrack(this.snapshot.id, this.snapshot.volume, this.snapshot.pan);
+      activeAudioEngine.createTrack(this.snapshot);
     }
   }
 }
@@ -111,7 +111,7 @@ export class DuplicateTrackCommand implements DawCommand {
   execute() {
     if (this.newTrackSnapshot) {
       store().addTrack(this.newTrackSnapshot);
-      mixer.getOrCreateTrack(this.newTrackSnapshot.id, this.newTrackSnapshot.volume, this.newTrackSnapshot.pan);
+      activeAudioEngine.createTrack(this.newTrackSnapshot);
       return;
     }
 
@@ -131,7 +131,7 @@ export class DuplicateTrackCommand implements DawCommand {
     
     this.newTrackSnapshot = newTrack;
     store().addTrack(newTrack);
-    mixer.getOrCreateTrack(newTrack.id, newTrack.volume, newTrack.pan);
+    activeAudioEngine.createTrack(newTrack);
   }
   
   undo() {
@@ -152,11 +152,11 @@ export class SetTrackVolumeCommand implements DawCommand {
   }
   execute() {
     store().setTrackVolume(this.trackId, this.newVolume);
-    mixer.setVolume(this.trackId, this.newVolume);
+    activeAudioEngine.setTrackVolume(this.trackId, this.newVolume);
   }
   undo() {
     store().setTrackVolume(this.trackId, this.oldVolume);
-    mixer.setVolume(this.trackId, this.oldVolume);
+    activeAudioEngine.setTrackVolume(this.trackId, this.oldVolume);
   }
 }
 
@@ -173,11 +173,11 @@ export class SetTrackPanCommand implements DawCommand {
   }
   execute() {
     store().setTrackPan(this.trackId, this.newPan);
-    mixer.setPan(this.trackId, this.newPan);
+    activeAudioEngine.setTrackPan(this.trackId, this.newPan);
   }
   undo() {
     store().setTrackPan(this.trackId, this.oldPan);
-    mixer.setPan(this.trackId, this.oldPan);
+    activeAudioEngine.setTrackPan(this.trackId, this.oldPan);
   }
 }
 
@@ -193,11 +193,11 @@ export class SetTrackMuteCommand implements DawCommand {
   }
   execute() {
     store().setTrackMute(this.trackId, this.newMuted);
-    mixer.setMute(this.trackId, this.newMuted);
+    activeAudioEngine.setTrackMute(this.trackId, this.newMuted);
   }
   undo() {
     store().setTrackMute(this.trackId, !this.newMuted);
-    mixer.setMute(this.trackId, !this.newMuted);
+    activeAudioEngine.setTrackMute(this.trackId, !this.newMuted);
   }
 }
 
@@ -213,11 +213,11 @@ export class SetTrackSoloCommand implements DawCommand {
   }
   execute() {
     store().setTrackSolo(this.trackId, this.newSolo);
-    mixer.setSolo(this.trackId, this.newSolo);
+    activeAudioEngine.setTrackSolo(this.trackId, this.newSolo);
   }
   undo() {
     store().setTrackSolo(this.trackId, !this.newSolo);
-    mixer.setSolo(this.trackId, !this.newSolo);
+    activeAudioEngine.setTrackSolo(this.trackId, !this.newSolo);
   }
 }
 
@@ -234,11 +234,11 @@ export class SetTrackOutputCommand implements DawCommand {
   }
   execute() {
     store().setTrackOutput(this.trackId, this.newOutput);
-    mixer.setTrackOutput(this.trackId, this.newOutput);
+    activeAudioEngine.syncProject(store().project);
   }
   undo() {
     store().setTrackOutput(this.trackId, this.oldOutput);
-    mixer.setTrackOutput(this.trackId, this.oldOutput);
+    activeAudioEngine.syncProject(store().project);
   }
 }
 

@@ -3,7 +3,7 @@ import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
 import { useTransportStore } from "../store/transportStore";
 import { useHistoryStore } from "../store/historyStore";
-import { transport } from "../engine/Transport";
+import { activeAudioEngine } from "../engine/activeAudioEngine";
 import { beatsPerBar, secondsPerBeat } from "../utils/musicalTime";
 import { DeleteClipsCommand, DeleteTrackCommand, DuplicateClipsCommand, SplitClipCommand } from "../commands";
 import { useMetronomeStore } from "../store/metronomeStore";
@@ -91,22 +91,22 @@ export function useKeyboardShortcuts() {
         case "Space": {
           e.preventDefault();
           if (isPlaying) {
-            transport.pause();
+            activeAudioEngine.pause();
             setIsPlaying(false);
           } else {
-            void transport.play().then(() => setIsPlaying(true));
+            void activeAudioEngine.play().then(() => setIsPlaying(true));
           }
           break;
         }
         case "Enter": {
           e.preventDefault();
-          transport.stop();
+          activeAudioEngine.stop();
           setIsPlaying(false);
           break;
         }
         case "Home": {
           e.preventDefault();
-          transport.seek(0);
+          activeAudioEngine.seekSeconds(0);
           break;
         }
 
@@ -115,14 +115,14 @@ export function useKeyboardShortcuts() {
           if (ctrl) break;
           e.preventDefault();
           const nudgeL = shift ? spb * bpb : spb;
-          transport.seek(Math.max(0, transport.projectTime - nudgeL));
+          activeAudioEngine.seekSeconds(Math.max(0, activeAudioEngine.projectTime - nudgeL));
           break;
         }
         case "ArrowRight": {
           if (ctrl) break;
           e.preventDefault();
           const nudgeR = shift ? spb * bpb : spb;
-          transport.seek(transport.projectTime + nudgeR);
+          activeAudioEngine.seekSeconds(activeAudioEngine.projectTime + nudgeR);
           break;
         }
 
@@ -203,7 +203,7 @@ export function useKeyboardShortcuts() {
           e.preventDefault();
           const ids = useUIStore.getState().selectedClipIds;
           if (ids.length > 0) {
-            const t = transport.projectTime;
+            const t = activeAudioEngine.projectTime;
             ids.forEach((id) => history.execute(new SplitClipCommand(id, t)));
             setSelectedClipIds([]);
           }
@@ -214,7 +214,7 @@ export function useKeyboardShortcuts() {
           e.preventDefault();
           const ids = useUIStore.getState().selectedClipIds;
           if (ids.length > 0) {
-            const t = transport.projectTime;
+            const t = activeAudioEngine.projectTime;
             ids.forEach((id) => history.execute(new SplitClipCommand(id, t)));
             setSelectedClipIds([]);
           }
@@ -303,7 +303,7 @@ export function useKeyboardShortcuts() {
           const { tracks } = useProjectStore.getState().project;
           const end = tracks.reduce((max, tr) =>
             tr.clips.reduce((m, c) => Math.max(m, c.startTime + c.duration), max), 0);
-          transport.seek(end);
+          activeAudioEngine.seekSeconds(end);
           break;
         }
       }

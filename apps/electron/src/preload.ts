@@ -109,6 +109,7 @@ const sphereAudioBridge = Object.freeze({
   closeDevice:        ()                                            => invoke(IpcChannels.SphereAudioCloseDevice),
   start:              ()                                            => invoke(IpcChannels.SphereAudioStart),
   stop:               ()                                            => invoke(IpcChannels.SphereAudioStop),
+  setTestTone:        (enabled: boolean, frequency: number)          => invoke(IpcChannels.SphereAudioSetTestTone, enabled, frequency),
   setTransportState:  (state: SphereTransportState)                 => invoke(IpcChannels.SphereAudioSetTransport, state),
   getTransportState:  ()                                            => invoke(IpcChannels.SphereAudioGetTransport),
   updateTrackParam:   (trackId: string, paramId: string, value: unknown)                           => invoke(IpcChannels.SphereAudioUpdateTrackParam, trackId, paramId, value),

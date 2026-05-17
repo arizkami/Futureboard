@@ -27,7 +27,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import { transport } from "../engine/Transport";
+import { activeAudioEngine } from "../engine/activeAudioEngine";
 import { APP_MENUS, type AppMenuGroup, type AppMenuItem } from "../menu/menuItems";
 import { runAction } from "../menu/actionRunner";
 import {
@@ -527,17 +527,17 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
 
   // ── Transport ─────────────────────────────────────────────────────────────
   const handlePlay = async () => {
-    await transport.play();
+    await activeAudioEngine.play();
     setIsPlaying(true);
   };
 
   const handlePause = () => {
-    transport.pause();
+    activeAudioEngine.pause();
     setIsPlaying(false);
   };
 
   const handleStop = () => {
-    transport.stop();
+    activeAudioEngine.stop();
     setIsPlaying(false);
   };
 
@@ -816,7 +816,7 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
 
         {/* Right-side transport controls */}
         <div className="app-no-drag flex min-w-0 shrink-0 flex-wrap items-center justify-end gap-0.5 sm:flex-nowrap">
-          <IconBtn icon={SkipBack} label="Return to start [Enter]" onClick={() => transport.seek(0)} />
+          <IconBtn icon={SkipBack} label="Return to start [Enter]" onClick={() => activeAudioEngine.seekSeconds(0)} />
           {isPlaying ? (
             <IconBtn icon={Pause} label="Pause [Space]" active onClick={handlePause} />
           ) : (

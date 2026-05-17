@@ -33,7 +33,7 @@ const capabilities: PlatformCapabilities = {
   persistentLocalProjects: true,
   nativeDialogs: true,
   nativeWindowControls: true,
-  nativeAudioEngine: false,
+  nativeAudioEngine: true,
   nativePlugins: false,
   webAudio: typeof window !== "undefined" && "AudioContext" in window,
   cloudSync: false,

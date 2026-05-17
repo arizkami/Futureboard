@@ -24,6 +24,7 @@ import type {
   MeterSnapshot,
   StereoMeterLevel,
 } from "./types";
+import { platform } from "../../platform";
 // ── Bridge accessor ───────────────────────────────────────────────────────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -57,15 +58,36 @@ function buildTrackSnapshot(track: DawTrack): EngineTrackSnapshot {
   };
 }
 
-function buildClipSnapshot(clip: DawClip, bpm: number): EngineClipSnapshot {
+function resolveMediaPath(project: DawProject | null, clip: DawClip): string | null {
+  if (!project) return null;
+  const file = project.files.find((f) => f.id === clip.fileId);
+  if (!file) return null;
+
+  // Folder-based Electron project: absolutePath = projectRoot + relativePath.
+  // `relativePath` is set by the folder-import flow (e.g. "Media/Audio/kick.wav").
+  // The native Rust engine opens this via fs::read — it needs a real filesystem path.
+  if (file.relativePath) {
+    const root = platform.folderProject.getProjectRoot();
+    if (root) {
+      // Forward-slash join; Rust fs::read accepts both / and \ on Windows.
+      return `${root}/${file.relativePath}`.replace(/\\/g, "/");
+    }
+  }
+
+  // IndexedDB / OPFS / blob-URL sources: the Rust process cannot reach these.
+  // Return null — the clip will be silently skipped in the native engine
+  // (audio still plays through the WebAudio fallback path if needed).
+  return null;
+}
+
+function buildClipSnapshot(project: DawProject | null, clip: DawClip, bpm: number): EngineClipSnapshot {
   // Convert timeline seconds → beats for the native engine.
   const bps = bpm / 60;
   return {
     id:            clip.id,
     trackId:       clip.trackId,
     assetId:       clip.fileId,
-    // mediaPath is resolved by the Electron main process from the project root.
-    mediaPath:     null,
+    mediaPath:     resolveMediaPath(project, clip),
     startBeat:     clip.startTime  * bps,
     durationBeats: clip.duration   * bps,
     offsetSeconds: clip.offset,
@@ -87,6 +109,7 @@ function buildProjectSnapshot(project: DawProject): EngineProjectSnapshot {
   const allClips = project.tracks.flatMap((t) => t.clips);
   return {
     projectId:     project.id,
+    projectRoot:   platform.folderProject.getProjectRoot(),
     bpm:           project.bpm,
     timeSignature: [
       project.timeSignature?.numerator   ?? 4,
@@ -94,7 +117,7 @@ function buildProjectSnapshot(project: DawProject): EngineProjectSnapshot {
     ],
     sampleRate:    project.sampleRate ?? 44100,
     tracks:        project.tracks.map(buildTrackSnapshot),
-    clips:         allClips.map((c) => buildClipSnapshot(c, project.bpm)),
+    clips:         allClips.map((c) => buildClipSnapshot(project, c, project.bpm)),
     routing: {
       masterOutputDevice: null,
       sampleRate:         project.sampleRate ?? 44100,
@@ -112,6 +135,8 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
   private _meterPollId:         ReturnType<typeof setInterval> | null = null;
   private _transportPollId:     ReturnType<typeof setInterval> | null = null;
   private _lastTransport        = { playing: false, positionSeconds: 0 };
+  // Debounce timer for syncProject — rapid edits batch into one Rust rebuild.
+  private _syncTimer:           ReturnType<typeof setTimeout> | null = null;
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -128,7 +153,8 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
       const status = await sphere.getStatus() as { running: boolean; streamOpen: boolean };
       if (!status.running) {
         if (!status.streamOpen) {
-          // Open default output device (null → system default, 44100 Hz, 256 buf)
+          // Open default output device/config.  User-selected device/buffer is
+          // applied from Preferences via the same native bridge.
           await sphere.openDevice({});
         }
         await sphere.start();
@@ -170,13 +196,18 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
   }
 
   syncProject(project: DawProject): void {
-    const sphere = getSphere();
-    if (!sphere) return;
-    const snapshot = buildProjectSnapshot(project);
-    // Fire-and-forget — sync is best-effort, not awaited by UI.
-    sphere.loadProject(snapshot).catch((e: unknown) =>
-      console.warn("[NativeSphere] syncProject error:", e),
-    );
+    // Debounce: batch rapid edits (clip drags, fader moves) into one Rust rebuild.
+    // 120 ms keeps the engine in sync without decoding audio files on every frame.
+    if (this._syncTimer !== null) clearTimeout(this._syncTimer);
+    this._syncTimer = setTimeout(() => {
+      this._syncTimer = null;
+      const sphere = getSphere();
+      if (!sphere) return;
+      const snapshot = buildProjectSnapshot(project);
+      sphere.loadProject(snapshot).catch((e: unknown) =>
+        console.warn("[NativeSphere] syncProject error:", e),
+      );
+    }, 120);
   }
 
   // ── Transport ──────────────────────────────────────────────────────────────
@@ -253,7 +284,7 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
     if (!sphere) return;
     // BPM is unknown at call site; use 120 as a safe default.
     // The full project snapshot (loadProject) keeps the engine in sync accurately.
-    const snapshot = buildClipSnapshot(clip, 120);
+    const snapshot = buildClipSnapshot(null, clip, 120);
     sphere
       .updateClip(clip.id, { ...snapshot, trackId })
       .catch((e: unknown) => console.warn("[NativeSphere] scheduleClip error:", e));

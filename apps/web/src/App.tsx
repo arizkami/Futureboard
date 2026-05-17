@@ -9,7 +9,7 @@ import { audioAssetManager } from "./engine/AudioAssetManager";
 import { mixer } from "./engine/Mixer";
 import { transport } from "./engine/Transport";
 import { metronomeScheduler } from "./engine/MetronomeScheduler";
-import { webAudioEngineAdapter } from "./engine/WebAudioEngineAdapter";
+import { activeAudioEngine } from "./engine/activeAudioEngine";
 import { useProjectStore } from "./store/projectStore";
 import { useUIStore } from "./store/uiStore";
 import { audioProcessingService } from "./audio/AudioProcessingService";
@@ -52,7 +52,8 @@ export default function App() {
   useKeyboardShortcuts();
 
   useEffect(() => {
-    webAudioEngineAdapter.init().catch(console.error);
+    activeAudioEngine.init().catch(console.error);
+    return () => activeAudioEngine.dispose();
   }, []);
 
   // Device services startup.
@@ -114,11 +115,20 @@ export default function App() {
     });
   }, []);
 
-  // Re-sync the audio engine whenever a different project is loaded.
-  // project.id changes only on load/new-project, not on every edit.
+  // Load the active audio backend whenever a different project is loaded.
   useEffect(() => {
-    webAudioEngineAdapter.loadProject(project).catch(console.error);
+    activeAudioEngine.loadProject(project).catch(console.error);
   }, [project.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep the active backend synced with edits.  Electron routes these snapshots
+  // to Rust; browser keeps using the WebAudio adapter.
+  useEffect(() => {
+    return useProjectStore.subscribe((state, prev) => {
+      if (state.project !== prev.project) {
+        activeAudioEngine.syncProject(state.project);
+      }
+    });
+  }, []);
 
   // Ctrl+Shift+P toggles the performance/GPU monitor overlay.
   useEffect(() => {
@@ -185,6 +195,7 @@ export default function App() {
 
   // Sync insert plugin chain into the audio engine whenever tracks or inserts change
   useEffect(() => {
+    if (activeAudioEngine.isNative) return;
     const bpm = project.bpm ?? 120;
     for (const track of project.tracks) {
       if (track.inserts && track.inserts.length > 0) {

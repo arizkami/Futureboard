@@ -7,7 +7,7 @@ import { useMetronomeStore } from "../store/metronomeStore";
 import { useHistoryStore } from "../store/historyStore";
 import { useRecentProjectsStore } from "../store/recentProjectsStore";
 import { useWindowStore } from "../store/windowStore";
-import { transport } from "../engine/Transport";
+import { activeAudioEngine } from "../engine/activeAudioEngine";
 import { getTrackColor } from "../theme";
 import { platform } from "../platform";
 import { importAudioFilesAsNewTracks } from "../utils/importAudioToProject";
@@ -94,20 +94,20 @@ export function runAction(actionId: string) {
     // ── Transport ──────────────────────────────────────────────────────────
     case "transport:play-pause":
       if (transportStore.isPlaying) {
-        transport.pause();
+        activeAudioEngine.pause();
         transportStore.setIsPlaying(false);
       } else {
-        void transport.play().then(() => transportStore.setIsPlaying(true));
+        void activeAudioEngine.play().then(() => transportStore.setIsPlaying(true));
       }
       break;
 
     case "transport:stop":
-      transport.stop();
+      activeAudioEngine.stop();
       transportStore.setIsPlaying(false);
       break;
 
     case "transport:go-to-start":
-      transport.seek(0);
+      activeAudioEngine.seekSeconds(0);
       break;
 
     case "transport:go-to-end": {
@@ -116,7 +116,7 @@ export function runAction(actionId: string) {
         const trackEnd = track.clips.reduce((m, c) => Math.max(m, c.startTime + c.duration), 0);
         return Math.max(max, trackEnd);
       }, 0);
-      transport.seek(end);
+      activeAudioEngine.seekSeconds(end);
       break;
     }
 
@@ -124,7 +124,7 @@ export function runAction(actionId: string) {
       const { bpm, timeSignature } = projectStore.project;
       const timeSig = timeSignature ?? { numerator: 4, denominator: 4 };
       const barLen = (60 / bpm) * timeSig.numerator;
-      transport.seek(Math.max(0, transport.projectTime - barLen));
+      activeAudioEngine.seekSeconds(Math.max(0, activeAudioEngine.projectTime - barLen));
       break;
     }
 
@@ -132,7 +132,7 @@ export function runAction(actionId: string) {
       const { bpm, timeSignature } = projectStore.project;
       const timeSig = timeSignature ?? { numerator: 4, denominator: 4 };
       const barLen = (60 / bpm) * timeSig.numerator;
-      transport.seek(transport.projectTime + barLen);
+      activeAudioEngine.seekSeconds(activeAudioEngine.projectTime + barLen);
       break;
     }
 
@@ -233,7 +233,7 @@ export function runAction(actionId: string) {
     case "clip:split-at-playhead": {
       const { selectedClipIds } = uiStore;
       if (selectedClipIds.length === 0) break;
-      const t = transport.projectTime;
+      const t = activeAudioEngine.projectTime;
       selectedClipIds.forEach((id) => history.execute(new SplitClipCommand(id, t)));
       uiStore.setSelectedClipIds([]);
       break;

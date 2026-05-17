@@ -62,7 +62,11 @@ export class NativeSphereAudioService extends EventEmitter {
   private _binaryPath: string | null = null;
   private _pending  = new Map<string, { resolve: RpcResolve; reject: RpcReject }>();
   private _status: SphereAudioStatus = {
+    available:    false,
     running:      false,
+    streamOpen:   false,
+    transportPlaying: false,
+    positionSeconds:  0,
     version:      ENGINE_VERSION_FALLBACK,
     sampleRate:   44100,
     bufferSize:   256,

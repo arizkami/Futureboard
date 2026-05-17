@@ -27,7 +27,7 @@ export function registerSphereAudioHandlers(_appDir: string): void {
     // This runs immediately so the engine is "running" before the renderer
     // ever queries getStatus(), making the settings panel show the correct state.
     try {
-      svc.openDevice({});   // omitted config fields → system default device, 44100 Hz, 256 buf
+      svc.openDevice({});   // omitted config fields → system default device/config
       svc.start();          // stream.play() — silent until transport play or test tone
       console.log("[SphereAudio] Auto-started on default output device");
     } catch (e) {
@@ -76,6 +76,13 @@ export function registerSphereAudioHandlers(_appDir: string): void {
     svc.stop();
   });
 
+  ipcMain.handle(
+    IpcChannels.SphereAudioSetTestTone,
+    (_event, enabled: boolean, frequency: number) => {
+      svc.setTestTone(enabled, frequency);
+    },
+  );
+
   // ── Transport ──────────────────────────────────────────────────────────────
   // The old IPC shape used a `SphereTransportState` bag with optional fields.
   // Map it to the individual engine calls.
@@ -83,20 +90,19 @@ export function registerSphereAudioHandlers(_appDir: string): void {
   ipcMain.handle(
     IpcChannels.SphereAudioSetTransport,
     (_event, state: SphereTransportState) => {
-      if (state.playing === true)  svc.play();
-      if (state.playing === false) svc.pause();
       if (typeof state.positionSeconds === "number") {
         svc.seek(state.positionSeconds);
       }
+      if (state.playing === true)  svc.play();
+      if (state.playing === false) svc.pause();
     },
   );
 
   ipcMain.handle(IpcChannels.SphereAudioGetTransport, () => {
-    // Return the status which includes position / playing state.
     const st = svc.getStatus();
     return {
-      playing:         st.running,
-      positionSeconds: 0, // TODO: expose position from SharedState
+      playing:         st.transportPlaying,
+      positionSeconds: st.positionSeconds,
     };
   });
 
