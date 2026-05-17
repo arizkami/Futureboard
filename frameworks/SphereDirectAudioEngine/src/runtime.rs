@@ -8,15 +8,163 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::audio_file::{load_audio_file, AudioFileBuffer};
+use serde_json::Value;
+
 use crate::types::{EngineClipSnapshot, EngineProjectSnapshot};
 
 #[derive(Debug, Clone)]
 pub struct RuntimeTrack {
     pub id: String,
+    pub track_type: String,
     pub volume: f32,
     pub pan: f32,
     pub muted: bool,
     pub solo: bool,
+    pub output_track_id: Option<String>,
+    pub inserts: Vec<RuntimeInsert>,
+    pub sends: Vec<RuntimeSend>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeInsert {
+    pub id: String,
+    pub kind: String,
+    pub enabled: bool,
+    pub params: HashMap<String, Value>,
+    pub dsp: InsertDspState,
+}
+
+#[derive(Debug, Clone)]
+pub struct InsertDspState {
+    pub sample_rate: u32,
+    pub eq_l: Vec<Biquad>,
+    pub eq_r: Vec<Biquad>,
+}
+
+impl InsertDspState {
+    fn new(kind: &str, params: &HashMap<String, Value>, sample_rate: u32) -> Self {
+        let mut state = Self {
+            sample_rate,
+            eq_l: Vec::new(),
+            eq_r: Vec::new(),
+        };
+        state.rebuild(kind, params, sample_rate);
+        state
+    }
+
+    pub fn rebuild(&mut self, kind: &str, params: &HashMap<String, Value>, sample_rate: u32) {
+        self.sample_rate = sample_rate.max(1);
+        self.eq_l.clear();
+        self.eq_r.clear();
+        if !is_eq_kind(kind) {
+            return;
+        }
+
+        for band in 1..=8 {
+            let prefix = format!("band{band}");
+            if !param_bool(params, &format!("{prefix}Active"), true) {
+                continue;
+            }
+            let band_type = param_str(params, &format!("{prefix}Type"), "bell");
+            let freq = param_f32(params, &format!("{prefix}Freq"), 1000.0).clamp(20.0, 20_000.0);
+            let gain = param_f32(params, &format!("{prefix}Gain"), 0.0).clamp(-18.0, 18.0);
+            let q = param_f32(params, &format!("{prefix}Q"), 1.0).clamp(0.1, 12.0);
+            let Some(filter) = Biquad::from_eq_band(&band_type, freq, gain, q, self.sample_rate as f32) else {
+                continue;
+            };
+            self.eq_l.push(filter.clone());
+            self.eq_r.push(filter);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Biquad {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    z1: f32,
+    z2: f32,
+}
+
+impl Biquad {
+    fn from_eq_band(kind: &str, freq: f32, gain_db: f32, q: f32, sample_rate: f32) -> Option<Self> {
+        let nyquist = sample_rate * 0.5;
+        let f0 = freq.clamp(10.0, nyquist * 0.96);
+        let q = q.clamp(0.1, 12.0);
+        let w0 = std::f32::consts::TAU * f0 / sample_rate.max(1.0);
+        let sin = w0.sin();
+        let cos = w0.cos();
+        let alpha = sin / (2.0 * q);
+        let a = 10.0f32.powf(gain_db / 40.0);
+
+        let (b0, b1, b2, a0, a1, a2) = match kind {
+            "bell" | "peak" | "peaking" => (
+                1.0 + alpha * a,
+                -2.0 * cos,
+                1.0 - alpha * a,
+                1.0 + alpha / a,
+                -2.0 * cos,
+                1.0 - alpha / a,
+            ),
+            "notch" => (
+                1.0,
+                -2.0 * cos,
+                1.0,
+                1.0 + alpha,
+                -2.0 * cos,
+                1.0 - alpha,
+            ),
+            "lowpass" | "lp" => (
+                (1.0 - cos) * 0.5,
+                1.0 - cos,
+                (1.0 - cos) * 0.5,
+                1.0 + alpha,
+                -2.0 * cos,
+                1.0 - alpha,
+            ),
+            "highpass" | "hp" => (
+                (1.0 + cos) * 0.5,
+                -(1.0 + cos),
+                (1.0 + cos) * 0.5,
+                1.0 + alpha,
+                -2.0 * cos,
+                1.0 - alpha,
+            ),
+            "lowshelf" | "ls" => make_shelf(true, cos, sin, a, q),
+            "highshelf" | "hs" => make_shelf(false, cos, sin, a, q),
+            _ => return None,
+        };
+
+        let inv_a0 = 1.0 / a0.max(1.0e-8);
+        Some(Self {
+            b0: b0 * inv_a0,
+            b1: b1 * inv_a0,
+            b2: b2 * inv_a0,
+            a1: a1 * inv_a0,
+            a2: a2 * inv_a0,
+            z1: 0.0,
+            z2: 0.0,
+        })
+    }
+
+    #[inline]
+    pub fn process(&mut self, input: f32) -> f32 {
+        let output = self.b0 * input + self.z1;
+        self.z1 = self.b1 * input - self.a1 * output + self.z2;
+        self.z2 = self.b2 * input - self.a2 * output;
+        if output.is_finite() { output } else { 0.0 }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeSend {
+    pub id: String,
+    pub return_track_id: String,
+    pub level: f32,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -120,10 +268,33 @@ impl RuntimeProject {
             .iter()
             .map(|t| RuntimeTrack {
                 id: t.id.clone(),
+                track_type: t.track_type.clone(),
                 volume: t.volume.clamp(0.0, 2.0),
                 pan: t.pan.clamp(-1.0, 1.0),
                 muted: t.muted,
                 solo: t.solo,
+                output_track_id: t.output_track_id.clone(),
+                inserts: t
+                    .inserts
+                    .iter()
+                    .map(|insert| RuntimeInsert {
+                        id: insert.id.clone(),
+                        kind: insert.kind.clone(),
+                        enabled: insert.enabled,
+                        params: insert.params.clone(),
+                        dsp: InsertDspState::new(&insert.kind, &insert.params, output_sample_rate),
+                    })
+                    .collect(),
+                sends: t
+                    .sends
+                    .iter()
+                    .map(|send| RuntimeSend {
+                        id: send.id.clone(),
+                        return_track_id: send.return_track_id.clone(),
+                        level: send.level.clamp(0.0, 2.0),
+                        enabled: send.enabled,
+                    })
+                    .collect(),
             })
             .collect();
         let has_solo = tracks.iter().any(|t| t.solo);
@@ -175,6 +346,80 @@ impl RuntimeProject {
             self.has_solo = self.tracks.iter().any(|t| t.solo);
         }
     }
+
+    #[inline]
+    pub fn update_insert_param(&mut self, track_id: &str, insert_id: &str, param_id: &str, value: f32) {
+        let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
+            return;
+        };
+        let Some(insert) = track.inserts.iter_mut().find(|i| i.id == insert_id) else {
+            return;
+        };
+        if param_id == "enabled" {
+            insert.enabled = value >= 0.5;
+            return;
+        }
+        insert
+            .params
+            .insert(param_id.to_string(), Value::from(value as f64));
+        if is_eq_kind(&insert.kind) && (param_id == "power" || param_id.starts_with("band")) {
+            insert.dsp.rebuild(&insert.kind, &insert.params, self.sample_rate);
+        }
+    }
+}
+
+#[inline]
+fn is_eq_kind(kind: &str) -> bool {
+    let kind = kind.to_ascii_lowercase();
+    kind == "eq" || kind == "equz8" || kind.contains("eq")
+}
+
+fn make_shelf(low: bool, cos: f32, sin: f32, a: f32, q: f32) -> (f32, f32, f32, f32, f32, f32) {
+    let slope = q.clamp(0.1, 1.0);
+    let alpha = (sin * 0.5) * ((a + 1.0 / a) * (1.0 / slope - 1.0) + 2.0).max(0.0001).sqrt();
+    let beta = 2.0 * a.sqrt() * alpha;
+    if low {
+        (
+            a * ((a + 1.0) - (a - 1.0) * cos + beta),
+            2.0 * a * ((a - 1.0) - (a + 1.0) * cos),
+            a * ((a + 1.0) - (a - 1.0) * cos - beta),
+            (a + 1.0) + (a - 1.0) * cos + beta,
+            -2.0 * ((a - 1.0) + (a + 1.0) * cos),
+            (a + 1.0) + (a - 1.0) * cos - beta,
+        )
+    } else {
+        (
+            a * ((a + 1.0) + (a - 1.0) * cos + beta),
+            -2.0 * a * ((a - 1.0) + (a + 1.0) * cos),
+            a * ((a + 1.0) + (a - 1.0) * cos - beta),
+            (a + 1.0) - (a - 1.0) * cos + beta,
+            2.0 * ((a - 1.0) - (a + 1.0) * cos),
+            (a + 1.0) - (a - 1.0) * cos - beta,
+        )
+    }
+}
+
+fn param_f32(params: &HashMap<String, Value>, key: &str, fallback: f32) -> f32 {
+    params
+        .get(key)
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32)
+        .unwrap_or(fallback)
+}
+
+fn param_bool(params: &HashMap<String, Value>, key: &str, fallback: bool) -> bool {
+    params
+        .get(key)
+        .and_then(|v| v.as_bool().or_else(|| v.as_f64().map(|n| n >= 0.5)))
+        .unwrap_or(fallback)
+}
+
+fn param_str(params: &HashMap<String, Value>, key: &str, fallback: &str) -> String {
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or(fallback)
+        .to_ascii_lowercase()
 }
 
 fn build_clip_runtime(

@@ -20,14 +20,14 @@ const isDebug = process.argv.includes("--debug");
 
 function addonSourceName() {
   switch (process.platform) {
-    case "win32":  return "sphere_direct_audio_engine.dll";
-    case "darwin": return "libsphere_direct_audio_engine.dylib";
-    default:       return "libsphere_direct_audio_engine.so";
+    case "win32":  return "DAUx.dll";
+    case "darwin": return "libDAUx.dylib";
+    default:       return "libDAUx.so";
   }
 }
 
 // napi-rs / Node.js expects .node extension for native addons.
-const NODE_ADDON_NAME = "sphere_direct_audio_engine.node";
+const NODE_ADDON_NAME = "DAUx.node";
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
 

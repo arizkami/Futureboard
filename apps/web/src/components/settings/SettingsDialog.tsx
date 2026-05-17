@@ -4,22 +4,25 @@ import { useProjectStore } from "../../store/projectStore";
 import { useWindowStore } from "../../store/windowStore";
 import { useDeviceStore } from "../../store/deviceStore";
 import { useAudioSettingsStore } from "../../store/audioSettingsStore";
-import { audioDeviceService } from "../../engine/AudioDeviceService";
 import { midiDeviceService } from "../../engine/MidiDeviceService";
 import { platform } from "../../platform";
 import { DawSelect } from "../ui/DawSelect";
 import { NumberInput } from "../ui/NumberInput";
 import { KeyboardShortcutsPanel } from "./KeyboardShortcutsPanel";
-import type { AppSettings, PreferredBufferSize, PreferredEngine, StartupBehavior } from "../../store/settingsStore";
-import { RefreshCw, AlertCircle, Activity, Cpu } from "lucide-react";
-import {
-  detectAudioEngineBackends,
-  invalidateBackendDetection,
-} from "../../engine/native/detection";
+import type {
+  AppSettings,
+  PreferredBufferSize,
+  StartupBehavior,
+  DauxBackend,
+  AudioSampleRate,
+} from "../../store/settingsStore";
+import { RefreshCw, AlertCircle } from "lucide-react";
 import { activeAudioEngine } from "../../engine/activeAudioEngine";
 import { useAudioBackendStore } from "../../store/audioBackendStore";
-import type { AudioEngineBackendStatus } from "../../engine/native/types";
-import type { DawBridgeSphereDeviceInfo } from "../../platform/dawBridge.types";
+import type {
+  DawBridgeSphereDeviceInfo,
+  DawBridgeDauxStatus,
+} from "../../platform/dawBridge.types";
 
 type SettingsTab = "general" | "audio" | "midi" | "project" | "appearance" | "advanced" | "shortcuts";
 
@@ -267,16 +270,50 @@ function GeneralTab({ draft, setDraft }: { draft: AppSettings; setDraft: (p: Par
   );
 }
 
-// ── Native backend status card ────────────────────────────────────────────────
+// ── Backend ID helpers ────────────────────────────────────────────────────────
 
-function NativeEngineStatusCard({
+/** Maps our UI DauxBackend enum to the Rust openDaux() backendId string. */
+function dauxBackendId(b: DauxBackend): string {
+  switch (b) {
+    case "wasapi":    return "wasapi-exclusive";
+    case "mme":       return "mme";
+    case "coreaudio": return "coreaudio";
+    case "alsa":      return "alsa";
+  }
+}
+
+/** Returns the platform default DAUx backend based on `window.dawElectron.platform`. */
+function platformDefaultBackend(): DauxBackend {
+  const p = window.dawElectron?.platform ?? "";
+  if (p === "darwin") return "coreaudio";
+  if (p === "linux")  return "alsa";
+  return "wasapi"; // win32 + unknown
+}
+
+// ── Restart banner ────────────────────────────────────────────────────────────
+
+function RestartBanner() {
+  return (
+    <div className="mb-2 flex items-center gap-2 rounded border border-[rgba(226,184,102,0.22)] bg-[rgba(226,184,102,0.06)] px-3 py-[7px]">
+      <span className="text-[10px] text-[#e2b866]/80">⚠</span>
+      <span className="text-[11px] text-[#e2b866]/80 leading-snug">
+        Audio settings changed — click Apply or Done to restart the engine.
+      </span>
+    </div>
+  );
+}
+
+// ── DAUx engine status card ───────────────────────────────────────────────────
+
+function DauxEngineCard({
   status,
   onRefresh,
 }: {
-  status: AudioEngineBackendStatus | null;
+  status: DawBridgeDauxStatus | null;
   onRefresh: () => void;
 }) {
   const [testToneOn, setTestToneOn] = useState(false);
+  const running = !!status && status.sampleRate > 0;
 
   const toggleTestTone = () => {
     const sphere = window.dawElectron?.sphereAudio;
@@ -285,56 +322,28 @@ function NativeEngineStatusCard({
     setTestToneOn(next);
     void sphere.setTestTone(next, 440).catch(() => setTestToneOn(false));
   };
-  const isElectron = platform.kind === "electron";
-
-  if (!isElectron) {
-    return (
-      <div className="mb-3 flex items-center gap-2 rounded border border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.025)] px-3 py-2.5">
-        <Cpu size={11} className="shrink-0 text-daw-faint" />
-        <span className="text-[11px] text-daw-faint">
-          Sphere Direct Native Engine — available in Electron client only
-        </span>
-      </div>
-    );
-  }
-
-  if (!status) {
-    return (
-      <div className="mb-3 flex items-center gap-2 rounded border border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.025)] px-3 py-2.5">
-        <Activity size={11} className="shrink-0 text-daw-faint animate-pulse" />
-        <span className="text-[11px] text-daw-faint">Detecting native engine…</span>
-      </div>
-    );
-  }
-
-  const dot = status.available && status.running
-    ? "bg-[rgba(74,222,128,0.9)]"   // green — running
-    : status.available
-    ? "bg-yellow-400/80"            // yellow — available but not running
-    : "bg-[rgba(255,255,255,0.2)]"; // grey — unavailable
-
-  const label = status.available && status.running
-    ? "Running"
-    : status.available
-    ? "Available · Not running"
-    : "Unavailable";
 
   return (
     <div className="mb-3 rounded border border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.025)] px-3 py-2.5">
-      {/* Header row */}
-      <div className="flex items-center gap-2 mb-2">
-        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} />
-        <span className="text-[11px] font-medium text-daw-text">
-          Sphere Direct Native Engine
-        </span>
-        {status.version && (
-          <span className="ml-1 text-[10px] text-daw-faint">v{status.version}</span>
+      {/* Header */}
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+          running
+            ? "bg-[rgba(74,222,128,0.9)]"
+            : status
+            ? "bg-yellow-400/80"
+            : "bg-[rgba(255,255,255,0.18)] animate-pulse"
+        }`} />
+        <span className="text-[11px] font-medium text-daw-text">DAUx</span>
+        {status?.backendName && (
+          <span className="text-[10px] text-daw-faint">· {status.backendName}</span>
         )}
-        <span className="ml-auto text-[10px] text-daw-faint">{label}</span>
-        {/* Test Tone — proves Rust is actually producing audio */}
-        {status?.available && status.running && (
+        <span className="ml-auto text-[10px] text-daw-faint">
+          {running ? "Running" : status ? "Stopped" : "Detecting…"}
+        </span>
+        {running && (
           <button
-            title={testToneOn ? "Stop test tone (440 Hz)" : "Play test tone (440 Hz) — verifies Rust audio output"}
+            title={testToneOn ? "Stop test tone (440 Hz)" : "Play 440 Hz test tone"}
             onClick={toggleTestTone}
             className={`flex h-5 items-center gap-1 px-1.5 rounded border text-[9px] transition-colors ${
               testToneOn
@@ -346,7 +355,7 @@ function NativeEngineStatusCard({
           </button>
         )}
         <button
-          title="Refresh native engine status"
+          title="Refresh engine status"
           onClick={onRefresh}
           className="flex h-5 w-5 items-center justify-center rounded border border-[rgba(255,255,255,0.08)] text-daw-faint hover:text-daw-text hover:bg-[rgba(255,255,255,0.06)] transition-colors"
         >
@@ -354,72 +363,89 @@ function NativeEngineStatusCard({
         </button>
       </div>
 
-      {/* Spec grid — shown when available */}
-      {status.available ? (
+      {/* Stats grid */}
+      {status ? (
         <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
-          {(status.sampleRate ?? 0) > 0 && (
+          {status.bufferSize > 0 && (
+            <>
+              <span className="text-[10px] text-daw-faint">Buffer</span>
+              <span className="text-[10px] text-daw-text tabular-nums">
+                {status.bufferSize} samples
+                {status.estimatedLatencyMs > 0 && (
+                  <span className="text-daw-faint ml-1.5">
+                    ≈ {status.estimatedLatencyMs.toFixed(1)} ms
+                  </span>
+                )}
+              </span>
+            </>
+          )}
+          {status.sampleRate > 0 && (
             <>
               <span className="text-[10px] text-daw-faint">Sample Rate</span>
-              <span className="text-[10px] text-daw-text tabular-nums">{status.sampleRate} Hz</span>
-            </>
-          )}
-          {(status.bufferSize ?? 0) > 0 && (
-            <>
-              <span className="text-[10px] text-daw-faint">Buffer Size</span>
-              <span className="text-[10px] text-daw-text tabular-nums">{status.bufferSize} samples</span>
-            </>
-          )}
-          {status.inputDevice && (
-            <>
-              <span className="text-[10px] text-daw-faint">Input</span>
-              <span className="text-[10px] text-daw-text truncate" title={status.inputDevice}>{status.inputDevice}</span>
+              <span className="text-[10px] text-daw-text tabular-nums">
+                {status.sampleRate % 1000 === 0
+                  ? `${status.sampleRate / 1000} kHz`
+                  : `${(status.sampleRate / 1000).toFixed(1)} kHz`}
+              </span>
             </>
           )}
           {status.outputDevice && (
             <>
               <span className="text-[10px] text-daw-faint">Output</span>
-              <span className="text-[10px] text-daw-text truncate" title={status.outputDevice}>{status.outputDevice}</span>
+              <span className="text-[10px] text-daw-text truncate" title={status.outputDevice}>
+                {status.outputDevice}
+              </span>
+            </>
+          )}
+          {status.glitchCount > 0 && (
+            <>
+              <span className="text-[10px] text-daw-faint">Glitches</span>
+              <span className="text-[10px] text-red-400/90 tabular-nums">{status.glitchCount}</span>
+            </>
+          )}
+          {status.mmcssActive && (
+            <>
+              <span className="text-[10px] text-daw-faint">MMCSS</span>
+              <span className="text-[10px] text-[rgba(74,222,128,0.8)]">Active</span>
             </>
           )}
         </div>
       ) : (
-        <p className="text-[10px] text-daw-faint leading-snug">
-          {status.reason ?? "Native engine binary not found"}
+        <p className="text-[10px] text-daw-faint">
+          DAUx engine not detected — ensure the native addon is loaded.
         </p>
       )}
     </div>
   );
 }
 
-function RuntimeAudioStateCard() {
+// ── WASM engine status card ───────────────────────────────────────────────────
+
+function WasmEngineCard() {
   const backend = useAudioBackendStore();
-  const availability = [
-    `WebAudio ${backend.available.webAudio ? "yes" : "no"}`,
-    `Rust WASM ${backend.available.rustWasm ? "yes" : "no"}`,
-    `Sphere ${backend.available.sphereNative ? "yes" : "no"}`,
-  ].join(" · ");
-  const engine =
-    backend.active === "sphere-native"
-      ? "Sphere Native"
-      : backend.active === "web-audio"
-      ? (backend.available.rustWasm ? "WebAudio + Rust WASM" : "WebAudio")
-      : "Not initialized";
+  const running = backend.healthy && backend.active !== null;
 
   return (
     <div className="mb-3 rounded border border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.025)] px-3 py-2.5">
-      <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
-        <span className="text-[10px] text-daw-faint">Runtime</span>
-        <span className="text-[10px] text-daw-text">{backend.runtime}</span>
-        <span className="text-[10px] text-daw-faint">Audio Engine</span>
-        <span className="text-[10px] text-daw-text">{engine}</span>
-        <span className="text-[10px] text-daw-faint">Requested</span>
-        <span className="text-[10px] text-daw-text">{backend.requested}</span>
-        <span className="text-[10px] text-daw-faint">Status</span>
-        <span className="text-[10px] text-daw-text">
-          {backend.healthy ? (backend.contextState ?? "ready") : (backend.error ?? "not healthy")}
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+          running ? "bg-[rgba(74,222,128,0.9)]" : "bg-yellow-400/80"
+        }`} />
+        <span className="text-[11px] font-medium text-daw-text">WASM</span>
+        <span className="text-[10px] text-daw-faint">· Browser AudioWorklet</span>
+        <span className="ml-auto text-[10px] text-daw-faint">
+          {running ? "Running" : (backend.error ?? "Not running")}
         </span>
-        <span className="text-[10px] text-daw-faint">Availability</span>
-        <span className="text-[10px] text-daw-text truncate" title={availability}>{availability}</span>
+      </div>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
+        <span className="text-[10px] text-daw-faint">Buffer control</span>
+        <span className="text-[10px] text-daw-text">Browser managed</span>
+        {backend.contextState && (
+          <>
+            <span className="text-[10px] text-daw-faint">Context</span>
+            <span className="text-[10px] text-daw-text">{backend.contextState}</span>
+          </>
+        )}
         {backend.fallbackReason && (
           <>
             <span className="text-[10px] text-daw-faint">Fallback</span>
@@ -436,198 +462,233 @@ function RuntimeAudioStateCard() {
 function AudioTab({
   draft,
   setDraft,
-  nativeStatus,
-  onRefreshNativeStatus,
+  dauxStatus,
+  onRefreshDauxStatus,
 }: {
   draft: AppSettings;
   setDraft: (p: Partial<AppSettings>) => void;
-  nativeStatus: AudioEngineBackendStatus | null;
-  onRefreshNativeStatus: () => void;
+  dauxStatus: DawBridgeDauxStatus | null;
+  onRefreshDauxStatus: () => void;
 }) {
-  const { audioInputs, audioOutputs, audioPermission } = useDeviceStore();
   const audioSettings = useAudioSettingsStore();
-  const isWeb      = platform.kind === "web";
   const isElectron = platform.kind === "electron";
-  const needsPermission = isWeb && audioPermission !== "granted" && audioInputs.length === 0;
-  const [nativeInputs, setNativeInputs] = useState<DawBridgeSphereDeviceInfo[]>([]);
-  const [nativeOutputs, setNativeOutputs] = useState<DawBridgeSphereDeviceInfo[]>([]);
 
-  const refreshNativeAudioDevices = useCallback(() => {
+  // OS platform from Electron bridge (win32 / darwin / linux)
+  const osPlatform = (window.dawElectron?.platform ?? "") as string;
+  const isWindows = osPlatform === "win32";
+  const isMac     = osPlatform === "darwin";
+  const isLinux   = osPlatform === "linux";
+
+  // ── Native output device list ─────────────────────────────────────────────
+  const [nativeOutputs, setNativeOutputs] = useState<DawBridgeSphereDeviceInfo[]>([]);
+  const [devicesRefreshing, setDevicesRefreshing] = useState(false);
+
+  const refreshDevices = useCallback(async () => {
     const sphere = window.dawElectron?.sphereAudio;
-    if (!sphere) {
-      setNativeInputs([]);
+    if (!sphere) { setNativeOutputs([]); return; }
+    setDevicesRefreshing(true);
+    try {
+      const [, outputs] = await Promise.all([
+        sphere.listInputDevices(),
+        sphere.listOutputDevices(),
+      ]);
+      setNativeOutputs(outputs);
+    } catch {
       setNativeOutputs([]);
-      return;
+    } finally {
+      setDevicesRefreshing(false);
     }
-    void Promise.all([
-      sphere.listInputDevices(),
-      sphere.listOutputDevices(),
-    ])
-      .then(([inputs, outputs]) => {
-        setNativeInputs(inputs);
-        setNativeOutputs(outputs);
-      })
-      .catch(() => {
-        setNativeInputs([]);
-        setNativeOutputs([]);
-      });
   }, []);
 
   useEffect(() => {
-    if (isElectron) refreshNativeAudioDevices();
-  }, [isElectron, refreshNativeAudioDevices, nativeStatus?.available]);
+    if (isElectron) void refreshDevices();
+  }, [isElectron, refreshDevices]);
 
-  const useNativeAudioDevices =
-    isElectron &&
-    nativeStatus?.available === true;
+  // ── OS Backend options (Electron-only, platform-conditional) ─────────────
+  const backendOptions: { value: DauxBackend; label: string }[] = isWindows
+    ? [
+        { value: "wasapi", label: "WASAPI" },
+        { value: "mme",    label: "MME Fallback (High Latency)" },
+      ]
+    : isMac
+    ? [{ value: "coreaudio", label: "CoreAudio" }]
+    : isLinux
+    ? [{ value: "alsa", label: "ALSA" }]
+    : [];
 
-  const webInputOptions = [
-    { value: "__default__", label: "System Default" },
-    ...audioInputs.map((d) => ({ value: d.id, label: d.name })),
-  ];
-  const nativeInputOptions = [
-    { value: "__default__", label: "System Default" },
-    ...nativeInputs.map((d) => ({
-      value: d.id,
-      label: d.isDefault ? `${d.name} (Default)` : d.name,
-    })),
-  ];
-  const webOutputOptions = [
-    { value: "__default__", label: "System Default" },
-    ...audioOutputs.map((d) => ({ value: d.id, label: d.name })),
-  ];
-  const nativeOutputOptions = [
+  const defaultBackend: DauxBackend = isMac ? "coreaudio" : isLinux ? "alsa" : "wasapi";
+  const effectiveDauxBackend: DauxBackend = draft.dauxBackend ?? defaultBackend;
+  const effectiveSampleRate: AudioSampleRate = draft.audioSampleRate ?? "device-default";
+
+  // ── Restart-required detection ────────────────────────────────────────────
+  // Compares draft against the last-committed store values.
+  const storedBufferSize  = useSettingsStore((s) => s.preferredBufferSize);
+  const storedDauxBackend = useSettingsStore((s) => s.dauxBackend ?? defaultBackend);
+  const storedSampleRate  = useSettingsStore((s) => s.audioSampleRate ?? "device-default");
+  const restartRequired = isElectron && (
+    draft.preferredBufferSize !== storedBufferSize ||
+    effectiveDauxBackend      !== storedDauxBackend ||
+    effectiveSampleRate       !== storedSampleRate
+  );
+
+  // ── Output device select options ──────────────────────────────────────────
+  const outputOptions = [
     { value: "__default__", label: "System Default" },
     ...nativeOutputs.map((d) => ({
       value: d.id,
       label: d.isDefault ? `${d.name} (Default)` : d.name,
     })),
   ];
-  const inputOptions =
-    useNativeAudioDevices && nativeInputs.length > 0
-      ? nativeInputOptions
-      : webInputOptions;
-  const outputOptions =
-    useNativeAudioDevices && nativeOutputs.length > 0
-      ? nativeOutputOptions
-      : webOutputOptions;
-  const inputDeviceValue =
-    audioSettings.audioInputDeviceId &&
-    inputOptions.some((option) => option.value === audioSettings.audioInputDeviceId)
-      ? audioSettings.audioInputDeviceId
-      : "__default__";
   const outputDeviceValue =
     audioSettings.audioOutputDeviceId &&
-    outputOptions.some((option) => option.value === audioSettings.audioOutputDeviceId)
+    outputOptions.some((o) => o.value === audioSettings.audioOutputDeviceId)
       ? audioSettings.audioOutputDeviceId
       : "__default__";
 
-  useEffect(() => {
-    if (!useNativeAudioDevices) return;
-    const selectedInput = audioSettings.audioInputDeviceId;
-    if (selectedInput && nativeInputs.length > 0 && !nativeInputs.some((d) => d.id === selectedInput)) {
-      audioSettings.setAudioInputDevice(null);
-    }
-    const selectedOutput = audioSettings.audioOutputDeviceId;
-    if (selectedOutput && nativeOutputs.length > 0 && !nativeOutputs.some((d) => d.id === selectedOutput)) {
-      audioSettings.setAudioOutputDevice(null);
-    }
-  }, [audioSettings, nativeInputs, nativeOutputs, useNativeAudioDevices]);
-
-  // Engine options — show native only in Electron
-  const engineOptions: { value: PreferredEngine; label: string }[] = isElectron
-    ? [{ value: "native-sphere-direct", label: "Sphere Direct Native Engine" }]
-    : [
-        { value: "auto",     label: "Automatic (Recommended)" },
-        { value: "webAudio", label: "Web Audio (Built-in)" },
-        { value: "wasm",     label: "WASM Engine (High Performance)" },
-      ];
-  const engineValue: PreferredEngine =
-    isElectron ? "native-sphere-direct" : draft.preferredEngine;
-
   return (
     <div className="flex flex-col">
-      <SectionHeader>Devices</SectionHeader>
 
-      {needsPermission && (
-        <div className="mb-3 flex items-center gap-2 rounded border border-yellow-500/20 bg-yellow-500/5 px-3 py-2">
-          <AlertCircle size={11} className="shrink-0 text-yellow-400" />
-          <span className="text-[11px] text-yellow-400/80">
-            Microphone permission required to list audio devices.
-          </span>
-          <button
-            onClick={() => audioDeviceService.requestAudioPermission()}
-            className="ml-auto shrink-0 rounded border border-yellow-500/30 px-2 py-0.5 text-[10px] text-yellow-400 hover:bg-yellow-500/10 transition-colors"
+      {/* ── 1. Engine (read-only) ──────────────────────────────────────────── */}
+      <SectionHeader>Audio Engine</SectionHeader>
+      <SettingsRow
+        label="Engine"
+        description={
+          isElectron
+            ? "Low-latency native audio via DAUx (Rust)"
+            : "Browser AudioWorklet with WASM DSP"
+        }
+      >
+        <span className="inline-flex items-center h-[22px] px-2.5 rounded text-[11px] font-medium bg-[rgba(114,215,215,0.1)] border border-[rgba(114,215,215,0.2)] text-[rgba(114,215,215,0.9)]">
+          {isElectron ? "DAUx" : "WASM"}
+        </span>
+      </SettingsRow>
+
+      {isElectron
+        ? <DauxEngineCard status={dauxStatus} onRefresh={onRefreshDauxStatus} />
+        : <WasmEngineCard />
+      }
+
+      {/* ── 2. OS Backend (Electron only) ─────────────────────────────────── */}
+      {isElectron && backendOptions.length > 0 && (
+        <>
+          <SectionHeader>OS Backend</SectionHeader>
+          <SettingsRow
+            label="Backend"
+            description={
+              isWindows
+                ? "WASAPI — event-driven, lowest latency. MME — legacy, high latency."
+                : isMac
+                ? "CoreAudio is the only supported backend on macOS."
+                : "ALSA is the system audio API on Linux."
+            }
           >
-            Allow
-          </button>
-        </div>
+            <DawSelect
+              className="w-52"
+              value={effectiveDauxBackend}
+              onChange={(v) => setDraft({ dauxBackend: v as DauxBackend })}
+              options={backendOptions}
+            />
+          </SettingsRow>
+        </>
       )}
 
-      <SettingsRow label="Input Device" description="Global audio input used for all audio tracks">
-        <div className="flex items-center gap-1.5">
+      {/* ── 3. Performance ────────────────────────────────────────────────── */}
+      <SectionHeader>Performance</SectionHeader>
+
+      {restartRequired && <RestartBanner />}
+
+      <SettingsRow
+        label="Buffer Size"
+        description={
+          isElectron
+            ? "Lower = less latency, higher CPU. 256 is the stable default."
+            : "Buffer size is controlled by the browser."
+        }
+      >
+        {isElectron ? (
+          <SettingsSelect<PreferredBufferSize>
+            value={draft.preferredBufferSize}
+            onChange={(v) => setDraft({ preferredBufferSize: v })}
+            options={[
+              { value: 64,   label: "64 samples" },
+              { value: 128,  label: "128 samples" },
+              { value: 256,  label: "256 samples (Default)" },
+              { value: 512,  label: "512 samples" },
+              { value: 1024, label: "1024 samples" },
+            ]}
+          />
+        ) : (
+          <span className="text-[11px] text-daw-faint">Browser managed</span>
+        )}
+      </SettingsRow>
+
+      <SettingsRow
+        label="Sample Rate"
+        description="Hardware sample rate. Device Default lets the driver choose."
+      >
+        {isElectron ? (
           <DawSelect
             className="w-44"
-            value={inputDeviceValue}
-            onChange={(v) => audioSettings.setAudioInputDevice(v === "__default__" ? null : v)}
-            options={inputOptions}
-          />
-          <button
-            title="Refresh devices"
-            onClick={() => {
-              void audioDeviceService.refreshAudioDevices();
-              refreshNativeAudioDevices();
+            value={String(effectiveSampleRate)}
+            onChange={(val) => {
+              if (val === "device-default") {
+                setDraft({ audioSampleRate: "device-default" });
+              } else {
+                const n = parseInt(val, 10);
+                if (n === 44100 || n === 48000 || n === 96000) {
+                  setDraft({ audioSampleRate: n as AudioSampleRate });
+                }
+              }
             }}
-            className="flex h-7 w-7 items-center justify-center rounded border border-[rgba(255,255,255,0.08)] text-daw-faint hover:text-daw-text hover:bg-[rgba(255,255,255,0.06)] transition-colors"
-          >
-            <RefreshCw size={11} />
-          </button>
-        </div>
+            options={[
+              { value: "device-default", label: "Device Default" },
+              { value: "44100",          label: "44100 Hz" },
+              { value: "48000",          label: "48000 Hz" },
+              { value: "96000",          label: "96000 Hz" },
+            ]}
+          />
+        ) : (
+          <span className="text-[11px] text-daw-faint">Browser managed</span>
+        )}
       </SettingsRow>
 
-      <SettingsRow label="Output Device" description="Global audio output for the master bus">
-        <DawSelect
-          className="w-44"
-          value={outputDeviceValue}
-          onChange={(v) => audioSettings.setAudioOutputDevice(v === "__default__" ? null : v)}
-          options={outputOptions}
-        />
-      </SettingsRow>
+      {/* ── 4. Device ─────────────────────────────────────────────────────── */}
+      <SectionHeader>Device</SectionHeader>
 
-      {audioInputs.length > 0 && (
-        <div className="mt-1 mb-2 text-[10px] text-daw-faint px-0.5">
-          {audioInputs.length} input{audioInputs.length !== 1 ? "s" : ""} · {audioOutputs.length} output{audioOutputs.length !== 1 ? "s" : ""} detected
-        </div>
+      {isElectron ? (
+        <SettingsRow label="Output Device" description="Hardware output for the master bus">
+          <div className="flex items-center gap-1.5">
+            <DawSelect
+              className="w-44"
+              value={outputDeviceValue}
+              onChange={(v) =>
+                audioSettings.setAudioOutputDevice(v === "__default__" ? null : v)
+              }
+              options={outputOptions}
+            />
+            <button
+              title="Refresh device list"
+              onClick={() => void refreshDevices()}
+              className={`flex h-7 w-7 items-center justify-center rounded border border-[rgba(255,255,255,0.08)] text-daw-faint hover:text-daw-text hover:bg-[rgba(255,255,255,0.06)] transition-colors ${
+                devicesRefreshing ? "opacity-50 pointer-events-none" : ""
+              }`}
+            >
+              <RefreshCw
+                size={11}
+                className={devicesRefreshing ? "animate-spin" : ""}
+              />
+            </button>
+          </div>
+        </SettingsRow>
+      ) : (
+        <SettingsRow
+          label="Output Device"
+          description="Output device is selected and managed by the browser."
+        >
+          <span className="text-[11px] text-daw-faint">Browser managed</span>
+        </SettingsRow>
       )}
 
-      <SectionHeader>Engine</SectionHeader>
-      <SettingsRow label="Audio Backend" description="Select the audio processing backend">
-        <SettingsSelect<PreferredEngine>
-          value={engineValue}
-          onChange={(v) => setDraft({ preferredEngine: v })}
-          options={engineOptions}
-        />
-      </SettingsRow>
-
-      <RuntimeAudioStateCard />
-
-      {/* Native engine status — shown in Electron or as placeholder in Web */}
-      <NativeEngineStatusCard status={nativeStatus} onRefresh={onRefreshNativeStatus} />
-
-      <SectionHeader>Performance</SectionHeader>
-      <SettingsRow label="Buffer Size" description="Lower values reduce latency but increase CPU load">
-        <SettingsSelect<PreferredBufferSize>
-          value={draft.preferredBufferSize}
-          onChange={(v) => setDraft({ preferredBufferSize: v })}
-          options={[
-            { value: 64, label: "64 samples" },
-            { value: 128, label: "128 samples" },
-            { value: 256, label: "256 samples" },
-            { value: 512, label: "512 samples" },
-            { value: 1024, label: "1024 samples" },
-          ]}
-        />
-      </SettingsRow>
     </div>
   );
 }
@@ -766,38 +827,35 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
   });
 
   const [appDraft, setAppDraft] = useState<AppSettings>({
-    startupBehavior: store.startupBehavior,
-    autoSave: store.autoSave,
+    startupBehavior:     store.startupBehavior,
+    autoSave:            store.autoSave,
     autoSaveIntervalMin: store.autoSaveIntervalMin,
-    preferredEngine: store.preferredEngine,
+    preferredEngine:     store.preferredEngine,
     preferredBufferSize: store.preferredBufferSize,
-    compactUI: store.compactUI,
-    enableDevTools: store.enableDevTools,
+    dauxBackend:         store.dauxBackend,
+    audioSampleRate:     store.audioSampleRate,
+    compactUI:           store.compactUI,
+    enableDevTools:      store.enableDevTools,
   });
 
   const patchProject = (p: Partial<ProjectDraft>) => setProjectDraft((s) => ({ ...s, ...p }));
   const patchApp = (p: Partial<AppSettings>) => setAppDraft((s) => ({ ...s, ...p }));
 
-  // ── Native engine status (owned here so handleApply can trigger re-probe) ──
-  const [nativeStatus, setNativeStatus] = useState<AudioEngineBackendStatus | null>(null);
+  // ── DAUx runtime status (refreshed on mount and after Apply) ─────────────
+  const [dauxStatus, setDauxStatus] = useState<DawBridgeDauxStatus | null>(null);
 
-  const refreshNativeStatus = useCallback(() => {
-    invalidateBackendDetection();
-    detectAudioEngineBackends()
-      .then((backends) =>
-        setNativeStatus(backends.find((b) => b.backend === "native-sphere-direct") ?? null),
-      )
-      .catch(() => setNativeStatus(null));
+  const refreshDauxStatus = useCallback(() => {
+    const sphere = window.dawElectron?.sphereAudio;
+    if (!sphere) { setDauxStatus(null); return; }
+    void sphere.getDauxStatus()
+      .then(setDauxStatus)
+      .catch(() => setDauxStatus(null));
   }, []);
 
-  // Probe once on mount
+  // Probe once on mount (Electron only)
   useEffect(() => {
-    detectAudioEngineBackends()
-      .then((backends) =>
-        setNativeStatus(backends.find((b) => b.backend === "native-sphere-direct") ?? null),
-      )
-      .catch(() => setNativeStatus(null));
-  }, []);
+    if (platform.kind === "electron") refreshDauxStatus();
+  }, [refreshDauxStatus]);
 
   // Track whether a native engine reopen is in flight
   const nativeApplyingRef = useRef(false);
@@ -810,15 +868,18 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
   };
 
   const handleApply = () => {
-    const effectiveAppDraft: AppSettings =
-      platform.kind === "electron"
-        ? { ...appDraft, preferredEngine: "native-sphere-direct" }
-        : appDraft;
+    const isElectron = platform.kind === "electron";
+
+    // In Electron, engine is always DAUx (native-sphere-direct).
+    const effectiveAppDraft: AppSettings = isElectron
+      ? { ...appDraft, preferredEngine: "native-sphere-direct" }
+      : appDraft;
 
     store.applySettings(effectiveAppDraft);
     if (effectiveAppDraft.preferredEngine !== appDraft.preferredEngine) {
       setAppDraft(effectiveAppDraft);
     }
+
     useProjectStore.setState((s) => ({
       project: {
         ...s.project,
@@ -832,37 +893,40 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
       },
     }));
 
-    // ── Apply settings to the native Rust engine ──────────────────────────
-    // When the native engine is selected (or "auto" in Electron), reopen the
-    // device with the current output device + buffer size from the draft.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const sphere = (window as any).dawElectron?.sphereAudio;
-    const wantsNative =
-      effectiveAppDraft.preferredEngine === "native-sphere-direct" ||
-      effectiveAppDraft.preferredEngine === "auto";
-
-    if (sphere && wantsNative && !nativeApplyingRef.current) {
+    // ── Electron: restart DAUx with new settings ───────────────────────────
+    const sphere = window.dawElectron?.sphereAudio;
+    if (isElectron && sphere && !nativeApplyingRef.current) {
       nativeApplyingRef.current = true;
 
-      const inputDeviceId  = audioSettings.audioInputDeviceId  ?? undefined;
       const outputDeviceId = audioSettings.audioOutputDeviceId ?? undefined;
-      const bufferSize     = effectiveAppDraft.preferredBufferSize;
+      const backend   = effectiveAppDraft.dauxBackend ?? platformDefaultBackend();
+      const backendId = dauxBackendId(backend);
+      const sr = effectiveAppDraft.audioSampleRate;
+      const sampleRate = (sr === "device-default" || sr == null) ? undefined : (sr as number);
 
-      // openDevice → start → refresh status display
       Promise.resolve()
-        .then(() => sphere.openDevice({
-          inputDeviceId: inputDeviceId || undefined,
-          outputDeviceId: outputDeviceId || undefined,
-          bufferSize,
-        }))
+        .then(() =>
+          sphere.openDaux({
+            backendId,
+            outputDeviceId: outputDeviceId || undefined,
+            bufferSize: effectiveAppDraft.preferredBufferSize,
+            sampleRate,
+            mmcssPriority: true,
+          }),
+        )
         .then(() => sphere.start())
-        .then(() => activeAudioEngine.reconfigure(effectiveAppDraft.preferredEngine))
-        .then(() => refreshNativeStatus())
+        .then(() => activeAudioEngine.reconfigure("native-sphere-direct"))
+        .then(() => refreshDauxStatus())
         .catch((e: unknown) => {
-          console.warn("[Settings] Native engine reopen failed:", e);
-          refreshNativeStatus(); // still refresh so error shows
+          console.warn("[Settings] DAUx restart failed:", e);
+          refreshDauxStatus(); // update status even on error
         })
-        .finally(() => { nativeApplyingRef.current = false; });
+        .finally(() => {
+          nativeApplyingRef.current = false;
+        });
+    } else if (!isElectron) {
+      // Web: reconfigure WASM engine
+      void activeAudioEngine.reconfigure(effectiveAppDraft.preferredEngine);
     }
   };
 
@@ -922,8 +986,8 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
             <AudioTab
               draft={appDraft}
               setDraft={patchApp}
-              nativeStatus={nativeStatus}
-              onRefreshNativeStatus={refreshNativeStatus}
+              dauxStatus={dauxStatus}
+              onRefreshDauxStatus={refreshDauxStatus}
             />
           )}
           {activeTab === "midi" && <MidiTab />}

@@ -19,6 +19,7 @@
 #![allow(clippy::needless_pass_by_value)] // napi-rs requires owned String args
 
 mod audio_file;
+pub mod backend;
 mod command;
 pub mod device;
 mod dsp;
@@ -34,8 +35,8 @@ use napi_derive::napi;
 
 use engine::EngineInner;
 use types::{
-    EngineProjectSnapshot, JsAudioDeviceInfo, JsDeviceOpenConfig, JsEngineDebugInfo,
-    JsMeterSnapshot, JsSphereAudioStatus,
+    EngineProjectSnapshot, JsAudioDeviceInfo, JsDauxBackendInfo, JsDauxConfig, JsDauxStatus,
+    JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsSphereAudioStatus,
 };
 
 // ── N-API class ───────────────────────────────────────────────────────────────
@@ -255,6 +256,40 @@ impl SphereDirectAudioEngine {
     pub fn update_clip(&self, clip_id: String, _patch_json: String) -> napi::Result<()> {
         eprintln!("[SphereAudio] updateClip '{clip_id}' — not yet implemented in MVP");
         Ok(())
+    }
+
+    // ── DAUx backend API ─────────────────────────────────────────────────────
+
+    /// Return all DAUx backends available on the current platform.
+    ///
+    /// Use the returned `id` values with `openDaux()` to select a backend.
+    #[napi]
+    pub fn list_daux_backends(&self) -> Vec<JsDauxBackendInfo> {
+        self.inner.list_daux_backends()
+    }
+
+    /// Open (or re-open) a DAUx stream with a specific backend, device, and
+    /// buffer configuration.
+    ///
+    /// This is the preferred way to open the audio device in Electron.
+    /// After a successful call, use `start()` to begin audio output.
+    ///
+    /// Example (TypeScript):
+    /// ```ts
+    /// engine.openDaux({ backendId: "wasapi-exclusive", bufferSize: 128, mmcssPriority: true });
+    /// engine.start();
+    /// ```
+    #[napi]
+    pub fn open_daux(&self, config: JsDauxConfig) -> napi::Result<()> {
+        self.inner.open_daux(config).map_err(Into::into)
+    }
+
+    /// Return the current DAUx runtime status: backend, device, latency, glitches.
+    ///
+    /// Poll this at ~1Hz to update the Settings / status bar UI.
+    #[napi]
+    pub fn get_daux_status(&self) -> JsDauxStatus {
+        self.inner.get_daux_status()
     }
 
     // ── Debug info ───────────────────────────────────────────────────────────

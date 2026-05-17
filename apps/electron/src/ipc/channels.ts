@@ -61,6 +61,11 @@ export const IpcChannels = {
   SphereAudioUpdateClip:       "daw:sphere:updateClip",
   SphereAudioGetMeters:        "daw:sphere:getMeters",
   SphereAudioGetDebugInfo:     "daw:sphere:getDebugInfo",
+
+  // DAUx low-latency backend selection
+  SphereAudioListDauxBackends: "daw:sphere:listDauxBackends",
+  SphereAudioOpenDaux:         "daw:sphere:openDaux",
+  SphereAudioGetDauxStatus:    "daw:sphere:getDauxStatus",
 } as const;
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels];
@@ -213,4 +218,48 @@ export type SphereMeterSnapshot = {
   tracks:    Record<string, { left: number; right: number }>;
   master:    { left: number; right: number };
   timestamp: number;
+};
+
+// ── DAUx backend types ────────────────────────────────────────────────────────
+
+export type SphereDauxBackendInfo = {
+  /** Machine-readable id: "auto" | "wasapi-shared" | "wasapi-exclusive" | "coreaudio" | "alsa" | "mme" */
+  id:          string;
+  /** Human-readable name */
+  name:        string;
+  /** Whether this backend is available on the current platform */
+  available:   boolean;
+  /** Whether this is the recommended default for the platform */
+  isDefault:   boolean;
+  /** Short description */
+  description: string;
+};
+
+export type SphereDauxConfig = {
+  /** Backend id from SphereDauxBackendInfo.id */
+  backendId:      string;
+  /** Output device name/id — omit or empty for system default */
+  outputDeviceId?: string;
+  /** Target sample rate in Hz — omit for device default */
+  sampleRate?:    number;
+  /** Target buffer size in frames — omit for driver default */
+  bufferSize?:    number;
+  /** Enable MMCSS "Pro Audio" thread priority (Windows only) */
+  mmcssPriority?: boolean;
+  /** Use larger buffer to reduce glitches on unstable systems */
+  safeMode?:      boolean;
+};
+
+export type SphereDauxStatus = {
+  backendId:           string;
+  backendName:         string;
+  outputDevice:        string | null;
+  sampleRate:          number;
+  bufferSize:          number;
+  /** Estimated output latency in milliseconds */
+  estimatedLatencyMs:  number;
+  /** Number of underruns / glitches since stream open */
+  glitchCount:         number;
+  /** MMCSS priority active on audio thread (Windows only) */
+  mmcssActive:         boolean;
 };

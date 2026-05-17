@@ -18,6 +18,7 @@ import {
   type GpuFeatureStatus,
   type SphereDeviceOpenConfig,
   type SphereTransportState,
+  type SphereDauxConfig,
 } from "./ipc/channels.js";
 
 const invoke = ipcRenderer.invoke.bind(ipcRenderer);
@@ -120,6 +121,10 @@ const sphereAudioBridge = Object.freeze({
   updateClip:         (clipId: string, patch: unknown)              => invoke(IpcChannels.SphereAudioUpdateClip, clipId, patch),
   getMeters:          ()                                            => invoke(IpcChannels.SphereAudioGetMeters),
   getDebugInfo:       ()                                            => invoke(IpcChannels.SphereAudioGetDebugInfo),
+  // DAUx backend selection
+  listDauxBackends:   ()                                            => invoke(IpcChannels.SphereAudioListDauxBackends),
+  openDaux:           (config: SphereDauxConfig)                    => invoke(IpcChannels.SphereAudioOpenDaux, config),
+  getDauxStatus:      ()                                            => invoke(IpcChannels.SphereAudioGetDauxStatus),
 });
 
 const dawElectron = Object.freeze({

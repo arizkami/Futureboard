@@ -8,7 +8,7 @@ description = "SphereDirectAudioEngine — native Rust audio backend for Futureb
 # "cdylib"  → .node addon loaded by Node.js / Electron
 # "rlib"    → static Rust library so [[bin]] targets in this crate can link it
 [lib]
-name       = "sphere_direct_audio_engine"
+name       = "DAUx"
 crate-type = ["cdylib", "rlib"]
 
 # ── CLI test harness (cargo run --bin sphere-audio-test) ─────────────────────
@@ -22,7 +22,7 @@ path = "src/bin/sphere_audio_test.rs"
 napi        = { version = "2", features = ["napi4"] }
 napi-derive = "2"
 
-# Cross-platform audio I/O
+# Cross-platform audio I/O (WASAPI shared on Win, CoreAudio on Mac, ALSA on Linux)
 cpal = "0.15"
 
 # Lock-free channel for control→audio thread commands
@@ -30,6 +30,20 @@ crossbeam-channel = "0.5"
 
 # Parking-lot mutexes (panic-safe, no poisoning)
 parking_lot = "0.12"
+
+# ── Windows-only: raw WASAPI exclusive mode + MMCSS ──────────────────────────
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Media_Audio",
+    "Win32_Media",
+    "Win32_System_Com",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_Devices_Properties",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
+]}
 
 # JSON for project snapshot serialization
 serde      = { version = "1", features = ["derive"] }

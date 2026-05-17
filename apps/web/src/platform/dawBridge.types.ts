@@ -187,6 +187,46 @@ export type DawBridgeSphereDebugInfo = {
   clipSummaries:   string[];
 };
 
+// ── DAUx backend selection types ──────────────────────────────────────────────
+
+export type DawBridgeDauxBackendInfo = {
+  /** Machine-readable id: "auto" | "wasapi-shared" | "wasapi-exclusive" | "coreaudio" | "alsa" | "mme" */
+  id:          string;
+  name:        string;
+  available:   boolean;
+  isDefault:   boolean;
+  description: string;
+};
+
+export type DawBridgeDauxConfig = {
+  /** Backend id from DawBridgeDauxBackendInfo.id */
+  backendId:       string;
+  /** Output device name/id — omit for system default */
+  outputDeviceId?: string;
+  /** Sample rate in Hz — omit for device default */
+  sampleRate?:     number;
+  /** Buffer size in frames — omit for driver default */
+  bufferSize?:     number;
+  /** Enable MMCSS "Pro Audio" thread priority (Windows only) */
+  mmcssPriority?:  boolean;
+  /** Use larger buffer for glitch-prone systems */
+  safeMode?:       boolean;
+};
+
+export type DawBridgeDauxStatus = {
+  backendId:           string;
+  backendName:         string;
+  outputDevice:        string | null;
+  sampleRate:          number;
+  bufferSize:          number;
+  /** Estimated output latency in milliseconds */
+  estimatedLatencyMs:  number;
+  /** Number of underruns/glitches since stream open */
+  glitchCount:         number;
+  /** MMCSS priority active on audio thread (Windows only) */
+  mmcssActive:         boolean;
+};
+
 /**
  * SphereDirectAudioEngine preload bridge.
  * Present only in the Electron client.  Renderer code must check for its
@@ -210,6 +250,10 @@ export interface DawBridgeSphereAudio {
   updateClip(clipId: string, patch: unknown):                                Promise<void>;
   getMeters():                                                               Promise<DawBridgeSphereMeterSnapshot>;
   getDebugInfo():                                                            Promise<DawBridgeSphereDebugInfo>;
+  // DAUx backend selection
+  listDauxBackends():                                                        Promise<DawBridgeDauxBackendInfo[]>;
+  openDaux(config: DawBridgeDauxConfig):                                     Promise<void>;
+  getDauxStatus():                                                           Promise<DawBridgeDauxStatus>;
 }
 
 export interface DawElectronBridge {

@@ -252,8 +252,14 @@ export class AddTrackSendCommand implements DawCommand {
     this.send = send;
     this.label = `Add Send to "${send.name}"`;
   }
-  execute() { store().addTrackSend(this.trackId, this.send); }
-  undo()    { store().removeTrackSend(this.trackId, this.send.id); }
+  execute() {
+    store().addTrackSend(this.trackId, this.send);
+    activeAudioEngine.syncProject(store().project);
+  }
+  undo() {
+    store().removeTrackSend(this.trackId, this.send.id);
+    activeAudioEngine.syncProject(store().project);
+  }
 }
 
 export class RemoveTrackSendCommand implements DawCommand {
@@ -266,8 +272,14 @@ export class RemoveTrackSendCommand implements DawCommand {
     this.send = send;
     this.label = `Remove Send to "${send.name}"`;
   }
-  execute() { store().removeTrackSend(this.trackId, this.send.id); }
-  undo()    { store().addTrackSend(this.trackId, this.send); }
+  execute() {
+    store().removeTrackSend(this.trackId, this.send.id);
+    activeAudioEngine.syncProject(store().project);
+  }
+  undo() {
+    store().addTrackSend(this.trackId, this.send);
+    activeAudioEngine.syncProject(store().project);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

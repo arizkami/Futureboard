@@ -21,29 +21,40 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
 
 use crate::audio_file::AudioFileBuffer;
+use crate::backend::{
+    cpal_backend::{self, CpalStreamHandle},
+    list_available_backends, BackendKind, DauxDeviceConfig,
+};
+#[cfg(target_os = "windows")]
+use crate::backend::wasapi_exclusive::{self, WasapiExclusiveHandle};
 use crate::command::EngineCommand;
 use crate::device;
 use crate::dsp::{meter::smooth_peak, oscillator::SineOscillator};
 use crate::error::SphereAudioError;
 use crate::graph::{MasterState, TrackState};
-use crate::runtime::RuntimeProject;
+use crate::runtime::{RuntimeInsert, RuntimeProject, RuntimeTrack};
 use crate::types::{
-    EngineProjectSnapshot, EngineStatus, JsAudioDeviceInfo, JsDeviceOpenConfig, JsEngineDebugInfo,
-    JsMeterSnapshot, JsSphereAudioStatus,
+    EngineProjectSnapshot, EngineStatus, JsAudioDeviceInfo, JsDauxBackendInfo, JsDauxConfig,
+    JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsSphereAudioStatus,
 };
 
 // ── Version ───────────────────────────────────────────────────────────────────
 
 pub const ENGINE_VERSION: &str = "0.1.0";
 
-// ── Atomic helpers ─────────────────────────────────────────────────────────────
+// ── Realtime constants shared with render.rs ──────────────────────────────────
+
+pub const TEST_TONE_AMPLITUDE: f32 = 0.125; // −18 dBFS  (safe default test level)
+pub const PEAK_DECAY: f32 = 0.94; // per audio block, responsive UI peak decay
+
+// ── Atomic helpers (pub for render.rs) ────────────────────────────────────────
 
 #[inline]
-fn f32_store(v: f32) -> u32 {
+pub fn f32_store(v: f32) -> u32 {
     v.to_bits()
 }
 #[inline]
-fn f32_load(v: u32) -> f32 {
+pub fn f32_load(v: u32) -> f32 {
     f32::from_bits(v)
 }
 
@@ -63,6 +74,10 @@ pub struct SharedState {
     pub playing: AtomicBool,
     pub position_samples: AtomicU64, // samples elapsed from start
     pub sample_rate: AtomicU32,
+
+    // DAUx diagnostics (incremented by audio thread, read by control thread)
+    pub glitch_count: AtomicU64,
+    pub mmcss_active: AtomicBool,
 }
 
 impl Default for SharedState {
@@ -78,20 +93,87 @@ impl Default for SharedState {
             playing: AtomicBool::new(false),
             position_samples: AtomicU64::new(0),
             sample_rate: AtomicU32::new(44100),
+            glitch_count: AtomicU64::new(0),
+            mmcss_active: AtomicBool::new(false),
         }
     }
 }
 
 // ── Engine inner ───────────────────────────────────────────────────────────────
 
+/// Active stream variant — either a cpal-backed stream or a WASAPI exclusive thread.
+enum ActiveStream {
+    Cpal(CpalStreamHandle),
+    #[cfg(target_os = "windows")]
+    WasapiExclusive(WasapiExclusiveHandle),
+}
+
+impl ActiveStream {
+    fn cmd_tx(&self) -> Option<&crossbeam_channel::Sender<EngineCommand>> {
+        match self {
+            ActiveStream::Cpal(h) => Some(&h.cmd_tx),
+            #[cfg(target_os = "windows")]
+            ActiveStream::WasapiExclusive(h) => Some(&h.cmd_tx),
+        }
+    }
+    fn play(&self) -> Result<(), String> {
+        match self {
+            ActiveStream::Cpal(h) => h.play(),
+            #[cfg(target_os = "windows")]
+            ActiveStream::WasapiExclusive(_) => Ok(()), // already playing from stream start
+        }
+    }
+    fn pause(&self) -> Result<(), String> {
+        match self {
+            ActiveStream::Cpal(h) => h.pause(),
+            #[cfg(target_os = "windows")]
+            ActiveStream::WasapiExclusive(_) => Ok(()), // no pause in exclusive — caller mutes output
+        }
+    }
+    fn sample_rate(&self) -> u32 {
+        match self {
+            ActiveStream::Cpal(h) => h.sample_rate,
+            #[cfg(target_os = "windows")]
+            ActiveStream::WasapiExclusive(h) => h.sample_rate,
+        }
+    }
+    fn buffer_size(&self) -> u32 {
+        match self {
+            ActiveStream::Cpal(h) => h.buffer_size,
+            #[cfg(target_os = "windows")]
+            ActiveStream::WasapiExclusive(h) => h.buffer_size,
+        }
+    }
+    fn device_name(&self) -> &str {
+        match self {
+            ActiveStream::Cpal(h) => &h.device_name,
+            #[cfg(target_os = "windows")]
+            ActiveStream::WasapiExclusive(h) => &h.device_name,
+        }
+    }
+    fn backend_name(&self) -> &str {
+        match self {
+            ActiveStream::Cpal(h) => &h.backend_name,
+            #[cfg(target_os = "windows")]
+            ActiveStream::WasapiExclusive(_) => "DAUx WASAPI Exclusive",
+        }
+    }
+}
+
+// Safety: same rationale as before — all access is on the JS/main thread under Mutex.
+unsafe impl Send for ActiveStream {}
+unsafe impl Sync for ActiveStream {}
+
 pub struct EngineInner {
     // Shared atomic state
     pub shared: Arc<SharedState>,
 
-    // Stream lifecycle (Mutex so we can close/reopen without rebuilding everything)
-    stream: Mutex<Option<cpal::Stream>>,
+    // Active stream (cpal or WASAPI exclusive).
+    // Dropping this stops the stream.
+    active_stream: Mutex<Option<ActiveStream>>,
 
-    // Command channel — Sender lives here; Receiver is moved into the callback.
+    // Legacy cpal stream path kept for compatibility with open_device().
+    stream: Mutex<Option<cpal::Stream>>,
     cmd_tx: Mutex<Option<Sender<EngineCommand>>>,
 
     // Non-realtime mutable status (device names, error strings, etc.)
@@ -107,6 +189,10 @@ pub struct EngineInner {
     // Prepared render graph shared with new streams and pushed to callbacks.
     runtime: Mutex<RuntimeProject>,
     audio_cache: Mutex<HashMap<String, Arc<AudioFileBuffer>>>,
+
+    // DAUx config & glitch counter (shared with audio thread for diagnostics).
+    glitch_counter: Arc<AtomicU64>,
+    daux_config: Mutex<DauxDeviceConfig>,
 }
 
 #[derive(Clone)]
@@ -145,6 +231,7 @@ impl EngineInner {
     pub fn new() -> Self {
         Self {
             shared: Arc::new(SharedState::default()),
+            active_stream: Mutex::new(None),
             stream: Mutex::new(None),
             cmd_tx: Mutex::new(None),
             status: Mutex::new(EngineStatus::default()),
@@ -153,6 +240,8 @@ impl EngineInner {
             project: Mutex::new(None),
             runtime: Mutex::new(RuntimeProject::default()),
             audio_cache: Mutex::new(HashMap::new()),
+            glitch_counter: Arc::new(AtomicU64::new(0)),
+            daux_config: Mutex::new(DauxDeviceConfig::default()),
         }
     }
 
@@ -278,7 +367,9 @@ impl EngineInner {
     }
 
     fn close_device_inner(&self) {
-        // Drop stream first — this stops the callback.
+        // Drop active DAUx stream (stops WASAPI exclusive thread or cpal stream).
+        *self.active_stream.lock() = None;
+        // Drop legacy cpal stream path.
         *self.stream.lock() = None;
         *self.cmd_tx.lock() = None;
 
@@ -289,6 +380,14 @@ impl EngineInner {
 
     /// Start audio playback (calls `stream.play()`).
     pub fn start(&self) -> Result<(), SphereAudioError> {
+        // Try DAUx active stream first.
+        if let Some(stream) = self.active_stream.lock().as_ref() {
+            stream.play().map_err(SphereAudioError::StreamStartFailed)?;
+            self.shared.playing.store(false, Ordering::Relaxed); // transport starts paused
+            self.status.lock().running = true;
+            return Ok(());
+        }
+        // Legacy cpal path.
         let guard = self.stream.lock();
         let stream = guard.as_ref().ok_or(SphereAudioError::EngineNotOpen)?;
         stream
@@ -301,7 +400,9 @@ impl EngineInner {
 
     /// Stop audio playback (calls `stream.pause()`).
     pub fn stop(&self) {
-        if let Some(stream) = self.stream.lock().as_ref() {
+        if let Some(stream) = self.active_stream.lock().as_ref() {
+            let _ = stream.pause();
+        } else if let Some(stream) = self.stream.lock().as_ref() {
             let _ = stream.pause();
         }
         self.shared.playing.store(false, Ordering::Relaxed);
@@ -519,9 +620,155 @@ impl EngineInner {
         }
     }
 
+    // ── DAUx backend API ───────────────────────────────────────────────────
+
+    /// List all available DAUx backends on this platform.
+    pub fn list_daux_backends(&self) -> Vec<JsDauxBackendInfo> {
+        list_available_backends()
+            .into_iter()
+            .map(|b| JsDauxBackendInfo {
+                id: b.id,
+                name: b.name,
+                available: b.available,
+                is_default: b.is_default,
+                description: b.description,
+            })
+            .collect()
+    }
+
+    /// Open (or re-open) a stream using the full DAUx config.
+    /// This is the preferred method; `open_device()` is kept for backward compat.
+    pub fn open_daux(&self, config: JsDauxConfig) -> Result<(), SphereAudioError> {
+        self.close_device_inner();
+
+        let backend = BackendKind::from_id(&config.backend_id);
+        let daux_cfg = DauxDeviceConfig {
+            backend: backend.clone(),
+            output_device_id: config.output_device_id.filter(|s| !s.is_empty()),
+            input_device_id: None,
+            sample_rate: config.sample_rate.filter(|&v| v > 0),
+            buffer_size: config.buffer_size.filter(|&v| v > 0),
+            mmcss_priority: config.mmcss_priority,
+            safe_mode: config.safe_mode,
+        };
+
+        *self.daux_config.lock() = daux_cfg.clone();
+        // Reset glitch counter when opening a new stream.
+        self.glitch_counter.store(0, Ordering::Relaxed);
+
+        let initial_runtime = self.get_initial_runtime(None);
+
+        let stream = match backend {
+            #[cfg(target_os = "windows")]
+            BackendKind::WasapiExclusive => {
+                let handle = wasapi_exclusive::open(
+                    &daux_cfg,
+                    Arc::clone(&self.shared),
+                    initial_runtime,
+                    Arc::clone(&self.glitch_counter),
+                )?;
+                let sr = handle.sample_rate;
+                let bs = handle.buffer_size;
+                let dev_name = handle.device_name.clone();
+                let stream = ActiveStream::WasapiExclusive(handle);
+                self.commit_stream_open(sr, bs, dev_name, "DAUx WASAPI Exclusive".into());
+                stream
+            }
+            _ => {
+                // All other backends go through cpal.
+                let handle = cpal_backend::open(
+                    &daux_cfg,
+                    Arc::clone(&self.shared),
+                    initial_runtime,
+                    Arc::clone(&self.glitch_counter),
+                )?;
+                let sr = handle.sample_rate;
+                let bs = handle.buffer_size;
+                let dev_name = handle.device_name.clone();
+                let backend_name = handle.backend_name.clone();
+                let stream = ActiveStream::Cpal(handle);
+                self.commit_stream_open(sr, bs, dev_name, backend_name);
+                stream
+            }
+        };
+
+        *self.active_stream.lock() = Some(stream);
+        Ok(())
+    }
+
+    /// Return the current DAUx status (backend, device, latency, glitches).
+    pub fn get_daux_status(&self) -> JsDauxStatus {
+        let st = self.status.lock().clone();
+        let daux_cfg = self.daux_config.lock().clone();
+        let glitch_count = self.glitch_counter.load(Ordering::Relaxed) as f64;
+        let mmcss_active = self.shared.mmcss_active.load(Ordering::Relaxed);
+
+        let backend_id = daux_cfg.backend.id().to_string();
+        let backend_name = if let Some(stream) = self.active_stream.lock().as_ref() {
+            stream.backend_name().to_string()
+        } else {
+            daux_cfg.backend.display_name().to_string()
+        };
+
+        let estimated_latency_ms = if st.sample_rate > 0 {
+            st.buffer_size as f64 / st.sample_rate as f64 * 1000.0
+        } else {
+            0.0
+        };
+
+        JsDauxStatus {
+            backend_id,
+            backend_name,
+            output_device: st.output_device,
+            sample_rate: st.sample_rate,
+            buffer_size: st.buffer_size,
+            estimated_latency_ms,
+            glitch_count,
+            mmcss_active,
+        }
+    }
+
     // ── Internal helpers ───────────────────────────────────────────────────
 
+    fn get_initial_runtime(&self, sample_rate_override: Option<u32>) -> RuntimeProject {
+        let sr = sample_rate_override
+            .unwrap_or_else(|| self.shared.sample_rate.load(Ordering::Relaxed).max(44100));
+
+        self.project
+            .lock()
+            .as_ref()
+            .map(|snapshot| {
+                let mut audio_cache = self.audio_cache.lock();
+                RuntimeProject::build(snapshot, sr, &mut audio_cache)
+            })
+            .unwrap_or_else(|| {
+                let mut runtime = self.runtime.lock().clone();
+                runtime.sample_rate = sr;
+                runtime
+            })
+    }
+
+    fn commit_stream_open(&self, sr: u32, bs: u32, device_name: String, backend_name: String) {
+        self.shared.sample_rate.store(sr, Ordering::Relaxed);
+        let mut st = self.status.lock();
+        st.stream_open = true;
+        st.running = false;
+        st.sample_rate = sr;
+        st.buffer_size = bs;
+        st.output_device = Some(device_name);
+        st.last_error = None;
+        eprintln!("[DAUx] Stream committed: backend={backend_name} sr={sr} buf={bs}");
+    }
+
     fn send_command(&self, cmd: EngineCommand) -> Result<(), SphereAudioError> {
+        // Prefer active_stream (DAUx path); fall back to legacy cmd_tx.
+        if let Some(stream) = self.active_stream.lock().as_ref() {
+            if let Some(tx) = stream.cmd_tx() {
+                return tx
+                    .try_send(cmd)
+                    .map_err(|e| SphereAudioError::NativeError(e.to_string()));
+            }
+        }
         let guard = self.cmd_tx.lock();
         match guard.as_ref() {
             Some(tx) => tx
@@ -533,9 +780,6 @@ impl EngineInner {
 }
 
 // ── Audio callback builder ────────────────────────────────────────────────────
-
-const TEST_TONE_AMPLITUDE: f32 = 0.125; // −18 dBFS  (safe default test level)
-const PEAK_DECAY: f32 = 0.94; // per audio block, responsive UI peak decay
 
 fn output_stream_candidates(
     device: &cpal::Device,
@@ -581,51 +825,210 @@ fn reported_buffer_size(config: &cpal::StreamConfig) -> u32 {
 }
 
 #[inline]
-fn render_project_sample(
-    runtime: &RuntimeProject,
+pub fn render_project_sample(
+    runtime: &mut RuntimeProject,
     project_sample: u64,
     master_volume: f32,
 ) -> (f32, f32) {
     let mut out_l = 0.0f32;
     let mut out_r = 0.0f32;
 
-    for clip in &runtime.clips {
-        if project_sample < clip.start_sample {
+    for clip_index in 0..runtime.clips.len() {
+        let clip = &runtime.clips[clip_index];
+        let clip_start_sample = clip.start_sample;
+        let clip_duration_samples = clip.duration_samples;
+        if project_sample < clip_start_sample {
             continue;
         }
-        let rel = project_sample - clip.start_sample;
-        if rel >= clip.duration_samples {
+        let rel = project_sample - clip_start_sample;
+        if rel >= clip_duration_samples {
             continue;
         }
 
-        let Some(track) = runtime.tracks.iter().find(|t| t.id == clip.track_id) else {
+        let clip_track_id = clip.track_id.clone();
+        let clip_offset_seconds = clip.offset_seconds;
+        let clip_speed_ratio = clip.speed_ratio;
+        let clip_gain = clip.gain;
+        let source = Arc::clone(&clip.source);
+
+        let Some(track_index) = runtime.tracks.iter().position(|t| t.id == clip_track_id) else {
             continue;
         };
-        if track.muted || (runtime.has_solo && !track.solo) {
+        let has_solo = runtime.has_solo;
+        if runtime.tracks[track_index].muted || (has_solo && !runtime.tracks[track_index].solo) {
             continue;
         }
 
-        let source_pos_seconds = clip.offset_seconds
-            + (rel as f64 / runtime.sample_rate.max(1) as f64) * clip.speed_ratio as f64;
-        let source_pos = source_pos_seconds * clip.source.sample_rate as f64;
-        let (mut l, mut r) = sample_source_stereo(&clip.source, source_pos);
+        let source_pos_seconds = clip_offset_seconds
+            + (rel as f64 / runtime.sample_rate.max(1) as f64) * clip_speed_ratio as f64;
+        let source_pos = source_pos_seconds * source.sample_rate as f64;
+        let (mut l, mut r) = sample_source_stereo(&source, source_pos);
         if l == 0.0 && r == 0.0 {
             continue;
         }
 
-        let (pan_l, pan_r) = pan_gains(track.pan);
-        let gain = clip.gain * track.volume * master_volume;
-        l *= gain * pan_l;
-        r *= gain * pan_r;
-        out_l += l;
-        out_r += r;
+        l *= clip_gain;
+        r *= clip_gain;
+
+        let output_track_id = runtime.tracks[track_index].output_track_id.clone();
+        let sends = runtime.tracks[track_index].sends.clone();
+        let (track_l, track_r) = apply_track_chain(l, r, &mut runtime.tracks[track_index]);
+
+        if let Some(target_id) = output_track_id.as_deref().filter(|id| !is_master_output(id)) {
+            if let Some(target_index) = runtime.tracks.iter().position(|t| t.id == target_id) {
+                let (bus_l, bus_r) = apply_track_chain(track_l, track_r, &mut runtime.tracks[target_index]);
+                out_l += bus_l;
+                out_r += bus_r;
+            } else {
+                out_l += track_l;
+                out_r += track_r;
+            }
+        } else {
+            out_l += track_l;
+            out_r += track_r;
+        }
+
+        for send in sends {
+            if !send.enabled || send.level <= 0.0 {
+                continue;
+            }
+            let Some(return_track_index) = runtime
+                .tracks
+                .iter()
+                .position(|t| t.id == send.return_track_id)
+            else {
+                continue;
+            };
+            let return_track = &runtime.tracks[return_track_index];
+            if return_track.muted || (runtime.has_solo && !return_track.solo) {
+                continue;
+            }
+            let (send_l, send_r) = apply_track_chain(
+                track_l * send.level,
+                track_r * send.level,
+                &mut runtime.tracks[return_track_index],
+            );
+            out_l += send_l;
+            out_r += send_r;
+        }
     }
 
-    (out_l.clamp(-1.0, 1.0), out_r.clamp(-1.0, 1.0))
+    (
+        (out_l * master_volume).clamp(-1.0, 1.0),
+        (out_r * master_volume).clamp(-1.0, 1.0),
+    )
 }
 
 #[inline]
-fn pan_gains(pan: f32) -> (f32, f32) {
+pub fn is_master_output(output: &str) -> bool {
+    output.is_empty() || output == "master" || output == "none"
+}
+
+#[inline]
+pub fn apply_track_chain(mut l: f32, mut r: f32, track: &mut RuntimeTrack) -> (f32, f32) {
+    for insert in &mut track.inserts {
+        let processed = apply_insert(l, r, insert);
+        l = processed.0;
+        r = processed.1;
+    }
+    let (pan_l, pan_r) = pan_gains(track.pan);
+    (l * track.volume * pan_l, r * track.volume * pan_r)
+}
+
+#[inline]
+pub fn apply_insert(l: f32, r: f32, insert: &mut RuntimeInsert) -> (f32, f32) {
+    if !insert.enabled || !param_bool(insert, "power", true) {
+        return (l, r);
+    }
+
+    let mut wet_l = l;
+    let mut wet_r = r;
+
+    if is_eq_insert(insert) {
+        for filter in &mut insert.dsp.eq_l {
+            wet_l = filter.process(wet_l);
+        }
+        for filter in &mut insert.dsp.eq_r {
+            wet_r = filter.process(wet_r);
+        }
+    }
+
+    let drive = (param_f32(insert, "drive", 0.0)
+        + param_f32(insert, "saturation", 0.0) * 0.5
+        + param_f32(insert, "color", 0.0) * 0.12)
+        .clamp(0.0, 100.0)
+        / 100.0;
+    if drive > 0.0 {
+        let amount = 1.0 + drive * 8.0;
+        wet_l = (wet_l * amount).tanh() / amount.tanh().max(0.001);
+        wet_r = (wet_r * amount).tanh() / amount.tanh().max(0.001);
+    }
+
+    let reduction = param_f32(insert, "peakReduction", 0.0).clamp(0.0, 100.0) / 100.0;
+    if reduction > 0.0 {
+        let threshold = 0.9 - reduction * 0.82;
+        wet_l = soft_knee_compress(wet_l, threshold, if insert.kind.contains("limit") { 10.0 } else { 3.0 });
+        wet_r = soft_knee_compress(wet_r, threshold, if insert.kind.contains("limit") { 10.0 } else { 3.0 });
+    }
+
+    let mut db = 0.0;
+    db += param_f32(insert, "outputDb", 0.0);
+    db += param_f32(insert, "gainDb", 0.0);
+    db += param_f32(insert, "outputTrimDb", 0.0);
+    db += param_f32(insert, "out", 0.0);
+    wet_l *= db_to_linear(db);
+    wet_r *= db_to_linear(db);
+
+    let mix = param_f32(insert, "mix", 100.0).clamp(0.0, 100.0) / 100.0;
+    (
+        (l * (1.0 - mix) + wet_l * mix).clamp(-1.5, 1.5),
+        (r * (1.0 - mix) + wet_r * mix).clamp(-1.5, 1.5),
+    )
+}
+
+#[inline]
+pub fn is_eq_insert(insert: &RuntimeInsert) -> bool {
+    let kind = insert.kind.to_ascii_lowercase();
+    kind == "eq" || kind == "equz8" || kind.contains("eq")
+}
+
+#[inline]
+pub fn param_f32(insert: &RuntimeInsert, key: &str, fallback: f32) -> f32 {
+    insert
+        .params
+        .get(key)
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32)
+        .unwrap_or(fallback)
+}
+
+#[inline]
+pub fn param_bool(insert: &RuntimeInsert, key: &str, fallback: bool) -> bool {
+    insert
+        .params
+        .get(key)
+        .and_then(|v| v.as_bool().or_else(|| v.as_f64().map(|n| n >= 0.5)))
+        .unwrap_or(fallback)
+}
+
+#[inline]
+pub fn db_to_linear(db: f32) -> f32 {
+    10.0f32.powf(db / 20.0)
+}
+
+#[inline]
+pub fn soft_knee_compress(x: f32, threshold: f32, ratio: f32) -> f32 {
+    let sign = x.signum();
+    let a = x.abs();
+    if a <= threshold {
+        return x;
+    }
+    let over = a - threshold;
+    sign * (threshold + over / ratio.max(1.0))
+}
+
+#[inline]
+pub fn pan_gains(pan: f32) -> (f32, f32) {
     let pan = pan.clamp(-1.0, 1.0);
     if pan < 0.0 {
         (1.0, 1.0 + pan)
@@ -635,7 +1038,7 @@ fn pan_gains(pan: f32) -> (f32, f32) {
 }
 
 #[inline]
-fn sample_source_stereo(source: &crate::audio_file::AudioFileBuffer, pos: f64) -> (f32, f32) {
+pub fn sample_source_stereo(source: &crate::audio_file::AudioFileBuffer, pos: f64) -> (f32, f32) {
     if pos < 0.0 || source.frames == 0 {
         return (0.0, 0.0);
     }
@@ -654,7 +1057,7 @@ fn sample_source_stereo(source: &crate::audio_file::AudioFileBuffer, pos: f64) -
 }
 
 #[inline]
-fn read_frame_stereo(source: &crate::audio_file::AudioFileBuffer, frame: usize) -> (f32, f32) {
+pub fn read_frame_stereo(source: &crate::audio_file::AudioFileBuffer, frame: usize) -> (f32, f32) {
     let base = frame * source.channels;
     match source.channels {
         0 => (0.0, 0.0),
@@ -812,11 +1215,7 @@ where
                             runtime.update_track_solo(&track_id, solo);
                         }
                         EngineCommand::SetInsertParam { track_id, insert_id, param_id, value } => {
-                            eprintln!(
-                                "[SphereAudio callback] SetInsertParam track={track_id} insert={insert_id} {param_id}={value}"
-                            );
-                            // Insert DSP pass-through — params received but not yet applied.
-                            // Audio continues to flow through the insert chain unaffected.
+                            runtime.update_insert_param(&track_id, &insert_id, &param_id, value);
                         }
                     }
                 }
@@ -852,7 +1251,7 @@ where
                             (0.0, 0.0)
                         };
                         let (project_l, project_r) = if playing_local {
-                            render_project_sample(&runtime, base_sample + frames, master_vol)
+                            render_project_sample(&mut runtime, base_sample + frames, master_vol)
                         } else {
                             (0.0, 0.0)
                         };
@@ -878,7 +1277,7 @@ where
                             0.0
                         };
                         let (project_l, project_r) = if playing_local {
-                            render_project_sample(&runtime, base_sample + frames, master_vol)
+                            render_project_sample(&mut runtime, base_sample + frames, master_vol)
                         } else {
                             (0.0, 0.0)
                         };

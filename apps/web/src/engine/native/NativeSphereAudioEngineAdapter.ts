@@ -38,6 +38,7 @@ function getSphere(): any | null {
 // ── Meters polling ────────────────────────────────────────────────────────────
 const METER_POLL_MS = 16; // ~60 fps for responsive VU lights
 const TRANSPORT_POLL_MS = 33; // ~30 fps is enough for UI transport sync
+const INSERT_PARAM_FLUSH_MS = 16; // coalesce dense slider drags to one native batch per frame
 
 // ── Snapshot builders ─────────────────────────────────────────────────────────
 
@@ -86,7 +87,12 @@ function buildTrackSnapshot(track: DawTrack): EngineTrackSnapshot {
       enabled: ins.enabled ?? true,
       params:  ins.params  ?? {},
     })),
-    sends: [],
+    sends: (track.sends ?? []).map((send) => ({
+      id: send.id,
+      returnTrackId: send.targetTrackId,
+      level: send.level ?? 1,
+      enabled: send.enabled !== false,
+    })),
   };
 }
 
@@ -313,6 +319,13 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
   private _meterFallbackProject: DawProject | null = null;
   // Debounce timer for syncProject — rapid edits batch into one Rust rebuild.
   private _syncTimer:           ReturnType<typeof setTimeout> | null = null;
+  private _insertParamTimer:    ReturnType<typeof setTimeout> | null = null;
+  private _pendingInsertParams  = new Map<string, {
+    trackId: string;
+    deviceId: string;
+    param: string;
+    value: number | boolean;
+  }>();
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -599,11 +612,7 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
   }
 
   setInsertEnabled(trackId: TrackId, deviceId: string, enabled: boolean): void {
-    const sphere = getSphere();
-    if (!sphere) return;
-    sphere
-      .updateInsertParam(trackId, deviceId, "enabled", enabled)
-      .catch((e: unknown) => console.warn("[NativeSphere] setInsertEnabled error:", e));
+    this._queueInsertParam(trackId, deviceId, "enabled", enabled);
   }
 
   setInsertParam(
@@ -624,9 +633,7 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
       );
       return;
     }
-    sphere
-      .updateInsertParam(trackId, deviceId, param, value)
-      .catch((e: unknown) => console.warn("[NativeSphere] setInsertParam error:", e));
+    this._queueInsertParam(trackId, deviceId, param, value);
   }
 
   // ── Metering ───────────────────────────────────────────────────────────────
@@ -651,6 +658,36 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
       .catch((e: unknown) =>
         console.warn(`[NativeSphere] updateTrackParam(${trackId}, ${paramId}) error:`, e),
       );
+  }
+
+  private _queueInsertParam(
+    trackId: string,
+    deviceId: string,
+    param: string,
+    value: number | boolean,
+  ): void {
+    this._pendingInsertParams.set(`${trackId}:${deviceId}:${param}`, {
+      trackId,
+      deviceId,
+      param,
+      value,
+    });
+    if (this._insertParamTimer !== null) return;
+    this._insertParamTimer = setTimeout(() => {
+      this._insertParamTimer = null;
+      const sphere = getSphere();
+      if (!sphere) {
+        this._pendingInsertParams.clear();
+        return;
+      }
+      const updates = [...this._pendingInsertParams.values()];
+      this._pendingInsertParams.clear();
+      for (const update of updates) {
+        sphere
+          .updateInsertParam(update.trackId, update.deviceId, update.param, update.value)
+          .catch((e: unknown) => console.warn("[NativeSphere] setInsertParam error:", e));
+      }
+    }, INSERT_PARAM_FLUSH_MS);
   }
 
   // ── Internal: polling loops ────────────────────────────────────────────────

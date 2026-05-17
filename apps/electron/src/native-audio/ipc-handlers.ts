@@ -13,7 +13,11 @@ import fs from "fs";
 import path from "path";
 import { IpcChannels } from "../ipc/channels.js";
 import { sphereAudioNative } from "./SphereAudioNative.js";
-import type { SphereDeviceOpenConfig, SphereTransportState } from "../ipc/channels.js";
+import type {
+  SphereDeviceOpenConfig,
+  SphereTransportState,
+  SphereDauxConfig,
+} from "../ipc/channels.js";
 
 type NativeSnapshotLike = {
   projectId?: string;
@@ -395,6 +399,23 @@ export function registerSphereAudioHandlers(_appDir: string): void {
 
   ipcMain.handle(IpcChannels.SphereAudioGetDebugInfo, () => {
     return svc.getDebugInfo();
+  });
+
+  // ── DAUx backend selection ─────────────────────────────────────────────────
+
+  ipcMain.handle(IpcChannels.SphereAudioListDauxBackends, () => {
+    return svc.listDauxBackends();
+  });
+
+  ipcMain.handle(
+    IpcChannels.SphereAudioOpenDaux,
+    (_event, config: SphereDauxConfig) => {
+      svc.openDaux(config);
+    },
+  );
+
+  ipcMain.handle(IpcChannels.SphereAudioGetDauxStatus, () => {
+    return svc.getDauxStatus();
   });
 
   console.log(

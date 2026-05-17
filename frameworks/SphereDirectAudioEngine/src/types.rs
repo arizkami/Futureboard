@@ -1,6 +1,64 @@
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 
+// ── DAUx backend selection types ──────────────────────────────────────────────
+
+/// Information about one available DAUx backend.
+#[napi(object)]
+#[derive(Debug, Default, Clone)]
+pub struct JsDauxBackendInfo {
+    /// Machine-readable id: "auto" | "wasapi-shared" | "wasapi-exclusive" | "coreaudio" | "alsa" | "mme"
+    pub id: String,
+    /// Human-readable name: "DAUx WASAPI Shared", etc.
+    pub name: String,
+    /// Whether this backend is currently usable on this platform.
+    pub available: bool,
+    /// Whether this is the platform default.
+    pub is_default: bool,
+    /// Short description.
+    pub description: String,
+}
+
+/// Configuration for selecting / opening a DAUx backend.
+#[napi(object)]
+#[derive(Debug, Default, Clone)]
+pub struct JsDauxConfig {
+    /// Backend id string (see `JsDauxBackendInfo.id`).
+    pub backend_id: String,
+    /// Target output device name / id.  Empty = system default.
+    pub output_device_id: Option<String>,
+    /// Target sample rate in Hz (0 = device default).
+    pub sample_rate: Option<u32>,
+    /// Target buffer size in frames (0 = driver default).
+    pub buffer_size: Option<u32>,
+    /// Enable MMCSS "Pro Audio" thread priority on Windows.
+    pub mmcss_priority: bool,
+    /// Safe mode: use larger buffer to reduce glitches.
+    pub safe_mode: bool,
+}
+
+/// Runtime status of the active DAUx backend.
+#[napi(object)]
+#[derive(Debug, Default, Clone)]
+pub struct JsDauxStatus {
+    /// Active backend id.
+    pub backend_id: String,
+    /// Active backend human-readable name.
+    pub backend_name: String,
+    /// Active output device name.
+    pub output_device: Option<String>,
+    /// Active sample rate (Hz).
+    pub sample_rate: u32,
+    /// Active buffer size (frames).
+    pub buffer_size: u32,
+    /// Estimated output latency (ms) = buffer_frames / sample_rate * 1000.
+    pub estimated_latency_ms: f64,
+    /// Number of audio glitches / underruns since the stream was opened.
+    pub glitch_count: f64,
+    /// MMCSS priority active on audio thread (Windows only).
+    pub mmcss_active: bool,
+}
+
 // ── N-API–visible types ────────────────────────────────────────────────────────
 // These cross the Rust/JS boundary via napi-derive.  Field names use camelCase
 // so they arrive at JS looking natural.
@@ -83,6 +141,8 @@ pub struct EngineTrackSnapshot {
     pub armed: bool,
     pub output_track_id: Option<String>,
     pub inserts: Vec<EngineInsertSnapshot>,
+    #[serde(default)]
+    pub sends: Vec<EngineSendSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +153,15 @@ pub struct EngineInsertSnapshot {
     pub kind: String,
     pub enabled: bool,
     pub params: std::collections::HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineSendSnapshot {
+    pub id: String,
+    pub return_track_id: String,
+    pub level: f32,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

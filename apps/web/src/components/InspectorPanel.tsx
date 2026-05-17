@@ -48,6 +48,22 @@ const TYPE_LABELS: Record<TrackType, string> = {
   master:     "Master",
 };
 
+function sendGainToDb(value: number): number {
+  if (value <= 0.001) return -60;
+  return Math.max(-60, Math.min(6, 20 * Math.log10(value)));
+}
+
+function dbToSendGain(db: number): number {
+  if (db <= -60) return 0;
+  return Math.pow(10, db / 20);
+}
+
+function formatSendDb(value: number): string {
+  if (value <= 0.001) return "-inf";
+  const db = 20 * Math.log10(value);
+  return db >= 0 ? `+${db.toFixed(1)}` : db.toFixed(1);
+}
+
 export function InspectorPanel({ width }: { width?: number } = {}) {
   const { selectedTrackId, selectedClipIds, selectedMixerTrackId, togglePanel, masterVolume, setMasterVolume } = useUIStore();
   const toggleInspector = () => togglePanel("inspector");
@@ -343,6 +359,7 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
             {(() => {
               const sendTargets = getSendTargets(project, track.id);
               const sends = track.sends ?? [];
+              const updateTrackSend = useProjectStore.getState().updateTrackSend;
               if (sendTargets.length === 0 && sends.length === 0) return null;
               return (
                 <>
@@ -350,13 +367,33 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
                   <div className="flex flex-col gap-0.5 px-3 pb-3">
                     {sends.map((send) => {
                       const target = project.tracks.find((t) => t.id === send.targetTrackId);
+                      const enabled = send.enabled !== false;
+                      const displayName = target?.name ?? send.name;
                       return (
                         <div key={send.id} className="flex items-center gap-2 rounded border border-daw-border bg-daw-bg px-2 py-1">
+                          <button
+                            type="button"
+                            title={enabled ? "Disable send" : "Enable send"}
+                            onClick={() => updateTrackSend(track.id, send.id, { enabled: !enabled })}
+                            className="h-2 w-2 shrink-0 rounded-full border border-white/[0.16]"
+                            style={{ background: enabled ? "rgba(114,215,215,0.85)" : "transparent" }}
+                          />
                           <span className="min-w-0 flex-1 truncate text-[10px] text-daw-dim">
-                            {target?.name ?? send.name}
+                            {displayName}
                           </span>
-                          <span className="shrink-0 text-[9px] tabular-nums text-daw-faint">
-                            {send.level >= 0.999 ? "0.0" : (20 * Math.log10(Math.max(0.001, send.level))).toFixed(1)} dB
+                          <input
+                            aria-label={`Send level to ${displayName}`}
+                            title={`Send level: ${formatSendDb(send.level)} dB`}
+                            type="range"
+                            min={-60}
+                            max={6}
+                            step={0.5}
+                            value={sendGainToDb(send.level)}
+                            onChange={(e) => updateTrackSend(track.id, send.id, { level: dbToSendGain(Number(e.currentTarget.value)), enabled: true })}
+                            className="h-4 w-20 shrink-0 accent-[#72d7d7]"
+                          />
+                          <span className="w-10 shrink-0 text-right text-[9px] tabular-nums text-daw-faint">
+                            {formatSendDb(send.level)} dB
                           </span>
                         </div>
                       );

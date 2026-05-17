@@ -9,6 +9,10 @@ import { mixer } from "../engine/Mixer";
 
 type Param = { name: string; value: number; min: number; max: number; unit: string };
 
+let lastRackInsertAdd:
+  | { trackId: string; pluginId: string; at: number }
+  | null = null;
+
 const GENERIC_TEMPLATES: Record<string, Param[]> = {
   Compressor: [
     { name: "Thresh", value: -24, min: -60, max: 0,   unit: "dB" },
@@ -60,6 +64,17 @@ export function EffectEditorRack() {
 
   const addInsert = (plugin: typeof BUILT_IN_PLUGINS[number]) => {
     if (!selectedTrackId) return;
+    const now = performance.now();
+    if (
+      lastRackInsertAdd &&
+      lastRackInsertAdd.trackId === selectedTrackId &&
+      lastRackInsertAdd.pluginId === plugin.id &&
+      now - lastRackInsertAdd.at < 450
+    ) {
+      setShowAddMenu(false);
+      return;
+    }
+    lastRackInsertAdd = { trackId: selectedTrackId, pluginId: plugin.id, at: now };
     const device: InsertDevice = {
       id: crypto.randomUUID(),
       type: plugin.type,

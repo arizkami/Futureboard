@@ -25,7 +25,13 @@ import { fileURLToPath } from "url";
 import path from "path";
 import fs from "fs";
 import { app } from "electron";
-import type { SphereDeviceOpenConfig, SphereMeterSnapshot } from "../ipc/channels.js";
+import type {
+  SphereDeviceOpenConfig,
+  SphereMeterSnapshot,
+  SphereDauxBackendInfo,
+  SphereDauxConfig,
+  SphereDauxStatus,
+} from "../ipc/channels.js";
 
 // ESM-safe __dirname (not available natively in "type":"module" packages)
 const _dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -83,6 +89,34 @@ interface NativeDebugInfo {
   clipSummaries:  string[];
 }
 
+interface NativeDauxBackendInfo {
+  id:          string;
+  name:        string;
+  available:   boolean;
+  isDefault:   boolean;
+  description: string;
+}
+
+interface NativeDauxConfig {
+  backendId:       string;
+  outputDeviceId?: string;
+  sampleRate?:     number;
+  bufferSize?:     number;
+  mmcssPriority:   boolean;
+  safeMode:        boolean;
+}
+
+interface NativeDauxStatus {
+  backendId:          string;
+  backendName:        string;
+  outputDevice:       string | null;
+  sampleRate:         number;
+  bufferSize:         number;
+  estimatedLatencyMs: number;
+  glitchCount:        number;
+  mmcssActive:        boolean;
+}
+
 /** Shape of the `SphereDirectAudioEngine` napi class instance. */
 interface NativeEngine {
   getVersion(): string;
@@ -104,6 +138,10 @@ interface NativeEngine {
   updateClip(clipId: string, patchJson: string): void;
   getMeters(): NativeMeterSnapshot;
   getDebugInfo(): NativeDebugInfo;
+  // DAUx backend selection
+  listDauxBackends(): NativeDauxBackendInfo[];
+  openDaux(config: NativeDauxConfig): void;
+  getDauxStatus(): NativeDauxStatus;
 }
 
 /** Addon module as loaded by require(). */
@@ -179,13 +217,13 @@ function toNativeDeviceOpenConfig(
 
 function candidatePaths(): string[] {
   const addonName = process.platform === "win32"
-    ? "sphere_direct_audio_engine.dll"
+    ? "DAUx.dll"
     : process.platform === "darwin"
-    ? "libsphere_direct_audio_engine.dylib"
-    : "libsphere_direct_audio_engine.so";
+    ? "libDAUx.dylib"
+    : "libDAUx.so";
 
   // napi-rs / Node.js native addon extension
-  const nodeAddonName = "sphere_direct_audio_engine.node";
+  const nodeAddonName = "DAUx.node";
 
   const candidates: string[] = [];
 
@@ -416,6 +454,35 @@ export class SphereAudioNative {
       };
     }
     return this._engine.getDebugInfo();
+  }
+
+  // ── DAUx backend selection ────────────────────────────────────────────────
+
+  listDauxBackends(): SphereDauxBackendInfo[] {
+    return this._engine?.listDauxBackends() ?? [];
+  }
+
+  openDaux(config: SphereDauxConfig): void {
+    if (!this._engine) throw new Error("[SphereAudio] Engine not available");
+    this._engine.openDaux({
+      backendId:       config.backendId,
+      outputDeviceId:  config.outputDeviceId,
+      sampleRate:      config.sampleRate,
+      bufferSize:      config.bufferSize,
+      mmcssPriority:   config.mmcssPriority ?? true,
+      safeMode:        config.safeMode ?? false,
+    });
+  }
+
+  getDauxStatus(): SphereDauxStatus {
+    if (!this._engine) {
+      return {
+        backendId: "none", backendName: "Unavailable", outputDevice: null,
+        sampleRate: 0, bufferSize: 0, estimatedLatencyMs: 0,
+        glitchCount: 0, mmcssActive: false,
+      };
+    }
+    return this._engine.getDauxStatus();
   }
 }
 

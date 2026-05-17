@@ -29,10 +29,24 @@ import { BUILT_IN_PLUGINS, type BuiltInPlugin } from "../plugins/registry";
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
+let lastInsertAdd:
+  | { trackId: string; pluginId: string; at: number }
+  | null = null;
+
 function sendToDb(v: number) {
   if (v <= 0.001) return "-inf";
   const db = 20 * Math.log10(v);
   return db >= 0 ? `+${db.toFixed(1)}` : db.toFixed(1);
+}
+
+function dbToSend(db: number) {
+  if (db <= -60) return 0;
+  return Math.pow(10, db / 20);
+}
+
+function sendToSliderDb(v: number) {
+  if (v <= 0.001) return -60;
+  return Math.max(-60, Math.min(6, 20 * Math.log10(v)));
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -90,6 +104,16 @@ function InsertsAddMenu({ accent, trackId }: { accent: string; trackId?: string 
   const { addInsertDevice } = useProjectStore();
   const add = (plugin: BuiltInPlugin) => {
     if (!trackId) return;
+    const now = performance.now();
+    if (
+      lastInsertAdd &&
+      lastInsertAdd.trackId === trackId &&
+      lastInsertAdd.pluginId === plugin.id &&
+      now - lastInsertAdd.at < 450
+    ) {
+      return;
+    }
+    lastInsertAdd = { trackId, pluginId: plugin.id, at: now };
     const device: InsertDevice = {
       id: crypto.randomUUID(),
       type: plugin.type,
@@ -221,11 +245,39 @@ function EmptySlotRow({ accent, hint }: { accent: string; hint: string }) {
 function SendRow({ send, trackId, project }: { send: TrackSend; trackId: string; project: DawProject }) {
   const targetTrack = project.tracks.find((t) => t.id === send.targetTrackId);
   const displayName = targetTrack?.name ?? send.name;
+  const updateTrackSend = useProjectStore((s) => s.updateTrackSend);
+  const enabled = send.enabled !== false;
+  const sliderDb = sendToSliderDb(send.level);
+
+  const updateLevel = (db: number) => {
+    updateTrackSend(trackId, send.id, { level: dbToSend(db), enabled: true });
+  };
 
   return (
-    <div className="group flex items-center gap-1.5 border-l-[2px] border-white/[0.1] px-2 py-[3px] transition-colors hover:bg-white/[0.04]">
-      <span className="flex-1 truncate text-[10px] text-white/60">{displayName}</span>
-      <span className="shrink-0 text-[9px] tabular-nums text-white/35">{sendToDb(send.level)}</span>
+    <div
+      className="group flex items-center gap-1.5 border-l-[2px] px-2 py-[3px] transition-colors hover:bg-white/[0.04]"
+      style={{ borderColor: enabled ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.07)" }}
+    >
+      <button
+        type="button"
+        title={enabled ? "Disable send" : "Enable send"}
+        onClick={() => updateTrackSend(trackId, send.id, { enabled: !enabled })}
+        className="h-2 w-2 shrink-0 rounded-full border border-white/[0.16]"
+        style={{ background: enabled ? "rgba(114,215,215,0.85)" : "transparent" }}
+      />
+      <span className="min-w-0 flex-1 truncate text-[10px] text-white/60">{displayName}</span>
+      <input
+        aria-label={`Send level to ${displayName}`}
+        title={`Send level: ${sendToDb(send.level)} dB`}
+        type="range"
+        min={-60}
+        max={6}
+        step={0.5}
+        value={sliderDb}
+        onChange={(e) => updateLevel(Number(e.currentTarget.value))}
+        className="h-4 w-12 shrink-0 accent-[#72d7d7]"
+      />
+      <span className="w-8 shrink-0 text-right text-[9px] tabular-nums text-white/35">{sendToDb(send.level)}</span>
       <button
         title="Remove send"
         className="opacity-0 group-hover:opacity-100 transition-opacity text-white/30 hover:text-white/70 ml-0.5"

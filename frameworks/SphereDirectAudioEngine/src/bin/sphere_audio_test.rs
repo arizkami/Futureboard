@@ -15,7 +15,7 @@
 use std::thread;
 use std::time::Duration;
 
-use sphere_direct_audio_engine::{device, engine::EngineInner, types::JsDeviceOpenConfig};
+use DAUx::{device, engine::EngineInner, types::JsDeviceOpenConfig};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
