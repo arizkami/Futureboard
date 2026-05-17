@@ -15,6 +15,9 @@ import {
   type FolderProjectCreateResult,
   type FolderImportAudioResult,
   type BrowseFolderResult,
+  type BrowserFileEntry,
+  type BrowserIndexStatus,
+  type BrowserRootEntry,
   type GpuFeatureStatus,
   type SphereDeviceOpenConfig,
   type SphereTransportState,
@@ -31,6 +34,16 @@ const fsBridge = Object.freeze({
     invoke(IpcChannels.FsReadAudioFile, filePath),
   statAudioFile: (filePath: string) =>
     invoke(IpcChannels.FsStatAudioFile, filePath),
+  browserRoots: (): Promise<BrowserRootEntry[]> =>
+    invoke(IpcChannels.FsBrowserRoots),
+  browserListDir: (dirPath: string): Promise<BrowserFileEntry[]> =>
+    invoke(IpcChannels.FsBrowserListDir, dirPath),
+  ensureFactoryLibrary: (): Promise<BrowserRootEntry[]> =>
+    invoke(IpcChannels.FsEnsureFactoryLibrary),
+  browserIndexStart: (rootPath: string): Promise<BrowserIndexStatus> =>
+    invoke(IpcChannels.FsBrowserIndexStart, rootPath),
+  browserIndexStatus: (rootPaths?: string[]): Promise<BrowserIndexStatus[]> =>
+    invoke(IpcChannels.FsBrowserIndexStatus, rootPaths),
   getPathForFile: (file: File): string =>
     webUtils.getPathForFile(file),
   revealInFileManager: (filePath: string): Promise<void> =>

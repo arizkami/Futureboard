@@ -76,6 +76,28 @@ const fileSystem: FileSystemAdapter = {
   async statAudioFile(_path: string): Promise<{ size: number; lastModified: number; name: string; mimeType: string } | null> {
     return null;
   },
+  async browserRoots() {
+    return [];
+  },
+  async browserListDir(_path: string) {
+    return [];
+  },
+  async ensureFactoryLibrary() {
+    return [];
+  },
+  async browserIndexStart(path: string) {
+    return {
+      rootPath: path,
+      dbPath: "",
+      status: "idle" as const,
+      scannedDirs: 0,
+      scannedFiles: 0,
+      audioFiles: 0,
+    };
+  },
+  async browserIndexStatus(_paths?: string[]) {
+    return [];
+  },
   getNativePathForFile(_file: File): string | null {
     return null;
   },

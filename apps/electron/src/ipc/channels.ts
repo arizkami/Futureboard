@@ -8,6 +8,11 @@ export const IpcChannels = {
   FsReadAudioFile: "daw:fs:readAudioFile",
   FsStatAudioFile: "daw:fs:statAudioFile",
   FsRevealInFileManager: "daw:fs:revealInFileManager",
+  FsBrowserRoots: "daw:fs:browserRoots",
+  FsBrowserListDir: "daw:fs:browserListDir",
+  FsEnsureFactoryLibrary: "daw:fs:ensureFactoryLibrary",
+  FsBrowserIndexStart: "daw:fs:browserIndexStart",
+  FsBrowserIndexStatus: "daw:fs:browserIndexStatus",
 
   ProjectSaveDialog: "daw:project:saveDialog",
   ProjectOpenDialog: "daw:project:openDialog",
@@ -85,6 +90,36 @@ export type AudioFileStat = {
   path: string;
   size: number;
   lastModified: number;
+};
+
+export type BrowserRootEntry = {
+  id: string;
+  name: string;
+  path: string;
+  kind: "factory" | "factory-folder" | "drive" | "folder";
+};
+
+export type BrowserFileEntry = {
+  name: string;
+  path: string;
+  kind: "folder" | "audio" | "file";
+  size?: number;
+  lastModified?: number;
+  mimeType?: string;
+};
+
+export type BrowserIndexStatus = {
+  rootPath: string;
+  dbPath: string;
+  status: "idle" | "indexing" | "done" | "error";
+  scannedDirs: number;
+  scannedFiles: number;
+  audioFiles: number;
+  currentPath?: string;
+  error?: string;
+  startedAt?: number;
+  updatedAt?: number;
+  finishedAt?: number;
 };
 
 export type MessageBoxOptions = {

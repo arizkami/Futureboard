@@ -12,6 +12,7 @@ import { isPrimaryModifier } from "../../hooks/useModifierKeys";
 import { addFileToTimeline, importAudioFileToTimelineProgressive } from "../../utils/importAudioToProject";
 import { showToast } from "../ui/Toast";
 import { useState } from "react";
+import { platform } from "../../platform";
 
 type Props = {
   track: DawTrack;
@@ -22,6 +23,7 @@ type Props = {
 
 // Overscan: render clips this many seconds beyond the visible edge on each side.
 const OVERSCAN_SECONDS = 4;
+const NATIVE_AUDIO_DRAG_TYPE = "application/x-futureboard-native-audio-path";
 
 export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
   const selectedTrackId       = useUIStore((s) => s.selectedTrackId);
@@ -143,14 +145,14 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
     <div
       onPointerDown={handlePointerDown}
       onDragEnter={(e) => {
-        if (![...e.dataTransfer.types].includes("Files") && !e.dataTransfer.types.includes("application/x-mochi-file-id")) return;
+        if (![...e.dataTransfer.types].includes("Files") && !e.dataTransfer.types.includes("application/x-mochi-file-id") && !e.dataTransfer.types.includes(NATIVE_AUDIO_DRAG_TYPE)) return;
         setIsDragOver(true);
       }}
       onDragLeave={() => {
         setIsDragOver(false);
       }}
       onDragOver={(e) => {
-        if (![...e.dataTransfer.types].includes("Files") && !e.dataTransfer.types.includes("application/x-mochi-file-id")) return;
+        if (![...e.dataTransfer.types].includes("Files") && !e.dataTransfer.types.includes("application/x-mochi-file-id") && !e.dataTransfer.types.includes(NATIVE_AUDIO_DRAG_TYPE)) return;
         e.preventDefault();
         e.stopPropagation();
         e.dataTransfer.dropEffect = "copy";
@@ -158,7 +160,8 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
       onDrop={async (e) => {
         const hasFiles = [...e.dataTransfer.types].includes("Files");
         const hasMochiFile = e.dataTransfer.types.includes("application/x-mochi-file-id");
-        if (!hasFiles && !hasMochiFile) return;
+        const hasNativeAudio = e.dataTransfer.types.includes(NATIVE_AUDIO_DRAG_TYPE);
+        if (!hasFiles && !hasMochiFile && !hasNativeAudio) return;
 
         e.preventDefault();
         e.stopPropagation();
@@ -180,6 +183,13 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
           const fileId = e.dataTransfer.getData("application/x-mochi-file-id");
           const dawFile = project.files.find(f => f.id === fileId);
           if (dawFile) addFileToTimeline(dawFile, Math.max(0, time), track.id);
+          return;
+        }
+
+        if (hasNativeAudio) {
+          const filePath = e.dataTransfer.getData(NATIVE_AUDIO_DRAG_TYPE);
+          const file = await platform.fileSystem.readAudioFile(filePath);
+          if (file) await importAudioFileToTimelineProgressive(file, Math.max(0, time), track.id);
           return;
         }
 

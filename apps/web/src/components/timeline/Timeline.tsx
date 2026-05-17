@@ -13,9 +13,11 @@ import { secondsPerBeat, snapTime, timelineXToTime } from "../../utils/musicalTi
 import { decodeAndAddAudioFile, addFileToTimeline } from "../../utils/importAudioToProject";
 import { TIMELINE_Z } from "../../utils/timelineZ";
 import { HEADER_WIDTH } from "../../theme";
+import { platform } from "../../platform";
 
 const MIN_PPS = 10;
 const MAX_PPS = 800;
+const NATIVE_AUDIO_DRAG_TYPE = "application/x-futureboard-native-audio-path";
 
 export function Timeline() {
   const [addTrackOpen, setAddTrackOpen] = useState(false);
@@ -38,7 +40,7 @@ export function Timeline() {
 
   const isFileDrag = (e: React.DragEvent) => {
     const types = [...e.dataTransfer.types];
-    return types.includes("Files") || types.includes("application/x-mochi-file-id");
+    return types.includes("Files") || types.includes("application/x-mochi-file-id") || types.includes(NATIVE_AUDIO_DRAG_TYPE);
   };
 
   const resetDragState = useCallback(() => {
@@ -84,7 +86,9 @@ export function Timeline() {
     // Snapshot the data we need synchronously — `dataTransfer` may become invalid after await.
     const types = [...e.dataTransfer.types];
     const hasMochiFile = types.includes("application/x-mochi-file-id");
+    const hasNativeAudio = types.includes(NATIVE_AUDIO_DRAG_TYPE);
     const mochiFileId = hasMochiFile ? e.dataTransfer.getData("application/x-mochi-file-id") : "";
+    const nativeAudioPath = hasNativeAudio ? e.dataTransfer.getData(NATIVE_AUDIO_DRAG_TYPE) : "";
     const fileList: File[] = e.dataTransfer.files ? Array.from(e.dataTransfer.files) : [];
     const clientX = e.clientX;
 
@@ -109,6 +113,15 @@ export function Timeline() {
       if (hasMochiFile) {
         const dawFile = useProjectStore.getState().project.files.find((f) => f.id === mochiFileId);
         if (dawFile) addFileToTimeline(dawFile, time);
+        return;
+      }
+
+      if (nativeAudioPath) {
+        const file = await platform.fileSystem.readAudioFile(nativeAudioPath);
+        if (file) {
+          const dawFile = await decodeAndAddAudioFile(file);
+          if (dawFile) addFileToTimeline(dawFile, time);
+        }
         return;
       }
 

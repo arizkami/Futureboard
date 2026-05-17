@@ -9,7 +9,7 @@
 //!   1. Calls `CoInitializeEx(COINIT_MULTITHREADED)` for COM.
 //!   2. Sets MMCSS "Pro Audio" priority via `AvSetMmThreadCharacteristicsW`.
 //!   3. Opens WASAPI device in exclusive, event-driven mode.
-//!   4. Runs `WaitForSingleObject(buffer_event)` render loop until `stop_flag`.
+//!   4. Runs `WaitForMultipleObjects([buf_event, stop_event])` render loop until stopped.
 //!   5. Calls `CoUninitialize` on exit.
 //!
 //! If exclusive mode is denied by the device, falls back to WASAPI Shared.
@@ -30,7 +30,9 @@ use windows::Win32::Media::Audio::{
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
-use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows::Win32::System::Threading::{
+    CreateEventW, SetEvent, WaitForMultipleObjects,
+};
 
 use crate::backend::DauxDeviceConfig;
 use crate::backend::render::{drain_commands, fill_output_f32, LocalAudioState};
@@ -50,22 +52,38 @@ extern "system" {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Handle to a running WASAPI Exclusive stream.
-/// Drop to signal the audio thread to stop.
+///
+/// Dropping this handle signals the audio thread to stop immediately —
+/// it sets `stop_flag` AND signals `stop_event` so the thread wakes from
+/// `WaitForMultipleObjects` without waiting for the 2-second buffer timeout.
 pub struct WasapiExclusiveHandle {
     pub cmd_tx: Sender<EngineCommand>,
     pub sample_rate: u32,
     pub buffer_size: u32,
     pub device_name: String,
     stop_flag: Arc<AtomicBool>,
+    /// Manual-reset event signaled to wake the audio thread on shutdown.
+    /// Owned here; the audio thread only holds a copy of the raw handle value.
+    stop_event: HANDLE,
     thread: Option<thread::JoinHandle<()>>,
 }
 
+// Safety: HANDLE (isize) is safe to send across threads for a kernel event object.
+unsafe impl Send for WasapiExclusiveHandle {}
+
 impl Drop for WasapiExclusiveHandle {
     fn drop(&mut self) {
+        // 1. Set the flag so the thread's loop-top check also exits cleanly.
         self.stop_flag.store(true, Ordering::Relaxed);
+        // 2. Signal the stop event — wakes the thread from WaitForMultipleObjects
+        //    immediately instead of waiting up to 2 seconds for the next buffer tick.
+        unsafe { let _ = SetEvent(self.stop_event); }
+        // 3. Join — should return within microseconds now.
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+        // 4. Close the stop event after the thread has exited.
+        unsafe { let _ = CloseHandle(self.stop_event); }
     }
 }
 
@@ -86,6 +104,18 @@ pub fn open(
     let stop2 = Arc::clone(&stop_flag);
     let glitch2 = Arc::clone(&glitch_counter);
 
+    // Create the stop event used to wake the audio thread immediately on shutdown.
+    // Manual-reset=false, initial-state=false.
+    let stop_event: HANDLE = unsafe {
+        CreateEventW(None, false, false, None)
+            .map_err(|e| SphereAudioError::StreamOpenFailed(format!("CreateEventW(stop): {e}")))?
+    };
+    // Transmit the stop event handle value as `usize` — that type is always `Send`,
+    // while `HANDLE` (*mut c_void) is !Send and would prevent spawning the thread.
+    // Inside the thread we cast it back to `HANDLE`.  Kernel event objects are not
+    // thread-affine, so this is safe.
+    let stop_event_usize = stop_event.0 as usize;
+
     // Info channel: audio thread reports (sample_rate, buffer_size, device_name) back.
     let (info_tx, info_rx) = std::sync::mpsc::channel::<Result<(u32, u32, String), String>>();
 
@@ -93,13 +123,19 @@ pub fn open(
         .name("daux-wasapi-excl".into())
         .spawn(move || {
             unsafe {
+                let stop_ev = HANDLE(stop_event_usize as *mut _);
                 wasapi_thread(
                     output_device_id, requested_sr, buf_frames,
-                    rx, shared, initial_runtime, glitch2, stop2, info_tx,
+                    rx, shared, initial_runtime, glitch2, stop2,
+                    stop_ev, info_tx,
                 );
             }
         })
-        .map_err(|e| SphereAudioError::StreamOpenFailed(e.to_string()))?;
+        .map_err(|e| {
+            // If spawn fails, close the event to avoid leaking it.
+            unsafe { let _ = CloseHandle(stop_event); }
+            SphereAudioError::StreamOpenFailed(e.to_string())
+        })?;
 
     let (sample_rate, buffer_size, device_name) = info_rx
         .recv_timeout(std::time::Duration::from_secs(8))
@@ -112,6 +148,7 @@ pub fn open(
         buffer_size,
         device_name,
         stop_flag,
+        stop_event,
         thread: Some(t),
     })
 }
@@ -127,6 +164,7 @@ unsafe fn wasapi_thread(
     initial_runtime: RuntimeProject,
     glitch_counter: Arc<AtomicU64>,
     stop_flag: Arc<AtomicBool>,
+    stop_event: HANDLE,
     info_tx: std::sync::mpsc::Sender<Result<(u32, u32, String), String>>,
 ) {
     // ── COM init ──────────────────────────────────────────────────────────────
@@ -290,10 +328,19 @@ unsafe fn wasapi_thread(
     loop {
         if stop_flag.load(Ordering::Relaxed) { break; }
 
-        let wait = WaitForSingleObject(buf_event, 2000);
-        if wait != WAIT_OBJECT_0 {
-            eprintln!("[DAUx WASAPI Excl] WaitForSingleObject timeout/err — stopping");
-            glitch_counter.fetch_add(1, Ordering::Relaxed);
+        // Wait on either the buffer-ready event (index 0) or the stop event (index 1).
+        // Using WaitForMultipleObjects lets Drop() wake us immediately instead of
+        // blocking the Electron main thread for up to 2 s.
+        let wait_handles = [buf_event, stop_event];
+        let wait = WaitForMultipleObjects(&wait_handles, false, 2000);
+        if wait == WAIT_OBJECT_0 {
+            // buf_event signaled — proceed to render below.
+        } else {
+            // wait.0 == 1 → stop_event signaled (clean shutdown).
+            // Any other value (WAIT_TIMEOUT=0x102, WAIT_FAILED=0xFFFF…) is a glitch.
+            if wait.0 != 1 && !stop_flag.load(Ordering::Relaxed) {
+                glitch_counter.fetch_add(1, Ordering::Relaxed);
+            }
             break;
         }
         if stop_flag.load(Ordering::Relaxed) { break; }

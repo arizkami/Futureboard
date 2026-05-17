@@ -49,6 +49,36 @@ export type PlatformCapabilities = {
   osFilePaths: boolean;
 };
 
+export type BrowserRootEntry = {
+  id: string;
+  name: string;
+  path: string;
+  kind: "factory" | "factory-folder" | "drive" | "folder";
+};
+
+export type BrowserFileEntry = {
+  name: string;
+  path: string;
+  kind: "folder" | "audio" | "file";
+  size?: number;
+  lastModified?: number;
+  mimeType?: string;
+};
+
+export type BrowserIndexStatus = {
+  rootPath: string;
+  dbPath: string;
+  status: "idle" | "indexing" | "done" | "error";
+  scannedDirs: number;
+  scannedFiles: number;
+  audioFiles: number;
+  currentPath?: string;
+  error?: string;
+  startedAt?: number;
+  updatedAt?: number;
+  finishedAt?: number;
+};
+
 /**
  * Filesystem-style operations. On web these may be stubs or hidden
  * `<input type="file">` plumbing; on Electron they bridge to Node.
@@ -60,6 +90,16 @@ export interface FileSystemAdapter {
   readAudioFile(path: string): Promise<File | null>;
   /** Probe a native audio path without reading full bytes. Electron only; web returns null. */
   statAudioFile(path: string): Promise<{ size: number; lastModified: number; name: string; mimeType: string } | null>;
+  /** Electron file-browser roots. Web returns an empty list. */
+  browserRoots(): Promise<BrowserRootEntry[]>;
+  /** Electron directory listing for DAW browser. Web returns an empty list. */
+  browserListDir(path: string): Promise<BrowserFileEntry[]>;
+  /** Ensure Electron's factory content folders exist. Web returns an empty list. */
+  ensureFactoryLibrary(): Promise<BrowserRootEntry[]>;
+  /** Start indexing a browser root/folder into Electron userData SQLite. Web returns idle. */
+  browserIndexStart(path: string): Promise<BrowserIndexStatus>;
+  /** Read indexing progress for browser roots/folders. Web returns an empty list. */
+  browserIndexStatus(paths?: string[]): Promise<BrowserIndexStatus[]>;
   /** Return the OS path for an Electron-backed File object. Web returns null. */
   getNativePathForFile(file: File): string | null;
   /** Reveal a file in the OS file manager. No-op or throws on web. */

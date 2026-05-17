@@ -275,10 +275,11 @@ function GeneralTab({ draft, setDraft }: { draft: AppSettings; setDraft: (p: Par
 /** Maps our UI DauxBackend enum to the Rust openDaux() backendId string. */
 function dauxBackendId(b: DauxBackend): string {
   switch (b) {
-    case "wasapi":    return "wasapi-exclusive";
-    case "mme":       return "mme";
-    case "coreaudio": return "coreaudio";
-    case "alsa":      return "alsa";
+    case "wasapi":           return "wasapi-shared";
+    case "wasapi-exclusive": return "wasapi-exclusive";
+    case "mme":              return "mme";
+    case "coreaudio":        return "coreaudio";
+    case "alsa":             return "alsa";
   }
 }
 
@@ -287,7 +288,7 @@ function platformDefaultBackend(): DauxBackend {
   const p = window.dawElectron?.platform ?? "";
   if (p === "darwin") return "coreaudio";
   if (p === "linux")  return "alsa";
-  return "wasapi"; // win32 + unknown
+  return "wasapi"; // win32 + unknown; maps to WASAPI Shared for Settings stability
 }
 
 // ── Restart banner ────────────────────────────────────────────────────────────
@@ -507,8 +508,9 @@ function AudioTab({
   // ── OS Backend options (Electron-only, platform-conditional) ─────────────
   const backendOptions: { value: DauxBackend; label: string }[] = isWindows
     ? [
-        { value: "wasapi", label: "WASAPI" },
-        { value: "mme",    label: "MME Fallback (High Latency)" },
+        { value: "wasapi",           label: "WASAPI Shared (Stable)" },
+        { value: "wasapi-exclusive", label: "WASAPI Exclusive (Experimental)" },
+        { value: "mme",              label: "MME Fallback (High Latency)" },
       ]
     : isMac
     ? [{ value: "coreaudio", label: "CoreAudio" }]
@@ -576,7 +578,7 @@ function AudioTab({
             label="Backend"
             description={
               isWindows
-                ? "WASAPI — event-driven, lowest latency. MME — legacy, high latency."
+                ? "Shared is stable for most devices. Exclusive is lower latency but can fail on some drivers."
                 : isMac
                 ? "CoreAudio is the only supported backend on macOS."
                 : "ALSA is the system audio API on Linux."
@@ -843,6 +845,8 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
 
   // ── DAUx runtime status (refreshed on mount and after Apply) ─────────────
   const [dauxStatus, setDauxStatus] = useState<DawBridgeDauxStatus | null>(null);
+  const [applyError, setApplyError] = useState<string | null>(null);
+  const [applying, setApplying] = useState(false);
 
   const refreshDauxStatus = useCallback(() => {
     const sphere = window.dawElectron?.sphereAudio;
@@ -867,8 +871,11 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
     }
   };
 
-  const handleApply = () => {
+  const handleApply = async (): Promise<boolean> => {
     const isElectron = platform.kind === "electron";
+    if (applying || nativeApplyingRef.current) return false;
+    setApplyError(null);
+    setApplying(true);
 
     // In Electron, engine is always DAUx (native-sphere-direct).
     const effectiveAppDraft: AppSettings = isElectron
@@ -904,36 +911,68 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
       const sr = effectiveAppDraft.audioSampleRate;
       const sampleRate = (sr === "device-default" || sr == null) ? undefined : (sr as number);
 
-      Promise.resolve()
-        .then(() =>
-          sphere.openDaux({
+      try {
+        await sphere.openDaux({
             backendId,
             outputDeviceId: outputDeviceId || undefined,
             bufferSize: effectiveAppDraft.preferredBufferSize,
             sampleRate,
             mmcssPriority: true,
-          }),
-        )
-        .then(() => sphere.start())
-        .then(() => activeAudioEngine.reconfigure("native-sphere-direct"))
-        .then(() => refreshDauxStatus())
-        .catch((e: unknown) => {
-          console.warn("[Settings] DAUx restart failed:", e);
-          refreshDauxStatus(); // update status even on error
-        })
-        .finally(() => {
-          nativeApplyingRef.current = false;
-        });
+            safeMode: true,
+          });
+        await sphere.start();
+        await activeAudioEngine.reconfigure("native-sphere-direct");
+        refreshDauxStatus();
+        return true;
+      } catch (e: unknown) {
+        console.warn("[Settings] DAUx restart failed:", e);
+        const message = e instanceof Error ? e.message : String(e);
+        setApplyError(`Audio restart failed: ${message}`);
+        try {
+          await sphere.openDaux({
+            backendId: "wasapi-shared",
+            outputDeviceId: outputDeviceId || undefined,
+            bufferSize: 512,
+            sampleRate: undefined,
+            mmcssPriority: true,
+            safeMode: true,
+          });
+          await sphere.start();
+          await activeAudioEngine.reconfigure("native-sphere-direct");
+          setApplyError("Requested audio config failed. Recovered with WASAPI Shared, 512 samples, device default sample rate.");
+          refreshDauxStatus();
+          return false;
+        } catch (fallbackError: unknown) {
+          console.warn("[Settings] DAUx fallback restart failed:", fallbackError);
+          refreshDauxStatus();
+          return false;
+        }
+      } finally {
+        nativeApplyingRef.current = false;
+        setApplying(false);
+      }
     } else if (!isElectron) {
       // Web: reconfigure WASM engine
-      void activeAudioEngine.reconfigure(effectiveAppDraft.preferredEngine);
+      try {
+        await activeAudioEngine.reconfigure(effectiveAppDraft.preferredEngine);
+        return true;
+      } catch (e: unknown) {
+        console.warn("[Settings] Web audio reconfigure failed:", e);
+        setApplyError(e instanceof Error ? e.message : String(e));
+        return false;
+      } finally {
+        setApplying(false);
+      }
     }
+
+    setApplying(false);
+    return true;
   };
 
   const handleCancel = () => closeWindow(windowId);
-  const handleDone = () => {
-    handleApply();
-    closeWindow(windowId);
+  const handleDone = async () => {
+    const ok = await handleApply();
+    if (ok) closeWindow(windowId);
   };
 
   const tabs: { id: SettingsTab; label: string }[] = [
@@ -979,6 +1018,11 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
 
         {/* Tab body */}
         <div className="flex-1 overflow-y-auto px-5 pb-4 pt-1">
+          {applyError && (
+            <div className="mt-3 rounded border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] leading-snug text-red-300">
+              {applyError}
+            </div>
+          )}
           {activeTab === "general" && (
             <GeneralTab draft={appDraft} setDraft={patchApp} />
           )}
@@ -1017,14 +1061,20 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
             Cancel
           </button>
           <button
-            className="px-3 h-[26px] text-[11px] text-[rgba(255,255,255,0.5)] hover:text-[rgba(255,255,255,0.8)] bg-[rgba(255,255,255,0.04)] hover:bg-[rgba(255,255,255,0.08)] border border-[rgba(255,255,255,0.08)] rounded transition-colors"
-            onClick={handleApply}
+            className={`px-3 h-[26px] text-[11px] text-[rgba(255,255,255,0.5)] bg-[rgba(255,255,255,0.04)] border border-[rgba(255,255,255,0.08)] rounded transition-colors ${
+              applying ? "opacity-50 cursor-wait" : "hover:text-[rgba(255,255,255,0.8)] hover:bg-[rgba(255,255,255,0.08)]"
+            }`}
+            disabled={applying}
+            onClick={() => { void handleApply(); }}
           >
-            Apply
+            {applying ? "Applying…" : "Apply"}
           </button>
           <button
-            className="px-3 h-[26px] text-[11px] bg-[rgba(114,215,215,0.15)] hover:bg-[rgba(114,215,215,0.22)] text-[rgba(114,215,215,0.9)] border border-[rgba(114,215,215,0.25)] rounded font-medium transition-colors"
-            onClick={handleDone}
+            className={`px-3 h-[26px] text-[11px] bg-[rgba(114,215,215,0.15)] text-[rgba(114,215,215,0.9)] border border-[rgba(114,215,215,0.25)] rounded font-medium transition-colors ${
+              applying ? "opacity-50 cursor-wait" : "hover:bg-[rgba(114,215,215,0.22)]"
+            }`}
+            disabled={applying}
+            onClick={() => { void handleDone(); }}
           >
             Done
           </button>

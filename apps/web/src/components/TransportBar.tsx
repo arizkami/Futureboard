@@ -715,7 +715,7 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
           <div className="app-no-drag flex min-w-0 shrink items-center gap-0.5">
 
             {/* App logo */}
-            <div className="flex shrink-0 items-center p-1">
+            {/*<div className="flex shrink-0 items-center p-1">
               <div
                 aria-hidden="true"
                 className="h-4 w-4 shrink-0 select-none bg-contain bg-center bg-no-repeat"
@@ -726,7 +726,7 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
                   pointerEvents: "none",
                 } as React.CSSProperties}
               />
-            </div>
+            </div>*/}
 
             {/* Menu buttons — overflow-hidden clips anything that doesn't fit */}
             <div

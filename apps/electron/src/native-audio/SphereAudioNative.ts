@@ -464,9 +464,12 @@ export class SphereAudioNative {
 
   openDaux(config: SphereDauxConfig): void {
     if (!this._engine) throw new Error("[SphereAudio] Engine not available");
+    const outputs = this.listOutputDevices() as NativeDeviceInfo[];
+    const outputDeviceId = resolveNativeDeviceId(config.outputDeviceId, outputs, "output");
+    const backendId = config.backendId === "wasapi" ? "wasapi-shared" : config.backendId;
     this._engine.openDaux({
-      backendId:       config.backendId,
-      outputDeviceId:  config.outputDeviceId,
+      backendId,
+      outputDeviceId,
       sampleRate:      config.sampleRate,
       bufferSize:      config.bufferSize,
       mmcssPriority:   config.mmcssPriority ?? true,

@@ -9,6 +9,7 @@ import {
 } from "electron";
 import path from "node:path";
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import {
   IpcChannels,
@@ -16,6 +17,9 @@ import {
   type MessageBoxResult,
   type OpenDialogResult,
   type AudioFileStat,
+  type BrowserFileEntry,
+  type BrowserIndexStatus,
+  type BrowserRootEntry,
   type PickedAudioFile,
   type SaveDialogResult,
   type WaveformCacheEntryIpc,
@@ -27,6 +31,7 @@ import {
 } from "./ipc/channels.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
 
 const DEV_SERVER_URL =
   process.env.VITE_DEV_SERVER_URL ?? "http://localhost:5173";
@@ -306,6 +311,7 @@ function createWindow(): BrowserWindow {
 }
 
 const AUDIO_EXTENSIONS = ["wav", "mp3", "flac", "ogg", "m4a", "aac"] as const;
+const FACTORY_LIBRARY_FOLDERS = ["Presets", "Samples", "Loops", "Templates"] as const;
 
 const MIME_BY_EXT: Record<string, string> = {
   wav: "audio/wav",
@@ -341,6 +347,297 @@ async function readPickedAudioFile(filePath: string): Promise<PickedAudioFile | 
     size: stat.size,
     lastModified: Math.round(stat.mtimeMs),
   };
+}
+
+function factoryLibraryRoot(): string {
+  return path.join(app.getPath("documents"), "Futureboard Studio");
+}
+
+async function ensureFactoryLibraryFolders(): Promise<BrowserRootEntry[]> {
+  const root = factoryLibraryRoot();
+  await fs.mkdir(root, { recursive: true });
+  await Promise.all(
+    FACTORY_LIBRARY_FOLDERS.map((folder) => fs.mkdir(path.join(root, folder), { recursive: true })),
+  );
+  return [
+    { id: "factory", name: "Futureboard Studio", path: root, kind: "factory" },
+    ...FACTORY_LIBRARY_FOLDERS.map((folder) => ({
+      id: `factory:${folder.toLowerCase()}`,
+      name: folder,
+      path: path.join(root, folder),
+      kind: "factory-folder" as const,
+    })),
+  ];
+}
+
+async function mountedDriveRoots(): Promise<BrowserRootEntry[]> {
+  if (!isWin) return [{ id: "root", name: "/", path: "/", kind: "drive" }];
+  const byPath = new Map<string, BrowserRootEntry>();
+  const addDrive = (drivePath?: string | null) => {
+    if (!drivePath) return;
+    const match = path.resolve(drivePath).match(/^([A-Za-z]:)\\/);
+    if (!match) return;
+    const name = match[1].toUpperCase();
+    byPath.set(`${name}\\`, { id: `drive:${name[0]}`, name, path: `${name}\\`, kind: "drive" });
+  };
+  addDrive(process.env.SystemDrive);
+  addDrive(process.env.HOMEDRIVE);
+  addDrive(process.cwd());
+  addDrive(app.getPath("documents"));
+  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+  await Promise.all(
+    letters.map(async (letter) => {
+      const drive = `${letter}:\\`;
+      try {
+        await fs.stat(drive);
+        byPath.set(drive, { id: `drive:${letter}`, name: `${letter}:`, path: drive, kind: "drive" });
+      } catch {
+        // drive not mounted/readable
+      }
+    }),
+  );
+  return Array.from(byPath.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function isHiddenOrSystemName(name: string): boolean {
+  return name.startsWith(".") || name === "$RECYCLE.BIN" || name === "System Volume Information";
+}
+
+const BROWSER_INDEX_BATCH_SIZE = 64;
+const BROWSER_INDEX_YIELD_MS = 8;
+const SKIP_INDEX_DIR_NAMES = new Set([
+  "$RECYCLE.BIN",
+  "System Volume Information",
+  "Windows",
+  "Program Files",
+  "Program Files (x86)",
+  "ProgramData",
+  "AppData",
+  "node_modules",
+  ".git",
+]);
+
+function shouldSkipIndexDirectory(name: string): boolean {
+  return isHiddenOrSystemName(name) || SKIP_INDEX_DIR_NAMES.has(name);
+}
+
+function waitForIndexYield(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, BROWSER_INDEX_YIELD_MS));
+}
+
+async function listBrowserDirectory(dirPath: string): Promise<BrowserFileEntry[]> {
+  const normalized = path.normalize(dirPath);
+  const entries = await fs.readdir(normalized, { withFileTypes: true });
+  const rows: BrowserFileEntry[] = [];
+  for (const entry of entries) {
+    if (isHiddenOrSystemName(entry.name)) continue;
+    const childPath = path.join(normalized, entry.name);
+    if (entry.isDirectory()) {
+      rows.push({ name: entry.name, path: childPath, kind: "folder" });
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    if (!isImportableAudioPath(childPath)) continue;
+    try {
+      const stat = await fs.stat(childPath);
+      rows.push({
+        name: entry.name,
+        path: childPath,
+        kind: "audio",
+        size: stat.size,
+        lastModified: Math.round(stat.mtimeMs),
+        mimeType: mimeFor(childPath),
+      });
+    } catch {
+      // skip unreadable file
+    }
+  }
+  return rows.sort((a, b) => {
+    if (a.kind === b.kind) return a.name.localeCompare(b.name);
+    return a.kind === "folder" ? -1 : 1;
+  });
+}
+
+type SqliteStatement = {
+  run: (...args: unknown[]) => unknown;
+};
+
+type SqliteDatabase = {
+  exec: (sql: string) => unknown;
+  prepare: (sql: string) => SqliteStatement;
+};
+
+let browserIndexDb: SqliteDatabase | null | undefined;
+let browserIndexDbWarningShown = false;
+const browserIndexJobs = new Map<string, BrowserIndexStatus>();
+
+function browserIndexDbPath(): string {
+  return path.join(app.getPath("userData"), "file-browser-index.sqlite");
+}
+
+async function getBrowserIndexDb(): Promise<SqliteDatabase | null> {
+  if (browserIndexDb !== undefined) return browserIndexDb;
+  try {
+    await fs.mkdir(app.getPath("userData"), { recursive: true });
+    const sqlite = require("node:sqlite") as {
+      DatabaseSync?: new (location: string) => SqliteDatabase;
+    };
+    if (!sqlite.DatabaseSync) throw new Error("node:sqlite DatabaseSync is unavailable");
+    const db = new sqlite.DatabaseSync(browserIndexDbPath());
+    db.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE IF NOT EXISTS browser_index (
+        root_path TEXT NOT NULL,
+        path TEXT PRIMARY KEY,
+        parent_path TEXT NOT NULL,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        size INTEGER,
+        last_modified INTEGER,
+        mime_type TEXT,
+        indexed_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_browser_index_root ON browser_index(root_path);
+      CREATE INDEX IF NOT EXISTS idx_browser_index_parent ON browser_index(parent_path);
+      CREATE INDEX IF NOT EXISTS idx_browser_index_kind ON browser_index(kind);
+    `);
+    browserIndexDb = db;
+  } catch (err) {
+    if (!browserIndexDbWarningShown) {
+      browserIndexDbWarningShown = true;
+      console.warn("[FileBrowser] SQLite index unavailable:", err);
+    }
+    browserIndexDb = null;
+  }
+  return browserIndexDb;
+}
+
+function normalizedBrowserRoot(rootPath: string): string {
+  return path.normalize(rootPath);
+}
+
+function idleBrowserIndexStatus(rootPath: string): BrowserIndexStatus {
+  return {
+    rootPath: normalizedBrowserRoot(rootPath),
+    dbPath: browserIndexDbPath(),
+    status: "idle",
+    scannedDirs: 0,
+    scannedFiles: 0,
+    audioFiles: 0,
+  };
+}
+
+function startBrowserIndex(rootPath: string): BrowserIndexStatus {
+  const root = normalizedBrowserRoot(rootPath);
+  const existing = browserIndexJobs.get(root);
+  if (existing?.status === "indexing") return existing;
+  const status: BrowserIndexStatus = {
+    rootPath: root,
+    dbPath: browserIndexDbPath(),
+    status: "indexing",
+    scannedDirs: 0,
+    scannedFiles: 0,
+    audioFiles: 0,
+    currentPath: root,
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  browserIndexJobs.set(root, status);
+  void runBrowserIndex(root, status);
+  return status;
+}
+
+async function runBrowserIndex(root: string, status: BrowserIndexStatus): Promise<void> {
+  const db = await getBrowserIndexDb();
+  if (!db) {
+    status.status = "error";
+    status.error = "SQLite index unavailable in this Electron runtime";
+    status.finishedAt = Date.now();
+    status.updatedAt = status.finishedAt;
+    return;
+  }
+  const indexedAt = Date.now();
+  const deleteRoot = db.prepare("DELETE FROM browser_index WHERE root_path = ?");
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO browser_index
+      (root_path, path, parent_path, name, kind, size, last_modified, mime_type, indexed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  try {
+    deleteRoot.run(root);
+    const stack = [root];
+    let workSinceYield = 0;
+    while (stack.length > 0) {
+      const dir = stack.pop();
+      if (!dir) continue;
+      if (workSinceYield >= BROWSER_INDEX_BATCH_SIZE) {
+        workSinceYield = 0;
+        await waitForIndexYield();
+      }
+      status.currentPath = dir;
+      status.updatedAt = Date.now();
+      let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true });
+        status.scannedDirs++;
+      } catch {
+        continue;
+      }
+      workSinceYield++;
+      for (const entry of entries) {
+        if (workSinceYield >= BROWSER_INDEX_BATCH_SIZE) {
+          workSinceYield = 0;
+          await waitForIndexYield();
+        }
+        workSinceYield++;
+        if (isHiddenOrSystemName(entry.name)) continue;
+        const childPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (shouldSkipIndexDirectory(entry.name)) continue;
+          insert.run(root, childPath, dir, entry.name, "folder", null, null, null, indexedAt);
+          stack.push(childPath);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        status.scannedFiles++;
+        if (!isImportableAudioPath(childPath)) continue;
+        try {
+          const stat = await fs.stat(childPath);
+          insert.run(
+            root,
+            childPath,
+            dir,
+            entry.name,
+            "audio",
+            stat.size,
+            Math.round(stat.mtimeMs),
+            mimeFor(childPath),
+            indexedAt,
+          );
+          status.audioFiles++;
+        } catch {
+          // skip unreadable file
+        }
+      }
+    }
+    status.status = "done";
+    status.currentPath = undefined;
+    status.finishedAt = Date.now();
+    status.updatedAt = status.finishedAt;
+  } catch (err) {
+    status.status = "error";
+    status.error = err instanceof Error ? err.message : String(err);
+    status.finishedAt = Date.now();
+    status.updatedAt = status.finishedAt;
+  }
+}
+
+function browserIndexStatuses(paths?: unknown): BrowserIndexStatus[] {
+  const requested = Array.isArray(paths)
+    ? paths.filter((p): p is string => typeof p === "string" && p.length > 0).map(normalizedBrowserRoot)
+    : [];
+  if (requested.length === 0) return Array.from(browserIndexJobs.values());
+  return requested.map((root) => browserIndexJobs.get(root) ?? idleBrowserIndexStatus(root));
 }
 
 async function statAudioFile(filePath: string): Promise<AudioFileStat | null> {
@@ -469,6 +766,52 @@ function registerIpcHandlers(): void {
     async (_event, filePath: unknown): Promise<void> => {
       if (!isValidString(filePath)) return;
       shell.showItemInFolder(path.normalize(filePath));
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.FsEnsureFactoryLibrary,
+    async (): Promise<BrowserRootEntry[]> => {
+      return ensureFactoryLibraryFolders();
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.FsBrowserRoots,
+    async (): Promise<BrowserRootEntry[]> => {
+      const [factory, drives] = await Promise.all([
+        ensureFactoryLibraryFolders(),
+        mountedDriveRoots(),
+      ]);
+      return [...factory, ...drives];
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.FsBrowserListDir,
+    async (_event, dirPath: unknown): Promise<BrowserFileEntry[]> => {
+      if (!isValidString(dirPath)) return [];
+      try {
+        return await listBrowserDirectory(dirPath);
+      } catch (err) {
+        console.warn("[FileBrowser] listDir failed:", dirPath, err);
+        return [];
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.FsBrowserIndexStart,
+    async (_event, rootPath: unknown): Promise<BrowserIndexStatus> => {
+      if (!isValidString(rootPath)) return idleBrowserIndexStatus("");
+      return startBrowserIndex(rootPath);
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.FsBrowserIndexStatus,
+    async (_event, rootPaths: unknown): Promise<BrowserIndexStatus[]> => {
+      return browserIndexStatuses(rootPaths);
     },
   );
 

@@ -28,6 +28,36 @@ export type DawBridgePickedAudioFile = {
 
 export type DawBridgeAudioFileStat = Omit<DawBridgePickedAudioFile, "bytes">;
 
+export type DawBridgeBrowserRootEntry = {
+  id: string;
+  name: string;
+  path: string;
+  kind: "factory" | "factory-folder" | "drive" | "folder";
+};
+
+export type DawBridgeBrowserFileEntry = {
+  name: string;
+  path: string;
+  kind: "folder" | "audio" | "file";
+  size?: number;
+  lastModified?: number;
+  mimeType?: string;
+};
+
+export type DawBridgeBrowserIndexStatus = {
+  rootPath: string;
+  dbPath: string;
+  status: "idle" | "indexing" | "done" | "error";
+  scannedDirs: number;
+  scannedFiles: number;
+  audioFiles: number;
+  currentPath?: string;
+  error?: string;
+  startedAt?: number;
+  updatedAt?: number;
+  finishedAt?: number;
+};
+
 export type DawBridgeMessageBoxKind =
   | "none"
   | "info"
@@ -61,6 +91,11 @@ export interface DawBridgeFs {
   pickAudioFiles(): Promise<DawBridgePickedAudioFile[]>;
   readAudioFile(path: string): Promise<DawBridgePickedAudioFile | null>;
   statAudioFile(path: string): Promise<DawBridgeAudioFileStat | null>;
+  browserRoots(): Promise<DawBridgeBrowserRootEntry[]>;
+  browserListDir(path: string): Promise<DawBridgeBrowserFileEntry[]>;
+  ensureFactoryLibrary(): Promise<DawBridgeBrowserRootEntry[]>;
+  browserIndexStart(path: string): Promise<DawBridgeBrowserIndexStatus>;
+  browserIndexStatus(paths?: string[]): Promise<DawBridgeBrowserIndexStatus[]>;
   getPathForFile(file: File): string;
   revealInFileManager(path: string): Promise<void>;
 }

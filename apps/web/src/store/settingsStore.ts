@@ -7,7 +7,7 @@ export type PreferredEngine = "auto" | "wasm" | "webAudio" | "native-sphere-dire
 export type PreferredBufferSize = 64 | 128 | 256 | 512 | 1024;
 
 /** DAUx OS-level audio backend selection. */
-export type DauxBackend = "wasapi" | "mme" | "coreaudio" | "alsa";
+export type DauxBackend = "wasapi" | "wasapi-exclusive" | "mme" | "coreaudio" | "alsa";
 
 /** Audio engine sample rate override. "device-default" lets the driver choose. */
 export type AudioSampleRate = "device-default" | 44100 | 48000 | 96000;
