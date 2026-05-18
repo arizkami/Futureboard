@@ -38,16 +38,19 @@ jobs:
             platform: win
             artifact-name: futureboard-win
             artifact-glob: apps/electron/release/*.exe
+            artifact-glob2: ""
             updater-yml: apps/electron/release/latest.yml
           - os: macos-latest
             platform: mac
             artifact-name: futureboard-mac
             artifact-glob: apps/electron/release/*.dmg
+            artifact-glob2: ""
             updater-yml: apps/electron/release/latest-mac.yml
           - os: ubuntu-24.04
             platform: linux
             artifact-name: futureboard-linux
             artifact-glob: apps/electron/release/*.AppImage
+            artifact-glob2: apps/electron/release/*.deb
             updater-yml: apps/electron/release/latest-linux.yml
 
     steps:
@@ -133,6 +136,7 @@ jobs:
           name: ${{ matrix.artifact-name }}
           path: |
             ${{ matrix.artifact-glob }}
+            ${{ matrix.artifact-glob2 }}
             ${{ matrix.updater-yml }}
           if-no-files-found: error
           retention-days: 3

@@ -39,16 +39,19 @@ jobs:
             platform: win
             artifact-name: futureboard-win
             artifact-glob: apps/electron/release/*.exe
+            artifact-glob2: ""
             updater-yml: apps/electron/release/latest.yml
           - os: macos-latest
             platform: mac
             artifact-name: futureboard-mac
             artifact-glob: apps/electron/release/*.dmg
+            artifact-glob2: ""
             updater-yml: apps/electron/release/latest-mac.yml
           - os: ubuntu-24.04
             platform: linux
             artifact-name: futureboard-linux
             artifact-glob: apps/electron/release/*.AppImage
+            artifact-glob2: apps/electron/release/*.deb
             updater-yml: apps/electron/release/latest-linux.yml
 
     steps:
@@ -137,6 +140,7 @@ jobs:
           name: ${{ matrix.artifact-name }}
           path: |
             ${{ matrix.artifact-glob }}
+            ${{ matrix.artifact-glob2 }}
             ${{ matrix.updater-yml }}
           if-no-files-found: error
           retention-days: 7
@@ -150,6 +154,11 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -169,3 +178,14 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update AUR PKGBUILD version
+        run: |
+          VERSION="${{ needs.version.outputs.app-version }}"
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" packaging/aur/PKGBUILD
+          sed -i "s/^pkgver = .*/pkgver = ${VERSION}/" packaging/aur/.SRCINFO
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add packaging/aur/PKGBUILD packaging/aur/.SRCINFO
+          git diff --cached --quiet || git commit -m "chore: bump AUR pkgver to ${VERSION} [skip ci]"
+          git push
