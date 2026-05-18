@@ -308,9 +308,12 @@ function RestartBanner() {
 
 function DauxEngineCard({
   status,
+  pendingBackend,
   onRefresh,
 }: {
   status: DawBridgeDauxStatus | null;
+  /** Backend the user has selected but not yet applied. Null = no pending change. */
+  pendingBackend?: string | null;
   onRefresh: () => void;
 }) {
   const [testToneOn, setTestToneOn] = useState(false);
@@ -339,6 +342,10 @@ function DauxEngineCard({
         {status?.backendName && (
           <span className="text-[10px] text-daw-faint">· {status.backendName}</span>
         )}
+        {/* Pending backend indicator */}
+        {pendingBackend && (
+          <span className="text-[10px] text-[#e2b866]/80">→ {pendingBackend}</span>
+        )}
         <span className="ml-auto text-[10px] text-daw-faint">
           {running ? "Running" : status ? "Stopped" : "Detecting…"}
         </span>
@@ -363,6 +370,14 @@ function DauxEngineCard({
           <RefreshCw size={9} />
         </button>
       </div>
+
+      {/* Last error */}
+      {status?.lastError && (
+        <div className="mb-1.5 flex items-start gap-1.5 rounded border border-red-500/20 bg-red-500/[0.07] px-2 py-1">
+          <AlertCircle size={10} className="mt-px shrink-0 text-red-400/70" />
+          <span className="text-[10px] leading-snug text-red-300/80">{status.lastError}</span>
+        </div>
+      )}
 
       {/* Stats grid */}
       {status ? (
@@ -566,7 +581,17 @@ function AudioTab({
       </SettingsRow>
 
       {isElectron
-        ? <DauxEngineCard status={dauxStatus} onRefresh={onRefreshDauxStatus} />
+        ? (
+          <DauxEngineCard
+            status={dauxStatus}
+            pendingBackend={
+              restartRequired && effectiveDauxBackend !== storedDauxBackend
+                ? backendOptions.find((b) => b.value === effectiveDauxBackend)?.label ?? null
+                : null
+            }
+            onRefresh={onRefreshDauxStatus}
+          />
+        )
         : <WasmEngineCard />
       }
 
@@ -912,14 +937,21 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
       const sampleRate = (sr === "device-default" || sr == null) ? undefined : (sr as number);
 
       try {
-        await sphere.openDaux({
-            backendId,
-            outputDeviceId: outputDeviceId || undefined,
-            bufferSize: effectiveAppDraft.preferredBufferSize,
-            sampleRate,
-            mmcssPriority: true,
-            safeMode: true,
-          });
+        // Use openDauxSafe so Rust handles the fallback internally —
+        // if exclusive fails, the engine restores the previous backend and
+        // the error propagates here with a description of what happened.
+        const openFn = backendId === "wasapi-exclusive"
+          ? sphere.openDauxSafe.bind(sphere)
+          : sphere.openDaux.bind(sphere);
+
+        await openFn({
+          backendId,
+          outputDeviceId: outputDeviceId || undefined,
+          bufferSize: effectiveAppDraft.preferredBufferSize,
+          sampleRate,
+          mmcssPriority: true,
+          safeMode: false,
+        });
         await sphere.start();
         await activeAudioEngine.reconfigure("native-sphere-direct");
         refreshDauxStatus();
@@ -927,26 +959,17 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
       } catch (e: unknown) {
         console.warn("[Settings] DAUx restart failed:", e);
         const message = e instanceof Error ? e.message : String(e);
-        setApplyError(`Audio restart failed: ${message}`);
+        // If openDauxSafe threw, the previous backend was already restored in
+        // Rust — just show the error and refresh status to reflect that.
+        setApplyError(message);
         try {
-          await sphere.openDaux({
-            backendId: "wasapi-shared",
-            outputDeviceId: outputDeviceId || undefined,
-            bufferSize: 512,
-            sampleRate: undefined,
-            mmcssPriority: true,
-            safeMode: true,
-          });
           await sphere.start();
           await activeAudioEngine.reconfigure("native-sphere-direct");
-          setApplyError("Requested audio config failed. Recovered with WASAPI Shared, 512 samples, device default sample rate.");
-          refreshDauxStatus();
-          return false;
-        } catch (fallbackError: unknown) {
-          console.warn("[Settings] DAUx fallback restart failed:", fallbackError);
-          refreshDauxStatus();
-          return false;
+        } catch {
+          // Best-effort: if start also fails, the stream stays closed.
         }
+        refreshDauxStatus();
+        return false;
       } finally {
         nativeApplyingRef.current = false;
         setApplying(false);

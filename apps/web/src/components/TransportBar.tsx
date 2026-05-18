@@ -241,7 +241,7 @@ function MenuPanel({
   onAction: (item: CommandMenuItem) => void;
 }) {
   return (
-    <div className="min-w-[15rem] rounded-md border border-daw-border bg-daw-surface p-1 shadow-[0_12px_36px_rgba(0,0,0,0.52)]">
+    <div className="min-w-[15rem] text-xs rounded-md border border-daw-border bg-daw-surface p-1 shadow-[0_12px_36px_rgba(0,0,0,0.52)]">
       {items.map((item) => {
         if (item.type === "separator") {
           return <div key={item.id} className="my-1 h-px bg-daw-border" />;
@@ -711,6 +711,7 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
     >
       <div className="flex w-full min-w-0 items-center justify-between gap-4">
         <div className="flex min-w-0 flex-1 items-center gap-2">
+          {!_isMac && (
           <div className="app-no-drag flex min-w-0 shrink items-center gap-0.5">
 
             {/* Menu buttons — overflow-hidden clips anything that doesn't fit */}
@@ -722,7 +723,7 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
                 <div
                   key={menu.id}
                   ref={(el) => { menuBtnRefs.current[i] = el; }}
-                  className={["relative shrink-0", i >= visibleMenuCount ? "hidden" : ""].join(" ")}
+                  className={["relative shrink-0 ", i >= visibleMenuCount ? "hidden" : ""].join(" ")}
                 >
                   <TopMenuButton
                     label={menu.label}
@@ -753,8 +754,9 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
               </div>
             )}
           </div>
+          )}
 
-          <div className="h-5 w-px shrink-0 bg-daw-border" />
+          {!_isMac && <div className="h-5 w-px shrink-0 bg-daw-border" />}
 
           <div className="relative flex min-w-0 max-w-[220px] items-center px-1">
             <button

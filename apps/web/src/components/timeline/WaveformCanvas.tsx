@@ -103,7 +103,15 @@ export const WaveformCanvas = memo(function WaveformCanvas({
   }, [peaks, width, height, color, muted, selected, clipOffset, clipDuration, sampleRate, sourceDuration, status]);
 
   const isReady = status === "ready" || (!status && !!peaks && peaks.peaks.length > 0);
-  const showLoading = !isReady && (status === "loading" || status === "idle" || (!status && !peaks));
+  const showLoading = !isReady && (
+    status === "loading" ||
+    status === "idle" ||
+    status === "pending" ||
+    status === "copying" ||
+    status === "indexing" ||
+    status === "generating-peaks" ||
+    (!status && !peaks)
+  );
   const showError = status === "error" || status === "missing";
 
   return (
@@ -121,7 +129,11 @@ export const WaveformCanvas = memo(function WaveformCanvas({
             </span>
           ) : showLoading ? (
             <span className="rounded border border-white/10 bg-black/20 px-1.5 py-0.5 text-[9px] font-medium tabular-nums text-white/45">
-              {progress > 0 ? `waveform ${Math.round(progress * 100)}%` : "Generating waveform..."}
+              {status === "pending" || status === "copying" || status === "indexing"
+                ? "Importing..."
+                : progress > 0
+                  ? `waveform ${Math.round(progress * 100)}%`
+                  : "Waveform pending"}
             </span>
           ) : null}
         </div>

@@ -312,7 +312,16 @@ export type WaveformPeaks = {
   duration?: number;
 };
 
-export type WaveformStatus = "idle" | "loading" | "ready" | "error" | "missing";
+export type WaveformStatus =
+  | "idle"
+  | "pending"
+  | "copying"
+  | "indexing"
+  | "generating-peaks"
+  | "loading"
+  | "ready"
+  | "error"
+  | "missing";
 
 // ── Automation ────────────────────────────────────────────────────────────────
 

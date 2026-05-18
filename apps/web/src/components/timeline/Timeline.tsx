@@ -10,10 +10,10 @@ import { useUIStore, type ArrangementTool, type MarqueeSelectionState } from "..
 import { useProjectStore } from "../../store/projectStore";
 import { isPrimaryModifier } from "../../hooks/useModifierKeys";
 import { secondsPerBeat, snapTime, timelineXToTime } from "../../utils/musicalTime";
-import { decodeAndAddAudioFile, addFileToTimeline } from "../../utils/importAudioToProject";
+import { addFileToTimeline, importNativeAudioPathToTimeline } from "../../utils/importAudioToProject";
+import { audioImportQueue } from "../../engine/AudioImportQueue";
 import { TIMELINE_Z } from "../../utils/timelineZ";
 import { HEADER_WIDTH } from "../../theme";
-import { platform } from "../../platform";
 
 const MIN_PPS = 10;
 const MAX_PPS = 800;
@@ -117,20 +117,12 @@ export function Timeline() {
       }
 
       if (nativeAudioPath) {
-        const file = await platform.fileSystem.readAudioFile(nativeAudioPath);
-        if (file) {
-          const dawFile = await decodeAndAddAudioFile(file);
-          if (dawFile) addFileToTimeline(dawFile, time);
-        }
+        await importNativeAudioPathToTimeline(nativeAudioPath, time);
         return;
       }
 
       if (!fileList.length) return;
-
-      for (const f of fileList) {
-        const dawFile = await decodeAndAddAudioFile(f);
-        if (dawFile) addFileToTimeline(dawFile, time);
-      }
+      audioImportQueue.enqueueFiles(fileList, { startTime: time });
     } finally {
       resetDragState();
     }

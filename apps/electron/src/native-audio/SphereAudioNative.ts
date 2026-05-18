@@ -65,10 +65,24 @@ interface NativeDeviceInfo {
 }
 
 interface NativeMeterSnapshot {
+  tracks?: NativeTrackMeterSnapshot[];
   masterPeakL: number;
   masterPeakR: number;
   masterRmsL:  number;
   masterRmsR:  number;
+}
+
+interface NativeTrackMeterSnapshot {
+  trackId?: string;
+  track_id?: string;
+  peakL?: number;
+  peakR?: number;
+  rmsL?: number;
+  rmsR?: number;
+  peak_l?: number;
+  peak_r?: number;
+  rms_l?: number;
+  rms_r?: number;
 }
 
 interface NativeDeviceOpenConfig {
@@ -141,6 +155,7 @@ interface NativeEngine {
   // DAUx backend selection
   listDauxBackends(): NativeDauxBackendInfo[];
   openDaux(config: NativeDauxConfig): void;
+  openDauxSafe(config: NativeDauxConfig): void;
   getDauxStatus(): NativeDauxStatus;
 }
 
@@ -437,8 +452,17 @@ export class SphereAudioNative {
       return { tracks: {}, master: { left: 0, right: 0 }, timestamp: Date.now() };
     }
     const m = this._engine.getMeters();
+    const tracks: SphereMeterSnapshot["tracks"] = {};
+    for (const meter of m.tracks ?? []) {
+      const trackId = meter.trackId ?? meter.track_id;
+      if (!trackId) continue;
+      tracks[trackId] = {
+        left:  meter.peakL ?? meter.peak_l ?? 0,
+        right: meter.peakR ?? meter.peak_r ?? 0,
+      };
+    }
     return {
-      tracks:    {},
+      tracks,
       master:    { left: m.masterPeakL, right: m.masterPeakR },
       timestamp: Date.now(),
     };
@@ -468,6 +492,25 @@ export class SphereAudioNative {
     const outputDeviceId = resolveNativeDeviceId(config.outputDeviceId, outputs, "output");
     const backendId = config.backendId === "wasapi" ? "wasapi-shared" : config.backendId;
     this._engine.openDaux({
+      backendId,
+      outputDeviceId,
+      sampleRate:      config.sampleRate,
+      bufferSize:      config.bufferSize,
+      mmcssPriority:   config.mmcssPriority ?? true,
+      safeMode:        config.safeMode ?? false,
+    });
+  }
+
+  /**
+   * Safe variant: tries the new config and restores the previous backend on failure.
+   * Throws with the error message so callers can show it in the UI.
+   */
+  openDauxSafe(config: SphereDauxConfig): void {
+    if (!this._engine) throw new Error("[SphereAudio] Engine not available");
+    const outputs = this.listOutputDevices() as NativeDeviceInfo[];
+    const outputDeviceId = resolveNativeDeviceId(config.outputDeviceId, outputs, "output");
+    const backendId = config.backendId === "wasapi" ? "wasapi-shared" : config.backendId;
+    this._engine.openDauxSafe({
       backendId,
       outputDeviceId,
       sampleRate:      config.sampleRate,

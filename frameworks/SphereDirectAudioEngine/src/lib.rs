@@ -281,7 +281,34 @@ impl SphereDirectAudioEngine {
     /// ```
     #[napi]
     pub fn open_daux(&self, config: JsDauxConfig) -> napi::Result<()> {
-        self.inner.open_daux(config).map_err(Into::into)
+        // Catch any Rust panic so it does not cross the NAPI boundary and
+        // terminate the Electron process.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.inner.open_daux(config).map_err(Into::into)
+        }))
+        .unwrap_or_else(|_| {
+            Err(napi::Error::new(
+                napi::Status::GenericFailure,
+                "WASAPI: internal panic during audio backend open".to_string(),
+            ))
+        })
+    }
+
+    /// Safe variant of `openDaux` that restores the previous working backend if
+    /// the requested config fails.  The stream is always left in an open (or
+    /// previously-open) state.  On failure the returned error describes what
+    /// happened and which backend was restored.
+    #[napi]
+    pub fn open_daux_safe(&self, config: JsDauxConfig) -> napi::Result<()> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.inner.open_daux_safe(config).map_err(Into::into)
+        }))
+        .unwrap_or_else(|_| {
+            Err(napi::Error::new(
+                napi::Status::GenericFailure,
+                "WASAPI: internal panic during safe audio backend switch".to_string(),
+            ))
+        })
     }
 
     /// Return the current DAUx runtime status: backend, device, latency, glitches.

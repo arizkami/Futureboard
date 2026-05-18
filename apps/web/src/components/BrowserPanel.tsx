@@ -24,7 +24,7 @@ import { useProjectStore } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
 import { BROWSER_WIDTH } from "../theme";
 import type { DawFile, DawProjectAsset } from "../types/daw";
-import { decodeAndAddAudioFile } from "../utils/importAudioToProject";
+import { decodeAndAddAudioFile, importNativeAudioPathToBrowser } from "../utils/importAudioToProject";
 import { audioAssetManager } from "../engine/AudioAssetManager";
 import { platform } from "../platform";
 import type {
@@ -1019,8 +1019,7 @@ export function BrowserPanel({
 
   const importNativeEntry = async (entry: BrowserFileEntry) => {
     if (entry.kind !== "audio") return;
-    const file = await platform.fileSystem.readAudioFile(entry.path);
-    if (file) await decodeAndAddAudioFile(file);
+    await importNativeAudioPathToBrowser(entry.path);
   };
 
   const previewNativeEntry = async (entry: BrowserFileEntry) => {
@@ -1084,9 +1083,7 @@ export function BrowserPanel({
         e.preventDefault();
         const list = e.dataTransfer.files;
         if (!list?.length) return;
-        for (const f of Array.from(list)) {
-          await decodeAndAddAudioFile(f);
-        }
+        for (const f of Array.from(list)) void decodeAndAddAudioFile(f);
       }}
     >
       {/* ── Header ─────────────────────────────────────────────────────────── */}

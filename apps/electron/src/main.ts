@@ -3,8 +3,10 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  Menu,
   protocol,
   shell,
+  type MenuItemConstructorOptions,
   type IpcMainInvokeEvent,
 } from "electron";
 import path from "node:path";
@@ -23,12 +25,15 @@ import {
   type PickedAudioFile,
   type SaveDialogResult,
   type WaveformCacheEntryIpc,
+  type WavPeakResult,
   type FolderProjectCreateOptions,
   type FolderProjectCreateResult,
   type FolderImportAudioResult,
   type BrowseFolderResult,
   type GpuFeatureStatus,
 } from "./ipc/channels.js";
+import { APP_MENUS, type AppMenuGroup, type AppMenuItem } from "./generated/menuItems.js";
+import { initAutoUpdater } from "./updater.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -238,6 +243,108 @@ function windowIconPath(): string {
     return path.join(process.resourcesPath, "icons", iconFile);
   }
   return path.join(__dirname, "..", "icons", iconFile);
+}
+
+function sendCommandToFocusedWindow(commandId: string): void {
+  BrowserWindow.getFocusedWindow()?.webContents.send("app-command", commandId);
+}
+
+function electronAccelerator(accelerator?: string): string | undefined {
+  if (!accelerator) return undefined;
+  return accelerator
+    .replace(/\bCtrl\+/g, "CommandOrControl+")
+    .replace(/\bEsc\b/g, "Escape")
+    .replace(/\bArrowLeft\b/g, "Left")
+    .replace(/\bArrowRight\b/g, "Right")
+    .replace(/\bArrowUp\b/g, "Up")
+    .replace(/\bArrowDown\b/g, "Down");
+}
+
+function standardRoleForItem(item: Extract<AppMenuItem, { type?: "item" }>): MenuItemConstructorOptions["role"] | undefined {
+  if (item.role === "quit" || item.role === "minimize") return item.role;
+  switch (item.action) {
+    case "edit:cut": return "cut";
+    case "edit:copy": return "copy";
+    case "edit:paste": return "paste";
+    case "edit:select-all": return "selectAll";
+    case "window:minimize": return "minimize";
+    case "window:toggle-fullscreen": return "togglefullscreen";
+    default: return undefined;
+  }
+}
+
+function buildNativeMenuItem(item: AppMenuItem): MenuItemConstructorOptions {
+  if (item.type === "separator") return { type: "separator" };
+  if (item.type === "submenu") {
+    return {
+      label: item.label,
+      enabled: item.enabled ?? true,
+      submenu: item.children.map(buildNativeMenuItem),
+    };
+  }
+
+  const role = standardRoleForItem(item);
+  const options: MenuItemConstructorOptions = {
+    label: item.label,
+    enabled: item.enabled ?? true,
+    accelerator: electronAccelerator(item.accelerator),
+  };
+  if (item.checked != null) {
+    options.type = "checkbox";
+    options.checked = item.checked;
+  }
+  if (role) {
+    options.role = role;
+  } else if (item.action) {
+    options.click = () => sendCommandToFocusedWindow(item.action!);
+  }
+  return options;
+}
+
+function buildNativeMenuGroup(group: AppMenuGroup): MenuItemConstructorOptions {
+  return {
+    label: group.label,
+    submenu: group.children.map(buildNativeMenuItem),
+  };
+}
+
+function buildMacAppMenu(): MenuItemConstructorOptions {
+  return {
+    label: app.name || "Futureboard Studio",
+    submenu: [
+      { label: "About Futureboard Studio", click: () => sendCommandToFocusedWindow("app:about") },
+      { type: "separator" },
+      {
+        label: "Preferences...",
+        accelerator: "CommandOrControl+,",
+        click: () => sendCommandToFocusedWindow("app:preferences"),
+      },
+      {
+        label: "Keyboard Shortcuts",
+        accelerator: "CommandOrControl+/",
+        click: () => sendCommandToFocusedWindow("help:keyboard-shortcuts"),
+      },
+      { type: "separator" },
+      { role: "services" },
+      { type: "separator" },
+      { role: "hide" },
+      { role: "hideOthers" },
+      { role: "unhide" },
+      { type: "separator" },
+      { role: "quit" },
+    ],
+  };
+}
+
+function installApplicationMenu(): void {
+  if (!isMac) {
+    Menu.setApplicationMenu(null);
+    return;
+  }
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    buildMacAppMenu(),
+    ...APP_MENUS.map(buildNativeMenuGroup),
+  ]));
 }
 
 function createWindow(): BrowserWindow {
@@ -656,6 +763,160 @@ async function statAudioFile(filePath: string): Promise<AudioFileStat | null> {
 
 // ── Folder-based project helpers ───────────────────────────────────────────────
 
+type WavInfo = {
+  sampleRate: number;
+  channels: number;
+  bitsPerSample: number;
+  audioFormat: number;
+  dataOffset: number;
+  dataBytes: number;
+  duration: number;
+};
+
+async function readWavInfo(filePath: string): Promise<WavInfo | null> {
+  const handle = await fs.open(filePath, "r");
+  try {
+    const header = Buffer.alloc(65536);
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    const view = header.subarray(0, bytesRead);
+    if (view.length < 44 || view.toString("ascii", 0, 4) !== "RIFF" || view.toString("ascii", 8, 12) !== "WAVE") {
+      return null;
+    }
+
+    let offset = 12;
+    let sampleRate = 0;
+    let channels = 0;
+    let bitsPerSample = 0;
+    let audioFormat = 0;
+    let dataOffset = 0;
+    let dataBytes = 0;
+    while (offset + 8 <= view.length) {
+      const id = view.toString("ascii", offset, offset + 4);
+      const size = view.readUInt32LE(offset + 4);
+      const chunk = offset + 8;
+      if (id === "fmt " && chunk + 16 <= view.length) {
+        audioFormat = view.readUInt16LE(chunk);
+        channels = view.readUInt16LE(chunk + 2);
+        sampleRate = view.readUInt32LE(chunk + 4);
+        bitsPerSample = view.readUInt16LE(chunk + 14);
+      } else if (id === "data") {
+        dataOffset = chunk;
+        dataBytes = size;
+        break;
+      }
+      offset = chunk + size + (size % 2);
+    }
+
+    if (!sampleRate || !channels || !bitsPerSample || !dataOffset || !dataBytes) return null;
+    const bytesPerFrame = channels * (bitsPerSample / 8);
+    return {
+      sampleRate,
+      channels,
+      bitsPerSample,
+      audioFormat,
+      dataOffset,
+      dataBytes,
+      duration: dataBytes / bytesPerFrame / sampleRate,
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function generateWavPeaksFromPath(filePath: string, fileId: string, samplesPerPeak: number): Promise<WavPeakResult | null> {
+  const normalized = path.normalize(filePath);
+  if (!isImportableAudioPath(normalized) || path.extname(normalized).toLowerCase() !== ".wav") return null;
+  const info = await readWavInfo(normalized);
+  if (!info || info.audioFormat !== 1 || ![16, 24, 32].includes(info.bitsPerSample)) return null;
+
+  const bytesPerSample = info.bitsPerSample / 8;
+  const bytesPerFrame = bytesPerSample * info.channels;
+  const totalFrames = Math.floor(info.dataBytes / bytesPerFrame);
+  const safeSamplesPerPeak = Math.max(1, Math.floor(samplesPerPeak));
+  const peakCount = Math.ceil(totalFrames / safeSamplesPerPeak);
+  const peaks = new Int16Array(peakCount * info.channels * 2);
+  const min = new Float32Array(info.channels);
+  const max = new Float32Array(info.channels);
+  resetPeakMinMax(min, max);
+
+  const handle = await fs.open(normalized, "r");
+  try {
+    const chunk = Buffer.alloc(1024 * 1024);
+    let byteOffset = info.dataOffset;
+    const dataEnd = info.dataOffset + info.dataBytes;
+    let frameIndex = 0;
+    let currentPeak = 0;
+
+    while (byteOffset < dataEnd) {
+      const remaining = dataEnd - byteOffset;
+      const wanted = Math.min(chunk.length, remaining);
+      const alignedWanted = remaining <= chunk.length
+        ? wanted
+        : Math.max(bytesPerFrame, Math.floor(wanted / bytesPerFrame) * bytesPerFrame);
+      const { bytesRead } = await handle.read(chunk, 0, alignedWanted, byteOffset);
+      if (bytesRead <= 0) break;
+      const frameCount = Math.floor(bytesRead / bytesPerFrame);
+
+      for (let frame = 0; frame < frameCount; frame++) {
+        const frameByte = frame * bytesPerFrame;
+        for (let ch = 0; ch < info.channels; ch++) {
+          const sampleByte = frameByte + ch * bytesPerSample;
+          const value = readPcmSample(chunk, sampleByte, info.bitsPerSample);
+          if (value < min[ch]) min[ch] = value;
+          if (value > max[ch]) max[ch] = value;
+        }
+        frameIndex++;
+        if (frameIndex % safeSamplesPerPeak === 0) {
+          writePeak(peaks, currentPeak, info.channels, min, max);
+          currentPeak++;
+          resetPeakMinMax(min, max);
+        }
+      }
+
+      byteOffset += bytesRead;
+    }
+
+    if (currentPeak < peakCount) writePeak(peaks, currentPeak, info.channels, min, max);
+  } finally {
+    await handle.close();
+  }
+
+  return {
+    fileId,
+    sampleRate: info.sampleRate,
+    channelCount: info.channels,
+    duration: info.duration,
+    samplesPerPeak: safeSamplesPerPeak,
+    peakCount,
+    peaks: Array.from(peaks),
+  };
+}
+
+function readPcmSample(buffer: Buffer, offset: number, bitsPerSample: number): number {
+  if (bitsPerSample === 16) return buffer.readInt16LE(offset) / 32768;
+  if (bitsPerSample === 24) {
+    let sample = buffer[offset] | (buffer[offset + 1] << 8) | (buffer[offset + 2] << 16);
+    if (sample & 0x800000) sample |= 0xff000000;
+    return sample / 8388608;
+  }
+  return buffer.readInt32LE(offset) / 2147483648;
+}
+
+function resetPeakMinMax(min: Float32Array, max: Float32Array): void {
+  for (let i = 0; i < min.length; i++) {
+    min[i] = 1;
+    max[i] = -1;
+  }
+}
+
+function writePeak(peaks: Int16Array, peakIndex: number, channels: number, min: Float32Array, max: Float32Array): void {
+  for (let ch = 0; ch < channels; ch++) {
+    const base = (peakIndex * channels + ch) * 2;
+    peaks[base] = Math.max(-32768, Math.min(32767, Math.round(min[ch] * 32767)));
+    peaks[base + 1] = Math.max(-32768, Math.min(32767, Math.round(max[ch] * 32767)));
+  }
+}
+
 const PROJECT_SUBFOLDERS = [
   path.join("Cache", "Waveform"),
   path.join("Cache", "Peaks"),
@@ -756,6 +1017,23 @@ function registerIpcHandlers(): void {
       try {
         return await statAudioFile(filePath);
       } catch {
+        return null;
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.FsGenerateWavPeaks,
+    async (_event, filePath: unknown, fileId: unknown, samplesPerPeak: unknown): Promise<WavPeakResult | null> => {
+      if (!isValidString(filePath) || !isValidString(fileId)) return null;
+      try {
+        return await generateWavPeaksFromPath(
+          filePath,
+          fileId,
+          typeof samplesPerPeak === "number" && Number.isFinite(samplesPerPeak) ? samplesPerPeak : 8192,
+        );
+      } catch (err) {
+        console.error("[WaveformPeaks] generate failed:", err);
         return null;
       }
     },
@@ -1174,6 +1452,8 @@ app.on("second-instance", () => {
 });
 
 app.whenReady().then(async () => {
+  installApplicationMenu();
+
   // Log GPU diagnostics so we can verify hardware acceleration is active.
   try {
     const gpuFeatures = app.getGPUFeatureStatus();
@@ -1201,6 +1481,8 @@ app.whenReady().then(async () => {
   // Register SphereDirectAudioEngine IPC handlers and try to start the native engine.
   const { registerSphereAudioHandlers } = await import("./native-audio/ipc-handlers.js");
   registerSphereAudioHandlers(__dirname);
+
+  initAutoUpdater();
 
   createWindow();
 

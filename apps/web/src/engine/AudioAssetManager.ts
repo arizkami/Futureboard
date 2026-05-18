@@ -22,7 +22,17 @@ export type AudioAssetResolution =
 export type ImportedAudioAsset = Pick<
   DawFile,
   "storageProvider" | "storageKey" | "cacheKey" | "waveformCacheKeys" | "size" | "lastModified" | "originalFileName" | "relativePath"
->;
+> & { name?: string };
+
+type AudioImportSource = {
+  name: string;
+  size: number;
+  lastModified?: number;
+  type?: string;
+  mimeType?: string;
+  file?: File;
+  sourcePath?: string;
+};
 
 class AudioAssetManager {
   private nativePathForFile(file: File): string | undefined {
@@ -32,11 +42,15 @@ class AudioAssetManager {
     return f.__futureboardPath ?? electronPath ?? bridgedPath;
   }
 
-  createAssetManifest(fileId: FileId, file: File): ImportedAudioAsset {
+  createAssetManifest(fileId: FileId, file: File | AudioImportSource): ImportedAudioAsset {
     // Prefer the preload-injected path (picked via native dialog), then
     // Electron's File.path / webUtils.getPathForFile (drag-and-drop from OS).
     // Both are absolute filesystem paths. Ignore empty strings / null.
-    const nativePath = this.nativePathForFile(file);
+    const nativePath = "sourcePath" in file && file.sourcePath
+      ? file.sourcePath
+      : file instanceof File
+        ? this.nativePathForFile(file)
+        : undefined;
     const storageKey = nativePath ?? `audio:${fileId}`;
     return {
       size: file.size,
@@ -49,10 +63,34 @@ class AudioAssetManager {
     };
   }
 
-  async saveImportedAudioAsset(fileId: FileId, file: File): Promise<ImportedAudioAsset> {
+  async saveImportedAudioAsset(fileId: FileId, file: File | AudioImportSource): Promise<ImportedAudioAsset> {
     const manifest = this.createAssetManifest(fileId, file);
+    const nativePath = "sourcePath" in file && file.sourcePath
+      ? file.sourcePath
+      : file instanceof File
+        ? this.nativePathForFile(file)
+        : undefined;
+
+    if (nativePath && platform.folderProject.getProjectRoot()) {
+      const imported = await platform.folderProject.importAudio(nativePath);
+      if (imported) {
+        return {
+          ...manifest,
+          name: imported.name,
+          size: imported.size,
+          lastModified: imported.lastModified,
+          originalFileName: file.name,
+          storageProvider: "project-folder",
+          storageKey: imported.absolutePath,
+          cacheKey: imported.absolutePath,
+          relativePath: imported.relativePath,
+        };
+      }
+    }
+
     if (manifest.storageProvider === "indexeddb") {
-      await audioStorage.save(fileId, file);
+      const blob = file instanceof File ? file : file.file;
+      if (blob) await audioStorage.save(fileId, blob);
     }
     return manifest;
   }

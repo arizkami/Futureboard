@@ -7,6 +7,7 @@ export const IpcChannels = {
   FsPickAudioFiles: "daw:fs:pickAudioFiles",
   FsReadAudioFile: "daw:fs:readAudioFile",
   FsStatAudioFile: "daw:fs:statAudioFile",
+  FsGenerateWavPeaks: "daw:fs:generateWavPeaks",
   FsRevealInFileManager: "daw:fs:revealInFileManager",
   FsBrowserRoots: "daw:fs:browserRoots",
   FsBrowserListDir: "daw:fs:browserListDir",
@@ -70,6 +71,7 @@ export const IpcChannels = {
   // DAUx low-latency backend selection
   SphereAudioListDauxBackends: "daw:sphere:listDauxBackends",
   SphereAudioOpenDaux:         "daw:sphere:openDaux",
+  SphereAudioOpenDauxSafe:     "daw:sphere:openDauxSafe",
   SphereAudioGetDauxStatus:    "daw:sphere:getDauxStatus",
 } as const;
 
@@ -90,6 +92,16 @@ export type AudioFileStat = {
   path: string;
   size: number;
   lastModified: number;
+};
+
+export type WavPeakResult = {
+  fileId: string;
+  sampleRate: number;
+  channelCount: number;
+  duration: number;
+  samplesPerPeak: number;
+  peakCount: number;
+  peaks: number[];
 };
 
 export type BrowserRootEntry = {
@@ -297,4 +309,6 @@ export type SphereDauxStatus = {
   glitchCount:         number;
   /** MMCSS priority active on audio thread (Windows only) */
   mmcssActive:         boolean;
+  /** Last backend error (e.g. WASAPI Exclusive failed). Null when healthy. */
+  lastError?:          string | null;
 };

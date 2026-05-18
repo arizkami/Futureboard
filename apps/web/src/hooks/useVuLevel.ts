@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { activeAudioEngine } from "../engine/activeAudioEngine";
+import { meterStore } from "../store/meterStore";
 
 export type StereoLevel = { l: number; r: number };
 
@@ -25,11 +25,10 @@ export function useVuStereoLevels(trackId: string | "master"): StereoLevel {
 
   useEffect(() => {
     let rafId: number;
-    const unsubscribe = activeAudioEngine.subscribeMeters((id, raw) => {
-      if (id !== trackId) return;
+    const unsubscribe = meterStore.subscribe(trackId, (raw) => {
       targetRef.current = {
-        l: rmsToMeter(raw.l),
-        r: rmsToMeter(raw.r),
+        l: rmsToMeter(raw.peakL),
+        r: rmsToMeter(raw.peakR),
       };
     });
 

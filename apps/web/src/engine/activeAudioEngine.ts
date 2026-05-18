@@ -14,6 +14,7 @@ import { useAudioBackendStore, type AudioBackendKind, type AudioBackendRequest }
 import { platform } from "../platform";
 import { audioEngine } from "./AudioEngine";
 import { metronomeScheduler } from "./MetronomeScheduler";
+import { meterStore } from "../store/meterStore";
 
 type ActiveBackend = AdapterSelection["backend"] | "uninitialized";
 
@@ -288,6 +289,8 @@ class ActiveAudioEngine {
       this._setTransport(state);
     });
     this._meterUnsub = selection.adapter.subscribeMeters((trackId, level) => {
+      if (trackId === "master") meterStore.updateMaster(level);
+      else meterStore.updateTrack(trackId, level);
       for (const cb of this._meterCallbacks) {
         cb(trackId, level);
       }

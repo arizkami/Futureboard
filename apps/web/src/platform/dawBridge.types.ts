@@ -28,6 +28,16 @@ export type DawBridgePickedAudioFile = {
 
 export type DawBridgeAudioFileStat = Omit<DawBridgePickedAudioFile, "bytes">;
 
+export type DawBridgeWavPeakResult = {
+  fileId: string;
+  sampleRate: number;
+  channelCount: number;
+  duration: number;
+  samplesPerPeak: number;
+  peakCount: number;
+  peaks: number[];
+};
+
 export type DawBridgeBrowserRootEntry = {
   id: string;
   name: string;
@@ -91,6 +101,7 @@ export interface DawBridgeFs {
   pickAudioFiles(): Promise<DawBridgePickedAudioFile[]>;
   readAudioFile(path: string): Promise<DawBridgePickedAudioFile | null>;
   statAudioFile(path: string): Promise<DawBridgeAudioFileStat | null>;
+  generateWavPeaks(path: string, fileId: string, samplesPerPeak: number): Promise<DawBridgeWavPeakResult | null>;
   browserRoots(): Promise<DawBridgeBrowserRootEntry[]>;
   browserListDir(path: string): Promise<DawBridgeBrowserFileEntry[]>;
   ensureFactoryLibrary(): Promise<DawBridgeBrowserRootEntry[]>;
@@ -260,6 +271,8 @@ export type DawBridgeDauxStatus = {
   glitchCount:         number;
   /** MMCSS priority active on audio thread (Windows only) */
   mmcssActive:         boolean;
+  /** Last backend error (e.g. WASAPI Exclusive failed reason). Null when engine is healthy. */
+  lastError?:          string | null;
 };
 
 /**
@@ -288,7 +301,17 @@ export interface DawBridgeSphereAudio {
   // DAUx backend selection
   listDauxBackends():                                                        Promise<DawBridgeDauxBackendInfo[]>;
   openDaux(config: DawBridgeDauxConfig):                                     Promise<void>;
+  /** Safe variant: restores previous backend if new config fails. */
+  openDauxSafe(config: DawBridgeDauxConfig):                                 Promise<void>;
   getDauxStatus():                                                           Promise<DawBridgeDauxStatus>;
+}
+
+export interface FutureboardCommandBridge {
+  onCommand(callback: (commandId: string) => void): () => void;
+}
+
+export interface FutureboardBridge {
+  commands: FutureboardCommandBridge;
 }
 
 export interface DawElectronBridge {
@@ -311,6 +334,7 @@ export interface DawElectronBridge {
 declare global {
   interface Window {
     dawElectron?: DawElectronBridge;
+    futureboard?: FutureboardBridge;
   }
 }
 

@@ -160,6 +160,7 @@ pub fn fill_output_f32(
     let mut sum_sq_l = 0.0f32;
     let mut sum_sq_r = 0.0f32;
     let mut frames = 0u64;
+    runtime.begin_meter_block();
 
     if channels >= 2 {
         for frame in data.chunks_mut(channels) {
@@ -216,6 +217,7 @@ pub fn fill_output_f32(
     } else {
         (peak_l, rms_l)
     };
+    runtime.end_meter_block(frames);
 
     local.prev_peak_l = smooth_peak(local.prev_peak_l, peak_l, PEAK_DECAY);
     local.prev_peak_r = smooth_peak(local.prev_peak_r, pk_r, PEAK_DECAY);

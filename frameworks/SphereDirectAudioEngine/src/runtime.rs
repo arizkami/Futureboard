@@ -5,6 +5,7 @@
 //! the graph and can render without touching locks or parsing JSON.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::audio_file::{load_audio_file, AudioFileBuffer};
@@ -23,6 +24,49 @@ pub struct RuntimeTrack {
     pub output_track_id: Option<String>,
     pub inserts: Vec<RuntimeInsert>,
     pub sends: Vec<RuntimeSend>,
+    pub meter: Arc<RuntimeTrackMeter>,
+    pub meter_peak_l: f32,
+    pub meter_peak_r: f32,
+    pub meter_sum_sq_l: f32,
+    pub meter_sum_sq_r: f32,
+}
+
+#[derive(Debug, Default)]
+pub struct RuntimeTrackMeter {
+    peak_l: AtomicU32,
+    peak_r: AtomicU32,
+    rms_l: AtomicU32,
+    rms_r: AtomicU32,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeTrackMeterSnapshot {
+    pub track_id: String,
+    pub peak_l: f32,
+    pub peak_r: f32,
+    pub rms_l: f32,
+    pub rms_r: f32,
+}
+
+impl RuntimeTrackMeter {
+    #[inline]
+    fn store(&self, peak_l: f32, peak_r: f32, rms_l: f32, rms_r: f32) {
+        self.peak_l.store(f32_store(peak_l), Ordering::Relaxed);
+        self.peak_r.store(f32_store(peak_r), Ordering::Relaxed);
+        self.rms_l.store(f32_store(rms_l), Ordering::Relaxed);
+        self.rms_r.store(f32_store(rms_r), Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn load(&self, track_id: &str) -> RuntimeTrackMeterSnapshot {
+        RuntimeTrackMeterSnapshot {
+            track_id: track_id.to_string(),
+            peak_l: f32_load(self.peak_l.load(Ordering::Relaxed)),
+            peak_r: f32_load(self.peak_r.load(Ordering::Relaxed)),
+            rms_l: f32_load(self.rms_l.load(Ordering::Relaxed)),
+            rms_r: f32_load(self.rms_r.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -295,6 +339,11 @@ impl RuntimeProject {
                         enabled: send.enabled,
                     })
                     .collect(),
+                meter: Arc::new(RuntimeTrackMeter::default()),
+                meter_peak_l: 0.0,
+                meter_peak_r: 0.0,
+                meter_sum_sq_l: 0.0,
+                meter_sum_sq_r: 0.0,
             })
             .collect();
         let has_solo = tracks.iter().any(|t| t.solo);
@@ -316,6 +365,46 @@ impl RuntimeProject {
                     && project_sample < clip.start_sample.saturating_add(clip.duration_samples)
             })
             .count()
+    }
+
+    #[inline]
+    pub fn begin_meter_block(&mut self) {
+        for track in &mut self.tracks {
+            track.meter_peak_l = 0.0;
+            track.meter_peak_r = 0.0;
+            track.meter_sum_sq_l = 0.0;
+            track.meter_sum_sq_r = 0.0;
+        }
+    }
+
+    #[inline]
+    pub fn accumulate_track_meter(&mut self, track_index: usize, l: f32, r: f32) {
+        let Some(track) = self.tracks.get_mut(track_index) else {
+            return;
+        };
+        let abs_l = l.abs();
+        let abs_r = r.abs();
+        track.meter_peak_l = track.meter_peak_l.max(abs_l);
+        track.meter_peak_r = track.meter_peak_r.max(abs_r);
+        track.meter_sum_sq_l += l * l;
+        track.meter_sum_sq_r += r * r;
+    }
+
+    #[inline]
+    pub fn end_meter_block(&mut self, frames: u64) {
+        let frame_count = frames.max(1) as f32;
+        for track in &mut self.tracks {
+            let rms_l = (track.meter_sum_sq_l / frame_count).sqrt();
+            let rms_r = (track.meter_sum_sq_r / frame_count).sqrt();
+            track.meter.store(track.meter_peak_l, track.meter_peak_r, rms_l, rms_r);
+        }
+    }
+
+    pub fn meter_snapshots(&self) -> Vec<RuntimeTrackMeterSnapshot> {
+        self.tracks
+            .iter()
+            .map(|track| track.meter.load(&track.id))
+            .collect()
     }
 
     #[inline]
@@ -460,4 +549,14 @@ fn build_clip_runtime(
 #[inline]
 fn seconds_to_samples(seconds: f64, sample_rate: u32) -> u64 {
     (seconds * sample_rate as f64).round().max(0.0) as u64
+}
+
+#[inline]
+fn f32_store(v: f32) -> u32 {
+    v.to_bits()
+}
+
+#[inline]
+fn f32_load(v: u32) -> f32 {
+    f32::from_bits(v)
 }

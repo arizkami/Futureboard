@@ -5,6 +5,7 @@ import { waveformCache, buildCacheKey, entryPeaksAsInt16, SAMPLES_PER_PEAK, WAVE
 import { platform } from "../platform";
 import { SoundTouchNode } from "@soundtouchjs/audio-worklet";
 import soundTouchProcessorUrl from "@soundtouchjs/audio-worklet/processor?url";
+import { audioImportQueue } from "./AudioImportQueue";
 
 type OnPeaks = (fileId: FileId, peaks: WaveformPeaks) => void;
 type OnWaveformProgress = (fileId: FileId, progress: number) => void;
@@ -138,6 +139,29 @@ class AudioEngine {
 
   getBuffer(fileId: FileId): LoadedBuffer | undefined {
     return this.bufferCache.get(fileId);
+  }
+
+  adoptDecodedBuffer(file: DawFile, audioBuffer: AudioBuffer): void {
+    if (this.bufferCache.has(file.id)) return;
+    this.bufferCache.set(file.id, {
+      audioBuffer,
+      peaks: {
+        fileId: file.id,
+        samplesPerPeak: SAMPLES_PER_PEAK,
+        channelCount: audioBuffer.numberOfChannels,
+        peaks: new Int16Array(0),
+        sampleRate: audioBuffer.sampleRate,
+        duration: audioBuffer.duration,
+      },
+    });
+  }
+
+  async ensureBuffer(file: DawFile): Promise<AudioBuffer | null> {
+    const existing = this.bufferCache.get(file.id)?.audioBuffer;
+    if (existing) return existing;
+    const decoded = await audioImportQueue.ensureDecodedBuffer(file);
+    if (decoded) this.adoptDecodedBuffer(file, decoded);
+    return decoded;
   }
 
   get destination(): AudioDestinationNode {

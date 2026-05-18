@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { platform } from "../platform";
+import { audioImportQueue } from "../engine/AudioImportQueue";
 
 type GpuInfo = {
   hardwareAccelerationEnabled: boolean;
@@ -15,6 +16,7 @@ type Stats = {
   gpuInfo: GpuInfo;
   webgl: string;
   webgpu: string;
+  audioImport: ReturnType<typeof audioImportQueue.getDebugStats>;
 };
 
 function getWebGLStatus(): string {
@@ -50,6 +52,7 @@ export function PerfMonitor({ visible }: { visible: boolean }) {
     gpuInfo: null,
     webgl: "...",
     webgpu: "...",
+    audioImport: audioImportQueue.getDebugStats(),
   });
 
   const frameTimesRef = useRef<number[]>([]);
@@ -87,7 +90,12 @@ export function PerfMonitor({ visible }: { visible: boolean }) {
       const avgMs = times.reduce((a, b) => a + b, 0) / times.length;
       const fps = Math.round(1000 / avgMs);
 
-      setStats((s) => ({ ...s, fps, frameMs: Math.round(avgMs * 10) / 10 }));
+      setStats((s) => ({
+        ...s,
+        fps,
+        frameMs: Math.round(avgMs * 10) / 10,
+        audioImport: audioImportQueue.getDebugStats(),
+      }));
       rafRef.current = requestAnimationFrame(tick);
     };
 
@@ -99,7 +107,7 @@ export function PerfMonitor({ visible }: { visible: boolean }) {
 
   if (!visible) return null;
 
-  const { fps, frameMs, gpuInfo, webgl, webgpu } = stats;
+  const { fps, frameMs, gpuInfo, webgl, webgpu, audioImport } = stats;
   const hwAccel = gpuInfo?.hardwareAccelerationEnabled ?? (platform.kind !== "electron" ? true : null);
   const canvasOop = gpuInfo?.features?.["canvas_oop_rasterization"] ?? null;
 
@@ -146,6 +154,12 @@ export function PerfMonitor({ visible }: { visible: boolean }) {
         ok={webgpu.startsWith("OK")}
         warn={false}
       />
+
+      <Divider />
+      <Row label="Import Q" value={`${audioImport.importQueueLength} queued / ${audioImport.activeJobs} active`} />
+      <Row label="Sources" value={`${audioImport.sourceTotalMB.toFixed(1)} MB`} />
+      <Row label="Decoded" value={`${audioImport.decodedBuffersCount} / ${audioImport.decodedBuffersMB.toFixed(1)} MB`} />
+      <Row label="Peaks" value={`${audioImport.peakCacheMB.toFixed(1)} MB`} />
 
       <div className="mt-1.5 text-[9px] text-white/30">Ctrl+Shift+P to toggle</div>
     </div>

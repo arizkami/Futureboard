@@ -17,6 +17,7 @@ import { buildDecodedCacheKey } from "./audio/audioCacheKeys";
 import { useMetronomeStore } from "./store/metronomeStore";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { importAudioFilesAsNewTracks } from "./utils/importAudioToProject";
+import { runAction } from "./menu/actionRunner";
 import { platform } from "./platform";
 import { audioDeviceService } from "./engine/AudioDeviceService";
 import { midiDeviceService } from "./engine/MidiDeviceService";
@@ -102,6 +103,12 @@ export default function App() {
   const [perfVisible, setPerfVisible] = useState(false);
   const startupHandledRef = useRef(false);
   useKeyboardShortcuts();
+
+  useEffect(() => {
+    return window.futureboard?.commands.onCommand((commandId) => {
+      runAction(commandId);
+    });
+  }, []);
 
   useEffect(() => {
     activeAudioEngine.init().catch(console.error);

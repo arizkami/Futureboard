@@ -1,7 +1,7 @@
 // Ultra-lean sandboxed preload. Avoid heavy imports and any work beyond
 // declaring + freezing the bridge object. Everything here runs on the
 // renderer's hot startup path.
-import { contextBridge, ipcRenderer, webUtils } from "electron";
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from "electron";
 import {
   IpcChannels,
   type ExternalWindowConfig,
@@ -11,6 +11,7 @@ import {
   type PickedAudioFile,
   type SaveDialogResult,
   type WaveformCacheEntryIpc,
+  type WavPeakResult,
   type FolderProjectCreateOptions,
   type FolderProjectCreateResult,
   type FolderImportAudioResult,
@@ -26,6 +27,7 @@ import {
 
 const invoke = ipcRenderer.invoke.bind(ipcRenderer);
 const isMac = process.platform === "darwin";
+const APP_COMMAND_CHANNEL = "app-command";
 
 const fsBridge = Object.freeze({
   pickAudioFiles: (): Promise<PickedAudioFile[]> =>
@@ -34,6 +36,8 @@ const fsBridge = Object.freeze({
     invoke(IpcChannels.FsReadAudioFile, filePath),
   statAudioFile: (filePath: string) =>
     invoke(IpcChannels.FsStatAudioFile, filePath),
+  generateWavPeaks: (filePath: string, fileId: string, samplesPerPeak: number): Promise<WavPeakResult | null> =>
+    invoke(IpcChannels.FsGenerateWavPeaks, filePath, fileId, samplesPerPeak),
   browserRoots: (): Promise<BrowserRootEntry[]> =>
     invoke(IpcChannels.FsBrowserRoots),
   browserListDir: (dirPath: string): Promise<BrowserFileEntry[]> =>
@@ -137,6 +141,7 @@ const sphereAudioBridge = Object.freeze({
   // DAUx backend selection
   listDauxBackends:   ()                                            => invoke(IpcChannels.SphereAudioListDauxBackends),
   openDaux:           (config: SphereDauxConfig)                    => invoke(IpcChannels.SphereAudioOpenDaux, config),
+  openDauxSafe:       (config: SphereDauxConfig)                    => invoke(IpcChannels.SphereAudioOpenDauxSafe, config),
   getDauxStatus:      ()                                            => invoke(IpcChannels.SphereAudioGetDauxStatus),
 });
 
@@ -159,5 +164,16 @@ const dawElectron = Object.freeze({
 });
 
 contextBridge.exposeInMainWorld("dawElectron", dawElectron);
+contextBridge.exposeInMainWorld("futureboard", Object.freeze({
+  commands: Object.freeze({
+    onCommand: (callback: (commandId: string) => void): (() => void) => {
+      const listener = (_event: IpcRendererEvent, commandId: unknown) => {
+        if (typeof commandId === "string") callback(commandId);
+      };
+      ipcRenderer.on(APP_COMMAND_CHANNEL, listener);
+      return () => ipcRenderer.removeListener(APP_COMMAND_CHANNEL, listener);
+    },
+  }),
+}));
 
 export type DawElectronBridge = typeof dawElectron;

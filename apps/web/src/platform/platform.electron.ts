@@ -52,6 +52,9 @@ const fileSystem: FileSystemAdapter = {
   async statAudioFile(path: string): Promise<{ size: number; lastModified: number; name: string; mimeType: string } | null> {
     return bridge().fs.statAudioFile(path);
   },
+  async generateWavPeaks(path: string, fileId: string, samplesPerPeak: number) {
+    return bridge().fs.generateWavPeaks(path, fileId, samplesPerPeak);
+  },
   async browserRoots() {
     return bridge().fs.browserRoots();
   },

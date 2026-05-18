@@ -7,6 +7,7 @@ import { audioProcessingService } from "../audio/AudioProcessingService";
 import { decodedAudioToAudioBuffer } from "../audio/audioCacheTypes";
 import type { AudioProcessParams } from "../audio/audioCacheTypes";
 import { buildDecodedCacheKey } from "../audio/audioCacheKeys";
+import { useProjectStore } from "../store/projectStore";
 
 type ScheduledSource = {
   node:     AudioBufferSourceNode;
@@ -41,10 +42,12 @@ class ClipScheduler {
 
         const loaded = audioEngine.getBuffer(clip.fileId);
         if (!loaded) {
-          console.warn("[WebAudio] scheduling clip skipped: missing buffer", {
-            clipId: clip.id,
-            fileId: clip.fileId,
-          });
+          const file = useProjectStore.getState().project.files.find((f) => f.id === clip.fileId);
+          if (file) {
+            void audioEngine.ensureBuffer(file).then((buffer) => {
+              if (buffer && transport.isPlaying) this.schedule(useProjectStore.getState().project.tracks);
+            });
+          }
           continue;
         }
 

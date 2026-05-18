@@ -179,6 +179,7 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
   // ── Track management ───────────────────────────────────────────────────────
 
   createTrack(track: DawTrack): void {
+    if (!this._trackIds.includes(track.id)) this._trackIds.push(track.id);
     mixer.getOrCreateTrack(track.id, track.volume, track.pan);
     mixer.setPhaseInvert(track.id, track.advanced?.phaseInvert ?? false);
     const outId = track.routing?.outputId;
@@ -186,6 +187,7 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
   }
 
   removeTrack(trackId: TrackId): void {
+    this._trackIds = this._trackIds.filter((id) => id !== trackId);
     mixer.removeTrack(trackId);
   }
 

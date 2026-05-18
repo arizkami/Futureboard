@@ -90,6 +90,16 @@ export interface FileSystemAdapter {
   readAudioFile(path: string): Promise<File | null>;
   /** Probe a native audio path without reading full bytes. Electron only; web returns null. */
   statAudioFile(path: string): Promise<{ size: number; lastModified: number; name: string; mimeType: string } | null>;
+  /** Generate coarse PCM WAV peaks from a native path without reading the full file into renderer memory. */
+  generateWavPeaks(path: string, fileId: string, samplesPerPeak: number): Promise<{
+    fileId: string;
+    sampleRate: number;
+    channelCount: number;
+    duration: number;
+    samplesPerPeak: number;
+    peakCount: number;
+    peaks: number[];
+  } | null>;
   /** Electron file-browser roots. Web returns an empty list. */
   browserRoots(): Promise<BrowserRootEntry[]>;
   /** Electron directory listing for DAW browser. Web returns an empty list. */

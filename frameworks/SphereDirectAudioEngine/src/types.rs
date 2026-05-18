@@ -57,6 +57,8 @@ pub struct JsDauxStatus {
     pub glitch_count: f64,
     /// MMCSS priority active on audio thread (Windows only).
     pub mmcss_active: bool,
+    /// Last backend error (e.g. WASAPI Exclusive failed reason). Cleared on success.
+    pub last_error: Option<String>,
 }
 
 // ── N-API–visible types ────────────────────────────────────────────────────────
@@ -103,7 +105,18 @@ pub struct JsDeviceOpenConfig {
 
 #[napi(object)]
 #[derive(Debug, Default, Clone)]
+pub struct JsTrackMeterSnapshot {
+    pub track_id: String,
+    pub peak_l: f64,
+    pub peak_r: f64,
+    pub rms_l: f64,
+    pub rms_r: f64,
+}
+
+#[napi(object)]
+#[derive(Debug, Default, Clone)]
 pub struct JsMeterSnapshot {
+    pub tracks: Vec<JsTrackMeterSnapshot>,
     pub master_peak_l: f64,
     pub master_peak_r: f64,
     pub master_rms_l: f64,
@@ -220,6 +233,8 @@ pub struct EngineStatus {
     pub output_device: Option<String>,
     pub last_error: Option<String>,
     pub loaded_project_id: Option<String>,
+    /// Last WASAPI / backend error, displayed in Audio Settings UI.
+    pub last_daux_error: Option<String>,
 }
 
 /// Debug state snapshot returned by `getDebugInfo()`.

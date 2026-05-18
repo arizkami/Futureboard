@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { activeAudioEngine } from "../../engine/activeAudioEngine";
+import { meterStore } from "../../store/meterStore";
 
 /** Stereo VU bar meter rendered entirely on canvas. Zero React re-renders during playback. */
 export function CanvasVUMeter({
@@ -12,6 +12,7 @@ export function CanvasVUMeter({
   height?: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const loggedDebugRef = useRef(false);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -31,10 +32,14 @@ export function CanvasVUMeter({
 
     let rafId = 0;
     const target = { l: 0, r: 0 };
-    const unsubscribe = activeAudioEngine.subscribeMeters((id, level) => {
-      if (id !== trackId) return;
-      target.l = rmsToMeter(level.l);
-      target.r = rmsToMeter(level.r);
+    const unsubscribe = meterStore.subscribe(trackId, (meter) => {
+      target.l = rmsToMeter(meter.peakL);
+      target.r = rmsToMeter(meter.peakR);
+      canvas.title = `TrackHeader trackId=${trackId} meter.trackId=${meter.trackId}`;
+      if (import.meta.env.DEV && !loggedDebugRef.current && meter.updatedAt > 0) {
+        loggedDebugRef.current = true;
+        console.debug("[VU Meter]", { trackHeaderTrackId: trackId, meterTrackId: meter.trackId });
+      }
     });
 
     const barW = Math.max(1, Math.floor((width - 2) / 2)); // L and R bar pixel width

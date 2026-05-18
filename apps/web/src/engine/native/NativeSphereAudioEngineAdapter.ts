@@ -316,7 +316,6 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
   private _transportPollInFlight = false;
   private _lastTransport        = { playing: false, positionSeconds: 0 };
   private _lastProjectSignature: string | null = null;
-  private _meterFallbackProject: DawProject | null = null;
   // Debounce timer for syncProject — rapid edits batch into one Rust rebuild.
   private _syncTimer:           ReturnType<typeof setTimeout> | null = null;
   private _insertParamTimer:    ReturnType<typeof setTimeout> | null = null;
@@ -428,7 +427,6 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
     }
     await sphere.loadProject(snapshot);
     this._lastProjectSignature = projectGraphSignature(project);
-    this._meterFallbackProject = project;
     console.log("[SphereNativeAdapter] loadProject() → IPC call complete");
   }
 
@@ -452,7 +450,6 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
             `[SphereNativeAdapter] syncProject (debounced) → ${snapshot.clips.length} clips (${clipCount} with paths) → IPC`,
           );
           this._lastProjectSignature = signature;
-          this._meterFallbackProject = project;
           return sphere.loadProject(snapshot);
         })
         .catch((e: unknown) =>
@@ -706,20 +703,10 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
       sphere
         .getMeters()
         .then((snap: MeterSnapshot) => {
-          let emittedTrackCount = 0;
-          for (const [trackId, level] of Object.entries(snap.tracks)) {
-            const sl: { left: number; right: number } = level as StereoMeterLevel;
+          for (const [trackId, level] of meterEntriesByTrackId(snap.tracks)) {
+            const sl: { left: number; right: number } = level;
             for (const cb of this._meterCallbacks) {
               cb(trackId, { l: sl.left, r: sl.right });
-            }
-            emittedTrackCount += 1;
-          }
-          if (emittedTrackCount === 0) {
-            const fallbackTracks = this._activeFallbackTrackIds();
-            for (const trackId of fallbackTracks) {
-              for (const cb of this._meterCallbacks) {
-                cb(trackId, { l: snap.master.left, r: snap.master.right });
-              }
             }
           }
           for (const cb of this._meterCallbacks) {
@@ -770,24 +757,6 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
     }
   }
 
-  private _activeFallbackTrackIds(): string[] {
-    const project = this._meterFallbackProject;
-    if (!project || !this._lastTransport.playing) return [];
-    const position = this._lastTransport.positionSeconds;
-    const active = new Set<string>();
-    for (const track of project.tracks) {
-      if (track.muted || (project.tracks.some((t) => t.solo) && !track.solo)) continue;
-      for (const clip of track.clips) {
-        const start = clip.startTime ?? 0;
-        const end = start + (clip.duration ?? 0);
-        if (position >= start && position < end && !clip.muted) {
-          active.add(track.id);
-          break;
-        }
-      }
-    }
-    return [...active];
-  }
 }
 
 function projectGraphSignature(project: DawProject): string {
@@ -833,4 +802,19 @@ function projectGraphSignature(project: DawProject): string {
       })),
     })),
   });
+}
+
+function meterEntriesByTrackId(
+  tracks: MeterSnapshot["tracks"],
+): Array<[string, StereoMeterLevel]> {
+  if (Array.isArray(tracks)) {
+    return tracks
+      .map((level): [string, StereoMeterLevel] | null => {
+        const trackId = level.trackId ?? level.id;
+        if (!trackId) return null;
+        return [trackId, { left: level.left, right: level.right }];
+      })
+      .filter((entry): entry is [string, StereoMeterLevel] => entry !== null);
+  }
+  return Object.entries(tracks);
 }

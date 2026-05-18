@@ -8,11 +8,16 @@
 //! A dedicated audio thread is spawned.  The thread:
 //!   1. Calls `CoInitializeEx(COINIT_MULTITHREADED)` for COM.
 //!   2. Sets MMCSS "Pro Audio" priority via `AvSetMmThreadCharacteristicsW`.
-//!   3. Opens WASAPI device in exclusive, event-driven mode.
-//!   4. Runs `WaitForMultipleObjects([buf_event, stop_event])` render loop until stopped.
-//!   5. Calls `CoUninitialize` on exit.
+//!   3. Negotiates an exclusive-mode format with `IsFormatSupported`.
+//!   4. Opens WASAPI device in exclusive, event-driven mode.
+//!   5. Runs `WaitForMultipleObjects([buf_event, stop_event])` render loop.
+//!   6. Calls `CoUninitialize` on exit.
 //!
-//! If exclusive mode is denied by the device, falls back to WASAPI Shared.
+//! # Error behaviour
+//!
+//! All WASAPI failures are returned as `Err(String)` via the info channel —
+//! never panicked, never silently swallowed.  The engine layer is responsible
+//! for deciding whether to retry with a fallback backend.
 
 #![allow(non_snake_case, clippy::too_many_arguments)]
 
@@ -24,7 +29,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
     eMultimedia, eRender, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
-    MMDeviceEnumerator, AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_SHAREMODE_SHARED,
+    MMDeviceEnumerator, AUDCLNT_SHAREMODE_EXCLUSIVE,
     AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_NOPERSIST, DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::System::Com::{
@@ -49,6 +54,32 @@ extern "system" {
     fn AvRevertMmThreadCharacteristics(handle: isize) -> i32;
 }
 
+// ── WASAPI HRESULT error codes ────────────────────────────────────────────────
+
+const E_AUDCLNT_DEVICE_IN_USE: i32           = 0x88890004u32 as i32;
+const E_AUDCLNT_UNSUPPORTED_FORMAT: i32      = 0x88890008u32 as i32;
+const E_AUDCLNT_EXCLUSIVE_MODE_NOT_ALLOWED: i32 = 0x8889000Eu32 as i32;
+const E_AUDCLNT_DEVICE_INVALIDATED: i32      = 0x88890014u32 as i32;
+const E_AUDCLNT_BUFFER_SIZE_NOT_ALIGNED: i32 = 0x88890019u32 as i32;
+
+/// Map a WASAPI HRESULT to a human-readable error string.
+fn classify_hresult(code: i32, context: &str) -> String {
+    let detail = match code {
+        E_AUDCLNT_DEVICE_IN_USE =>
+            "Device is in use by another application (close other audio software)".to_string(),
+        E_AUDCLNT_UNSUPPORTED_FORMAT =>
+            "Unsupported audio format for exclusive mode".to_string(),
+        E_AUDCLNT_EXCLUSIVE_MODE_NOT_ALLOWED =>
+            "Exclusive mode is not allowed — enable it in Windows Sound > Advanced".to_string(),
+        E_AUDCLNT_DEVICE_INVALIDATED =>
+            "Audio device was disconnected or invalidated".to_string(),
+        E_AUDCLNT_BUFFER_SIZE_NOT_ALIGNED =>
+            "Buffer size is not aligned for this device. Try 256 or 512 samples.".to_string(),
+        _ => format!("HRESULT 0x{:08X}", code as u32),
+    };
+    format!("WASAPI Exclusive {context}: {detail}")
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Handle to a running WASAPI Exclusive stream.
@@ -63,7 +94,6 @@ pub struct WasapiExclusiveHandle {
     pub device_name: String,
     stop_flag: Arc<AtomicBool>,
     /// Manual-reset event signaled to wake the audio thread on shutdown.
-    /// Owned here; the audio thread only holds a copy of the raw handle value.
     stop_event: HANDLE,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -73,16 +103,11 @@ unsafe impl Send for WasapiExclusiveHandle {}
 
 impl Drop for WasapiExclusiveHandle {
     fn drop(&mut self) {
-        // 1. Set the flag so the thread's loop-top check also exits cleanly.
         self.stop_flag.store(true, Ordering::Relaxed);
-        // 2. Signal the stop event — wakes the thread from WaitForMultipleObjects
-        //    immediately instead of waiting up to 2 seconds for the next buffer tick.
         unsafe { let _ = SetEvent(self.stop_event); }
-        // 3. Join — should return within microseconds now.
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-        // 4. Close the stop event after the thread has exited.
         unsafe { let _ = CloseHandle(self.stop_event); }
     }
 }
@@ -104,19 +129,12 @@ pub fn open(
     let stop2 = Arc::clone(&stop_flag);
     let glitch2 = Arc::clone(&glitch_counter);
 
-    // Create the stop event used to wake the audio thread immediately on shutdown.
-    // Manual-reset=false, initial-state=false.
     let stop_event: HANDLE = unsafe {
         CreateEventW(None, false, false, None)
             .map_err(|e| SphereAudioError::StreamOpenFailed(format!("CreateEventW(stop): {e}")))?
     };
-    // Transmit the stop event handle value as `usize` — that type is always `Send`,
-    // while `HANDLE` (*mut c_void) is !Send and would prevent spawning the thread.
-    // Inside the thread we cast it back to `HANDLE`.  Kernel event objects are not
-    // thread-affine, so this is safe.
     let stop_event_usize = stop_event.0 as usize;
 
-    // Info channel: audio thread reports (sample_rate, buffer_size, device_name) back.
     let (info_tx, info_rx) = std::sync::mpsc::channel::<Result<(u32, u32, String), String>>();
 
     let t = thread::Builder::new()
@@ -132,14 +150,18 @@ pub fn open(
             }
         })
         .map_err(|e| {
-            // If spawn fails, close the event to avoid leaking it.
             unsafe { let _ = CloseHandle(stop_event); }
             SphereAudioError::StreamOpenFailed(e.to_string())
         })?;
 
     let (sample_rate, buffer_size, device_name) = info_rx
         .recv_timeout(std::time::Duration::from_secs(8))
-        .map_err(|_| SphereAudioError::StreamOpenFailed("WASAPI thread init timeout".into()))
+        .map_err(|e| {
+            // Timeout or channel disconnect (thread panicked before sending).
+            SphereAudioError::StreamOpenFailed(
+                format!("WASAPI Exclusive thread init failed: {e}")
+            )
+        })
         .and_then(|r| r.map_err(SphereAudioError::StreamOpenFailed))?;
 
     Ok(WasapiExclusiveHandle {
@@ -153,6 +175,8 @@ pub fn open(
     })
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Audio thread
 // ─────────────────────────────────────────────────────────────────────────────
 
 unsafe fn wasapi_thread(
@@ -181,7 +205,7 @@ unsafe fn wasapi_thread(
         eprintln!("[DAUx WASAPI Excl] MMCSS set failed (non-fatal)");
     }
 
-    // ── Device ────────────────────────────────────────────────────────────────
+    // ── Device enumerator ─────────────────────────────────────────────────────
     let enumerator: IMMDeviceEnumerator =
         match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
             Ok(e) => e,
@@ -206,89 +230,168 @@ unsafe fn wasapi_thread(
     let device_name = get_device_friendly_name(&device);
     eprintln!("[DAUx WASAPI Excl] Opening: {device_name}");
 
+    // ── Open exclusive stream with format negotiation ─────────────────────────
+    match open_exclusive_stream(
+        &device, requested_sr, buf_frames,
+        &shared, &info_tx,
+        &glitch_counter, &stop_flag, stop_event,
+        &cmd_rx, initial_runtime, &device_name, mmcss_h,
+    ) {
+        true => {}   // stream ran to completion
+        false => {}  // error already sent via info_tx
+    }
+
+    cleanup_mmcss(mmcss_h);
+    shared.mmcss_active.store(false, Ordering::Relaxed);
+    CoUninitialize();
+}
+
+/// Opens the WASAPI exclusive stream, negotiates format and period, runs the
+/// render loop, and handles BUFFER_SIZE_NOT_ALIGNED retry.
+///
+/// Returns `false` if initialization failed (error already sent on `info_tx`).
+/// Returns `true` when the stream ran to completion (normal shutdown).
+unsafe fn open_exclusive_stream(
+    device: &IMMDevice,
+    requested_sr: Option<u32>,
+    buf_frames: u32,
+    shared: &Arc<SharedState>,
+    info_tx: &std::sync::mpsc::Sender<Result<(u32, u32, String), String>>,
+    glitch_counter: &Arc<AtomicU64>,
+    stop_flag: &Arc<AtomicBool>,
+    stop_event: HANDLE,
+    cmd_rx: &Receiver<EngineCommand>,
+    initial_runtime: RuntimeProject,
+    device_name: &str,
+    mmcss_h: isize,
+) -> bool {
     // ── IAudioClient ──────────────────────────────────────────────────────────
     let client: IAudioClient = match device.Activate(CLSCTX_ALL, None) {
         Ok(c) => c,
         Err(e) => {
             let _ = info_tx.send(Err(format!("Activate(IAudioClient): {e}")));
-            cleanup_mmcss(mmcss_h);
-            CoUninitialize();
-            return;
+            return false;
         }
     };
 
-    // Get device's mix format (native format for exclusive mode negotiation).
+    // ── Mix format (device's native format) ───────────────────────────────────
     let mix_fmt = match client.GetMixFormat() {
         Ok(p) => p,
         Err(e) => {
             let _ = info_tx.send(Err(format!("GetMixFormat: {e}")));
-            cleanup_mmcss(mmcss_h);
-            CoUninitialize();
-            return;
+            return false;
         }
     };
+    // Safety: GetMixFormat returns a valid pointer allocated by CoTaskMemAlloc.
+    if mix_fmt.is_null() {
+        let _ = info_tx.send(Err("GetMixFormat returned null".into()));
+        return false;
+    }
 
-    let native_sr = (*mix_fmt).nSamplesPerSec;
-    let device_ch = (*mix_fmt).nChannels as usize;
+    let native_sr   = (*mix_fmt).nSamplesPerSec.max(1);
+    let device_ch   = (*mix_fmt).nChannels as usize;
     let sample_rate = requested_sr.unwrap_or(native_sr);
 
-    // ── Try exclusive then fallback shared ────────────────────────────────────
-    // Exclusive HNS duration (buffer_frames / sr * 10_000_000 for 100ns units).
-    let hns = (buf_frames as i64 * 10_000_000i64) / native_sr as i64;
+    // ── Query device periods ───────────────────────────────────────────────────
+    // hnsMinimumDevicePeriod is the minimum exclusive-mode period.
+    let mut _default_period: i64 = 0;
+    let mut min_period_hns: i64 = 0;
+    let _ = client.GetDevicePeriod(Some(&mut _default_period), Some(&mut min_period_hns));
+    // Compute HNS period from requested buffer size, clamped to minimum.
+    let requested_hns = (buf_frames as i64 * 10_000_000i64) / native_sr as i64;
+    let hns = requested_hns.max(min_period_hns.max(1));
+
+    // ── Check exclusive format support ────────────────────────────────────────
+    // IsFormatSupported returns an HRESULT directly (not a Result).
+    // For exclusive mode ppClosestMatch MUST be null.
+    let fmt_hr = client.IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, mix_fmt, None);
+    if !fmt_hr.is_ok() {
+        let _ = info_tx.send(Err(classify_hresult(fmt_hr.0, "IsFormatSupported")));
+        windows::Win32::System::Com::CoTaskMemFree(Some(mix_fmt as *const _ as *const _));
+        return false;
+    }
+
+    // ── Initialize IAudioClient (exclusive event-driven) ──────────────────────
     let flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST;
 
-    let exclusive_ok = client
-        .IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, mix_fmt, None)
-        .is_ok();
+    let init_result = client.Initialize(
+        AUDCLNT_SHAREMODE_EXCLUSIVE, flags, hns, hns, mix_fmt, None
+    );
 
-    let (share_mode, mode_str) = if exclusive_ok {
-        (AUDCLNT_SHAREMODE_EXCLUSIVE, "exclusive")
-    } else {
-        eprintln!("[DAUx WASAPI Excl] Exclusive not supported — using Shared fallback");
-        (AUDCLNT_SHAREMODE_SHARED, "shared-fallback")
+    // Handle BUFFER_SIZE_NOT_ALIGNED: re-create client with driver-aligned period.
+    let client = match init_result {
+        Ok(()) => client,
+        Err(e) if e.code().0 == E_AUDCLNT_BUFFER_SIZE_NOT_ALIGNED => {
+            eprintln!("[DAUx WASAPI Excl] Buffer size not aligned — querying aligned size");
+            // GetBufferSize() after the failed Initialize returns the aligned frame count.
+            let aligned_frames = match client.GetBufferSize() {
+                Ok(f) => f,
+                Err(e2) => {
+                    let _ = info_tx.send(Err(format!(
+                        "WASAPI Exclusive: buffer not aligned; GetBufferSize failed: {e2}"
+                    )));
+                    windows::Win32::System::Com::CoTaskMemFree(Some(mix_fmt as *const _ as *const _));
+                    return false;
+                }
+            };
+            let aligned_hns = ((aligned_frames as i64) * 10_000_000i64) / native_sr as i64;
+            eprintln!(
+                "[DAUx WASAPI Excl] Aligned buffer: {aligned_frames} frames, {aligned_hns} hns"
+            );
+            // Per Windows docs: release and re-create the IAudioClient before retry.
+            drop(client);
+            let client2: IAudioClient = match device.Activate(CLSCTX_ALL, None) {
+                Ok(c) => c,
+                Err(e2) => {
+                    let _ = info_tx.send(Err(format!(
+                        "WASAPI Exclusive: Re-Activate for alignment retry failed: {e2}"
+                    )));
+                    windows::Win32::System::Com::CoTaskMemFree(Some(mix_fmt as *const _ as *const _));
+                    return false;
+                }
+            };
+            if let Err(e2) = client2.Initialize(
+                AUDCLNT_SHAREMODE_EXCLUSIVE, flags, aligned_hns, aligned_hns, mix_fmt, None
+            ) {
+                let msg = classify_hresult(e2.code().0, "Initialize (aligned retry)");
+                let _ = info_tx.send(Err(msg));
+                windows::Win32::System::Com::CoTaskMemFree(Some(mix_fmt as *const _ as *const _));
+                return false;
+            }
+            client2
+        }
+        Err(e) => {
+            let msg = classify_hresult(e.code().0, "Initialize");
+            let _ = info_tx.send(Err(msg));
+            windows::Win32::System::Com::CoTaskMemFree(Some(mix_fmt as *const _ as *const _));
+            return false;
+        }
     };
 
-    // Initialize.
-    let init_result = client.Initialize(share_mode, flags, hns, hns, mix_fmt, None);
-    if let Err(e) = init_result {
-        // Second attempt: default period duration.
-        if let Err(e2) = client.Initialize(share_mode, flags, 0, 0, mix_fmt, None) {
-            let _ = info_tx.send(Err(format!("IAudioClient::Initialize ({mode_str}): {e} / fallback: {e2}")));
-            windows::Win32::System::Com::CoTaskMemFree(Some(mix_fmt as *const _ as *const _));
-            cleanup_mmcss(mmcss_h);
-            CoUninitialize();
-            return;
-        }
-    }
     windows::Win32::System::Com::CoTaskMemFree(Some(mix_fmt as *const _ as *const _));
 
+    // ── Actual buffer size ─────────────────────────────────────────────────────
     let actual_buf = match client.GetBufferSize() {
         Ok(f) => f,
         Err(e) => {
             let _ = info_tx.send(Err(format!("GetBufferSize: {e}")));
-            cleanup_mmcss(mmcss_h);
-            CoUninitialize();
-            return;
+            return false;
         }
     };
 
-    // ── Buffer ready event ────────────────────────────────────────────────────
+    // ── Buffer-ready event ────────────────────────────────────────────────────
     let buf_event: HANDLE = match CreateEventW(None, false, false, None) {
         Ok(h) => h,
         Err(e) => {
-            let _ = info_tx.send(Err(format!("CreateEventW: {e}")));
-            cleanup_mmcss(mmcss_h);
-            CoUninitialize();
-            return;
+            let _ = info_tx.send(Err(format!("CreateEventW(buf): {e}")));
+            return false;
         }
     };
 
     if let Err(e) = client.SetEventHandle(buf_event) {
         let _ = info_tx.send(Err(format!("SetEventHandle: {e}")));
         let _ = CloseHandle(buf_event);
-        cleanup_mmcss(mmcss_h);
-        CoUninitialize();
-        return;
+        return false;
     }
 
     // ── IAudioRenderClient ────────────────────────────────────────────────────
@@ -297,25 +400,21 @@ unsafe fn wasapi_thread(
         Err(e) => {
             let _ = info_tx.send(Err(format!("GetService(IAudioRenderClient): {e}")));
             let _ = CloseHandle(buf_event);
-            cleanup_mmcss(mmcss_h);
-            CoUninitialize();
-            return;
+            return false;
         }
     };
 
     if let Err(e) = client.Start() {
         let _ = info_tx.send(Err(format!("IAudioClient::Start: {e}")));
         let _ = CloseHandle(buf_event);
-        cleanup_mmcss(mmcss_h);
-        CoUninitialize();
-        return;
+        return false;
     }
 
     shared.sample_rate.store(sample_rate, Ordering::Relaxed);
-    let _ = info_tx.send(Ok((sample_rate, actual_buf, device_name.clone())));
+    let _ = info_tx.send(Ok((sample_rate, actual_buf, device_name.to_string())));
     eprintln!(
-        "[DAUx WASAPI Excl] Stream: device='{}' mode={mode_str} sr={sample_rate} buf={actual_buf}fr ch={device_ch}",
-        device_name
+        "[DAUx WASAPI Excl] Stream ready: device='{}' sr={} buf={} ch={}",
+        device_name, sample_rate, actual_buf, device_ch
     );
 
     // ── Runtime ───────────────────────────────────────────────────────────────
@@ -328,16 +427,12 @@ unsafe fn wasapi_thread(
     loop {
         if stop_flag.load(Ordering::Relaxed) { break; }
 
-        // Wait on either the buffer-ready event (index 0) or the stop event (index 1).
-        // Using WaitForMultipleObjects lets Drop() wake us immediately instead of
-        // blocking the Electron main thread for up to 2 s.
         let wait_handles = [buf_event, stop_event];
         let wait = WaitForMultipleObjects(&wait_handles, false, 2000);
         if wait == WAIT_OBJECT_0 {
-            // buf_event signaled — proceed to render below.
+            // buf_event signaled — fall through to render below.
         } else {
-            // wait.0 == 1 → stop_event signaled (clean shutdown).
-            // Any other value (WAIT_TIMEOUT=0x102, WAIT_FAILED=0xFFFF…) is a glitch.
+            // Index 1 = stop_event. Timeout or other = glitch.
             if wait.0 != 1 && !stop_flag.load(Ordering::Relaxed) {
                 glitch_counter.fetch_add(1, Ordering::Relaxed);
             }
@@ -345,9 +440,8 @@ unsafe fn wasapi_thread(
         }
         if stop_flag.load(Ordering::Relaxed) { break; }
 
-        drain_commands(&cmd_rx, &mut runtime, &shared, &mut local, sample_rate);
+        drain_commands(cmd_rx, &mut runtime, shared, &mut local, sample_rate);
 
-        // How many frames can we write?
         let padding = client.GetCurrentPadding().unwrap_or(actual_buf);
         let frames = actual_buf.saturating_sub(padding);
         if frames == 0 { continue; }
@@ -361,9 +455,8 @@ unsafe fn wasapi_thread(
         if scratch.len() < total { scratch.resize(total, 0.0f32); }
         let s = &mut scratch[..total];
         for x in s.iter_mut() { *x = 0.0; }
-        fill_output_f32(s, device_ch, &mut runtime, &shared, &mut local);
+        fill_output_f32(s, device_ch, &mut runtime, shared, &mut local);
 
-        // Copy f32 samples to WASAPI buffer (device should be float format).
         let out: &mut [f32] = std::slice::from_raw_parts_mut(buf_ptr as *mut f32, total);
         out.copy_from_slice(s);
 
@@ -376,10 +469,7 @@ unsafe fn wasapi_thread(
     let _ = client.Stop();
     let _ = CloseHandle(buf_event);
     eprintln!("[DAUx WASAPI Excl] Stopped: {device_name}");
-
-    cleanup_mmcss(mmcss_h);
-    shared.mmcss_active.store(false, Ordering::Relaxed);
-    CoUninitialize();
+    true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -404,7 +494,6 @@ unsafe fn resolve_device(
                     return Ok(dev);
                 }
             }
-            // Not found — use default.
             eprintln!("[DAUx WASAPI Excl] Device '{wanted}' not found, using default");
             enumerator
                 .GetDefaultAudioEndpoint(eRender, eMultimedia)
@@ -414,8 +503,6 @@ unsafe fn resolve_device(
 }
 
 unsafe fn get_device_friendly_name(device: &IMMDevice) -> String {
-    // Attempt to read friendly name via IPropertyStore.
-    // On failure, return a placeholder rather than panicking.
     use windows::Win32::Devices::Properties::DEVPKEY_Device_FriendlyName;
     use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, PROPERTYKEY};
     use windows::Win32::System::Com::STGM_READ;
@@ -425,16 +512,12 @@ unsafe fn get_device_friendly_name(device: &IMMDevice) -> String {
         Err(_) => return "Unknown Device".into(),
     };
 
-    // DEVPROPKEY and PROPERTYKEY are layout-compatible (GUID + u32); cast directly.
     let key = &DEVPKEY_Device_FriendlyName as *const _ as *const PROPERTYKEY;
     let prop = match store.GetValue(key) {
         Ok(p) => p,
         Err(_) => return "Unknown Device".into(),
     };
 
-    // windows 0.58 wraps PROPVARIANT opaquely.  Read the raw bytes manually.
-    // Memory layout on 64-bit: [vt: u16][pad: u16×3][data: *mut u16] (total 16 bytes).
-    // VT_LPWSTR = 31.
     #[repr(C)]
     struct RawPropVariant {
         vt: u16,

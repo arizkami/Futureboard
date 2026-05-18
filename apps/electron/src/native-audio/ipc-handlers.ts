@@ -414,6 +414,13 @@ export function registerSphereAudioHandlers(_appDir: string): void {
     },
   );
 
+  ipcMain.handle(
+    IpcChannels.SphereAudioOpenDauxSafe,
+    (_event, config: SphereDauxConfig) => {
+      svc.openDauxSafe(config);
+    },
+  );
+
   ipcMain.handle(IpcChannels.SphereAudioGetDauxStatus, () => {
     return svc.getDauxStatus();
   });

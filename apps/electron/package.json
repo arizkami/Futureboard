@@ -1,13 +1,13 @@
 {
   "name": "futureboard-studio",
   "private": true,
-  "version": "2026.05.17",
+  "version": "2026.05.18",
   "description": "Futureboard Studio",
   "author": "Arizkami",
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsc -p .",
+    "build": "node scripts/sync-shared-menu.mjs && tsc -p .",
     "dev": "concurrently -k -n tsc,electron -c blue,magenta \"tsc -p . --watch\" \"wait-on dist/main.js && electron .\"",
     "start": "electron .",
     "build:native:audio": "cd ../../frameworks/SphereDirectAudioEngine && cargo build --release && node ../../apps/electron/scripts/copy-native-audio.mjs",
@@ -20,6 +20,9 @@
     "dist:win": "bun run build:all && electron-builder --win --publish never",
     "dist:mac": "bun run build:all && electron-builder --mac --publish never",
     "dist:linux": "bun run build:all && electron-builder --linux --publish never"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.3"
   },
   "devDependencies": {
     "@types/node": "^25.8.0",
@@ -35,7 +38,9 @@
     "productName": "Futureboard Studio",
     "executableName": "Futureboard Studio",
     "copyright": "Copyright © ${author}",
-    "publish": null,
+    "publish": {
+      "provider": "github"
+    },
     "afterPack": "scripts/after-pack.cjs",
     "asar": true,
     "asarUnpack": [],
@@ -101,7 +106,7 @@
         }
       ],
       "category": "public.app-category.music",
-      "icon": "icons/app.png",
+      "icon": "icons/icon.icns",
       "artifactName": "${productName}-${version}-${arch}.${ext}",
       "hardenedRuntime": false,
       "identity": null

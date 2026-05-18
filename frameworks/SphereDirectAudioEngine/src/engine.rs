@@ -36,6 +36,7 @@ use crate::runtime::{RuntimeInsert, RuntimeProject, RuntimeTrack};
 use crate::types::{
     EngineProjectSnapshot, EngineStatus, JsAudioDeviceInfo, JsDauxBackendInfo, JsDauxConfig,
     JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsSphereAudioStatus,
+    JsTrackMeterSnapshot,
 };
 
 // ── Version ───────────────────────────────────────────────────────────────────
@@ -439,7 +440,22 @@ impl EngineInner {
     // ── Meters ────────────────────────────────────────────────────────────
 
     pub fn get_meters(&self) -> JsMeterSnapshot {
+        let tracks = self
+            .runtime
+            .lock()
+            .meter_snapshots()
+            .into_iter()
+            .map(|meter| JsTrackMeterSnapshot {
+                track_id: meter.track_id,
+                peak_l: meter.peak_l as f64,
+                peak_r: meter.peak_r as f64,
+                rms_l: meter.rms_l as f64,
+                rms_r: meter.rms_r as f64,
+            })
+            .collect();
+
         JsMeterSnapshot {
+            tracks,
             master_peak_l: f32_load(self.shared.peak_l.load(Ordering::Relaxed)) as f64,
             master_peak_r: f32_load(self.shared.peak_r.load(Ordering::Relaxed)) as f64,
             master_rms_l: f32_load(self.shared.rms_l.load(Ordering::Relaxed)) as f64,
@@ -638,6 +654,10 @@ impl EngineInner {
 
     /// Open (or re-open) a stream using the full DAUx config.
     /// This is the preferred method; `open_device()` is kept for backward compat.
+    ///
+    /// On failure the stream stays closed — the caller should call `open_daux`
+    /// again with a safe fallback config.  Use `open_daux_safe` if you want the
+    /// engine to handle the fallback automatically.
     pub fn open_daux(&self, config: JsDauxConfig) -> Result<(), SphereAudioError> {
         self.close_device_inner();
 
@@ -653,7 +673,6 @@ impl EngineInner {
         };
 
         *self.daux_config.lock() = daux_cfg.clone();
-        // Reset glitch counter when opening a new stream.
         self.glitch_counter.store(0, Ordering::Relaxed);
 
         let initial_runtime = self.get_initial_runtime(None);
@@ -675,7 +694,6 @@ impl EngineInner {
                 stream
             }
             _ => {
-                // All other backends go through cpal.
                 let handle = cpal_backend::open(
                     &daux_cfg,
                     Arc::clone(&self.shared),
@@ -692,8 +710,70 @@ impl EngineInner {
             }
         };
 
+        // Clear any previous error on success.
+        self.status.lock().last_daux_error = None;
         *self.active_stream.lock() = Some(stream);
         Ok(())
+    }
+
+    /// Safe variant: tries `new_config`, and on failure restores the previous
+    /// working config.  Returns `Ok(())` if the new config succeeded, or
+    /// `Err(message)` describing why exclusive failed (after restoring the
+    /// previous backend).  The engine always ends up with an open stream.
+    pub fn open_daux_safe(&self, new_config: JsDauxConfig) -> Result<(), SphereAudioError> {
+        // Save the previous working config before closing.
+        let previous_config = {
+            let prev = self.daux_config.lock().clone();
+            JsDauxConfig {
+                backend_id:       prev.backend.id().to_string(),
+                output_device_id: prev.output_device_id.clone(),
+                sample_rate:      prev.sample_rate,
+                buffer_size:      prev.buffer_size,
+                mmcss_priority:   prev.mmcss_priority,
+                safe_mode:        prev.safe_mode,
+            }
+        };
+        let had_previous_stream = self.active_stream.lock().is_some();
+
+        // Stop transport so playback doesn't resume mid-switch.
+        self.shared.playing.store(false, Ordering::Relaxed);
+
+        match self.open_daux(new_config) {
+            Ok(()) => Ok(()),
+            Err(open_err) => {
+                let err_msg = open_err.to_string();
+                eprintln!("[DAUx] open_daux_safe: failed ({err_msg}), attempting fallback");
+
+                // Store the error before trying to restore.
+                self.status.lock().last_daux_error = Some(err_msg.clone());
+
+                // Attempt to restore the previous working config.
+                if had_previous_stream {
+                    match self.open_daux(previous_config) {
+                        Ok(()) => {
+                            eprintln!("[DAUx] open_daux_safe: previous backend restored");
+                            let restore_msg = format!(
+                                "Exclusive mode failed: {err_msg}. Reverted to previous backend."
+                            );
+                            self.status.lock().last_daux_error = Some(restore_msg.clone());
+                            Err(SphereAudioError::StreamOpenFailed(restore_msg))
+                        }
+                        Err(restore_err) => {
+                            eprintln!(
+                                "[DAUx] open_daux_safe: fallback also failed: {restore_err}"
+                            );
+                            let combined = format!(
+                                "Exclusive failed: {err_msg}. Fallback also failed: {restore_err}"
+                            );
+                            self.status.lock().last_daux_error = Some(combined.clone());
+                            Err(SphereAudioError::StreamOpenFailed(combined))
+                        }
+                    }
+                } else {
+                    Err(open_err)
+                }
+            }
+        }
     }
 
     /// Return the current DAUx status (backend, device, latency, glitches).
@@ -725,6 +805,7 @@ impl EngineInner {
             estimated_latency_ms,
             glitch_count,
             mmcss_active,
+            last_error: st.last_daux_error.clone(),
         }
     }
 
@@ -873,10 +954,12 @@ pub fn render_project_sample(
         let output_track_id = runtime.tracks[track_index].output_track_id.clone();
         let sends = runtime.tracks[track_index].sends.clone();
         let (track_l, track_r) = apply_track_chain(l, r, &mut runtime.tracks[track_index]);
+        runtime.accumulate_track_meter(track_index, track_l, track_r);
 
         if let Some(target_id) = output_track_id.as_deref().filter(|id| !is_master_output(id)) {
             if let Some(target_index) = runtime.tracks.iter().position(|t| t.id == target_id) {
                 let (bus_l, bus_r) = apply_track_chain(track_l, track_r, &mut runtime.tracks[target_index]);
+                runtime.accumulate_track_meter(target_index, bus_l, bus_r);
                 out_l += bus_l;
                 out_r += bus_r;
             } else {
@@ -908,6 +991,7 @@ pub fn render_project_sample(
                 track_r * send.level,
                 &mut runtime.tracks[return_track_index],
             );
+            runtime.accumulate_track_meter(return_track_index, send_l, send_r);
             out_l += send_l;
             out_r += send_r;
         }
@@ -1239,6 +1323,7 @@ where
                 let mut sum_sq_r = 0.0f32;
                 let mut frames = 0u64;
                 let base_sample = shared.position_samples.load(Ordering::Relaxed);
+                runtime.begin_meter_block();
 
                 if ch >= 2 {
                     for frame in data.chunks_mut(ch) {
@@ -1307,6 +1392,7 @@ where
                 } else {
                     (peak_l, rms_l)
                 };
+                runtime.end_meter_block(frames);
 
                 prev_peak_l = smooth_peak(prev_peak_l, peak_l, PEAK_DECAY);
                 prev_peak_r = smooth_peak(prev_peak_r, pk_r, PEAK_DECAY);

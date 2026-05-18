@@ -76,6 +76,9 @@ const fileSystem: FileSystemAdapter = {
   async statAudioFile(_path: string): Promise<{ size: number; lastModified: number; name: string; mimeType: string } | null> {
     return null;
   },
+  async generateWavPeaks(_path: string, _fileId: string, _samplesPerPeak: number) {
+    return null;
+  },
   async browserRoots() {
     return [];
   },

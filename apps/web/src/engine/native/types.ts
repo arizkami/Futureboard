@@ -59,7 +59,7 @@ export type SphereAudioStatus = {
 export type StereoMeterLevel = { left: number; right: number };
 
 export type MeterSnapshot = {
-  tracks:    Record<string, StereoMeterLevel>;
+  tracks:    Record<string, StereoMeterLevel> | Array<StereoMeterLevel & { trackId?: string; id?: string }>;
   master:    StereoMeterLevel;
   timestamp: number;
 };
