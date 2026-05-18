@@ -1,6 +1,6 @@
 # Maintainer: Arizkami <arizkami@users.noreply.github.com>
 pkgname=futureboard-studio-bin
-pkgver=2026.05.18
+pkgver=2026.5.18
 pkgrel=1
 pkgdesc="Futureboard Studio — Digital Audio Workstation"
 arch=('x86_64')
@@ -23,15 +23,15 @@ optdepends=(
 )
 provides=('futureboard-studio')
 conflicts=('futureboard-studio')
-options=('!strip')
+options=('!strip' '!debug')
 
-_appimage="Futureboard Studio-${pkgver}-x64.AppImage"
-source_x86_64=("${pkgname}-${pkgver}.AppImage::https://github.com/arizkami/Futureboard/releases/download/v${pkgver}/Futureboard%20Studio-${pkgver}-x64.AppImage")
+_appimage="Futureboard.Studio-${pkgver}-x86_64.AppImage"
+source_x86_64=("${_appimage}::https://github.com/arizkami/Futureboard/releases/download/nightly/${_appimage}")
 sha256sums_x86_64=('SKIP')
 
 prepare() {
-  chmod +x "${srcdir}/${pkgname}-${pkgver}.AppImage"
-  "${srcdir}/${pkgname}-${pkgver}.AppImage" --appimage-extract
+  chmod +x "${srcdir}/${_appimage}"
+  "${srcdir}/${_appimage}" --appimage-extract
 }
 
 package() {

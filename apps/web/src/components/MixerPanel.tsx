@@ -139,10 +139,10 @@ function InsertsAddMenu({ accent, trackId }: { accent: string; trackId?: string 
         <SectionAddButton accent={accent} title="Add insert" disabled={!trackId} />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" sideOffset={4}>
-        <DropdownMenuLabel>Add Device</DropdownMenuLabel>
+        <DropdownMenuLabel className="text-xs">Add Device</DropdownMenuLabel>
         {BUILT_IN_PLUGINS.map((plugin) => (
-          <DropdownMenuItem key={plugin.id} icon={iconForPlugin(plugin)} onSelect={() => add(plugin)}>
-            Add {plugin.name}
+          <DropdownMenuItem className="text-xs" key={plugin.id} icon={iconForPlugin(plugin)} onSelect={() => add(plugin)}>
+            {plugin.name}
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
