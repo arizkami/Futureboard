@@ -243,6 +243,63 @@ pub struct EngineStatus {
     pub last_daux_error: Option<String>,
 }
 
+// ── Recording types ───────────────────────────────────────────────────────────
+
+/// Config for one armed track being recorded.
+#[napi(object)]
+#[derive(Debug, Default, Clone)]
+pub struct JsRecordingTrackConfig {
+    pub track_id: String,
+    /// 0-based input channel indices (e.g., [0, 1] for the first stereo pair).
+    pub input_channels: Vec<u32>,
+    /// Human-readable track name — used to derive the output filename.
+    pub name: String,
+}
+
+/// Full config passed to `startRecording()`.
+#[napi(object)]
+#[derive(Debug, Default, Clone)]
+pub struct JsStartRecordingConfig {
+    /// Absolute path to the project folder root.
+    pub project_root: String,
+    /// Unique ID for this recording session (used to name temp files).
+    pub session_id: String,
+    pub bpm: f64,
+    pub start_beat: f64,
+    pub sample_rate: u32,
+    /// Input device name/id (None = system default).
+    pub input_device_id: Option<String>,
+    /// Armed tracks to record.
+    pub tracks: Vec<JsRecordingTrackConfig>,
+}
+
+/// Per-track result returned by `stopRecording()`.
+#[napi(object)]
+#[derive(Debug, Default, Clone)]
+pub struct JsRecordingResult {
+    pub track_id: String,
+    /// Absolute path to the finalized WAV file.
+    pub file_path: String,
+    /// Path relative to project root (e.g., "Media/Audio/Kick Rec 0001.wav").
+    pub relative_path: String,
+    /// Transport beat at which recording started.
+    pub start_beat: f64,
+    pub duration_seconds: f64,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Snapshot of recording state for UI polling.
+#[napi(object)]
+#[derive(Debug, Default, Clone)]
+pub struct JsRecordingStatus {
+    pub active: bool,
+    pub duration_seconds: f64,
+    pub track_count: u32,
+}
+
 /// Debug state snapshot returned by `getDebugInfo()`.
 /// Exposes the internal runtime graph so JS can verify the engine is loaded.
 #[napi(object)]

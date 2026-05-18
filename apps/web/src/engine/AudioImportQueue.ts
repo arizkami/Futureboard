@@ -3,7 +3,7 @@ import { audioAssetManager, type ImportedAudioAsset } from "./AudioAssetManager"
 import { waveformCache, buildCacheKey, entryPeaksAsInt16, SAMPLES_PER_PEAK, WAVEFORM_CACHE_VERSION } from "./waveformCache";
 import { platform } from "../platform";
 import { useProjectStore } from "../store/projectStore";
-import { addFileToTimeline, isImportableAudioFile, readWavMetadata } from "../utils/importAudioToProject";
+import { addFileToTimeline, batchAddFilesToTimeline, isImportableAudioFile, readWavMetadata } from "../utils/importAudioToProject";
 import { showToast } from "../components/ui/Toast";
 
 export const IMPORT_LIMITS = {
@@ -135,14 +135,21 @@ class AudioImportQueue {
 
   enqueueFiles(files: File[], options: TimelineTarget): DawFile[] {
     const imported: DawFile[] = [];
-    let offset = 0;
     for (const file of files) {
-      const placeholder = this.enqueueFile(file, { ...options, startTime: (options.startTime ?? 0) + offset });
+      // Skip timeline placement here — handled in batch below
+      const placeholder = this.enqueueFile(file, {});
       if (!placeholder) continue;
       imported.push(placeholder);
-      offset += 0.05;
     }
-    if (imported.length > 1) showToast("Importing audio...");
+    if (imported.length === 0) return imported;
+    if (options.startTime != null) {
+      if (imported.length === 1) {
+        addFileToTimeline(imported[0], options.startTime, options.trackId);
+      } else {
+        batchAddFilesToTimeline(imported, options.startTime, options.trackId);
+      }
+    }
+    if (imported.length > 1) showToast(`Importing ${imported.length} files...`);
     return imported;
   }
 

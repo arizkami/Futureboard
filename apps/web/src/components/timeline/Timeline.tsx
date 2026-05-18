@@ -397,6 +397,7 @@ export function Timeline() {
         {/* scrollable track area — ctrl/cmd+wheel handled via non-passive listener */}
         <div
           ref={scrollRef}
+          data-timeline-scroll
           className="absolute inset-0 overflow-auto"
           style={{ cursor: TOOL_CURSOR[currentTool], zIndex: TIMELINE_Z.scrollArea }}
           onScroll={(e) => {

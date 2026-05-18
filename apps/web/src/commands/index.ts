@@ -41,6 +41,24 @@ export class AddTrackCommand implements DawCommand {
   }
 }
 
+export class BatchImportCommand implements DawCommand {
+  readonly label: string;
+  private tracks: DawTrack[];
+  private clips: Array<{ trackId: string; clip: DawClip }>;
+
+  constructor(tracks: DawTrack[], clips: Array<{ trackId: string; clip: DawClip }>) {
+    this.tracks = tracks;
+    this.clips = clips;
+    const n = tracks.length || clips.length;
+    this.label = `Import ${n} Track${n === 1 ? "" : "s"}`;
+  }
+  execute() { store().batchImportTracks(this.tracks, this.clips); }
+  undo() {
+    for (const { clip } of this.clips) store().removeClip(clip.id);
+    for (const track of this.tracks) store().removeTrack(track.id);
+  }
+}
+
 export class DeleteTrackCommand implements DawCommand {
   readonly label: string;
   private trackId: string;
@@ -361,6 +379,22 @@ export class MoveClipCommand implements DawCommand {
     } else {
       store().moveClip(this.clipId, this.trackId, this.oldStartTime);
     }
+  }
+}
+
+export class MoveClipsCommand implements DawCommand {
+  readonly label = "Move Clips";
+  private moves: Array<{ clipId: string; trackId: string; newTime: number; oldTime: number }>;
+
+  constructor(moves: Array<{ clipId: string; trackId: string; newTime: number; oldTime: number }>) {
+    this.moves = moves;
+  }
+
+  execute() {
+    for (const m of this.moves) store().moveClip(m.clipId, m.trackId, m.newTime);
+  }
+  undo() {
+    for (const m of this.moves) store().moveClip(m.clipId, m.trackId, m.oldTime);
   }
 }
 

@@ -496,21 +496,24 @@ function AudioTab({
   const isMac     = osPlatform === "darwin";
   const isLinux   = osPlatform === "linux";
 
-  // ── Native output device list ─────────────────────────────────────────────
+  // ── Native device lists ───────────────────────────────────────────────────
+  const [nativeInputs,  setNativeInputs]  = useState<DawBridgeSphereDeviceInfo[]>([]);
   const [nativeOutputs, setNativeOutputs] = useState<DawBridgeSphereDeviceInfo[]>([]);
   const [devicesRefreshing, setDevicesRefreshing] = useState(false);
 
   const refreshDevices = useCallback(async () => {
     const sphere = window.dawElectron?.sphereAudio;
-    if (!sphere) { setNativeOutputs([]); return; }
+    if (!sphere) { setNativeInputs([]); setNativeOutputs([]); return; }
     setDevicesRefreshing(true);
     try {
-      const [, outputs] = await Promise.all([
+      const [inputs, outputs] = await Promise.all([
         sphere.listInputDevices(),
         sphere.listOutputDevices(),
       ]);
+      setNativeInputs(inputs);
       setNativeOutputs(outputs);
     } catch {
+      setNativeInputs([]);
       setNativeOutputs([]);
     } finally {
       setDevicesRefreshing(false);
@@ -549,7 +552,20 @@ function AudioTab({
     effectiveSampleRate       !== storedSampleRate
   );
 
-  // ── Output device select options ──────────────────────────────────────────
+  // ── Device select options ─────────────────────────────────────────────────
+  const inputOptions = [
+    { value: "__default__", label: "System Default" },
+    ...nativeInputs.map((d) => ({
+      value: d.id,
+      label: d.isDefault ? `${d.name} (Default)` : d.name,
+    })),
+  ];
+  const inputDeviceValue =
+    audioSettings.audioInputDeviceId &&
+    inputOptions.some((o) => o.value === audioSettings.audioInputDeviceId)
+      ? audioSettings.audioInputDeviceId
+      : "__default__";
+
   const outputOptions = [
     { value: "__default__", label: "System Default" },
     ...nativeOutputs.map((d) => ({
@@ -684,30 +700,56 @@ function AudioTab({
       <SectionHeader>Device</SectionHeader>
 
       {isElectron ? (
-        <SettingsRow label="Output Device" description="Hardware output for the master bus">
-          <div className="flex items-center gap-1.5">
-            <DawSelect
-              className="w-44"
-              value={outputDeviceValue}
-              onChange={(v) =>
-                audioSettings.setAudioOutputDevice(v === "__default__" ? null : v)
-              }
-              options={outputOptions}
-            />
-            <button
-              title="Refresh device list"
-              onClick={() => void refreshDevices()}
-              className={`flex h-7 w-7 items-center justify-center rounded border border-[rgba(255,255,255,0.08)] text-daw-faint hover:text-daw-text hover:bg-[rgba(255,255,255,0.06)] transition-colors ${
-                devicesRefreshing ? "opacity-50 pointer-events-none" : ""
-              }`}
-            >
-              <RefreshCw
-                size={11}
-                className={devicesRefreshing ? "animate-spin" : ""}
+        <>
+          <SettingsRow label="Input Device" description="Hardware input for recording (microphone, interface)">
+            <div className="flex items-center gap-1.5">
+              <DawSelect
+                className="w-44"
+                value={inputDeviceValue}
+                onChange={(v) =>
+                  audioSettings.setAudioInputDevice(v === "__default__" ? null : v)
+                }
+                options={inputOptions}
               />
-            </button>
-          </div>
-        </SettingsRow>
+              <button
+                title="Refresh device list"
+                onClick={() => void refreshDevices()}
+                className={`flex h-7 w-7 items-center justify-center rounded border border-[rgba(255,255,255,0.08)] text-daw-faint hover:text-daw-text hover:bg-[rgba(255,255,255,0.06)] transition-colors ${
+                  devicesRefreshing ? "opacity-50 pointer-events-none" : ""
+                }`}
+              >
+                <RefreshCw
+                  size={11}
+                  className={devicesRefreshing ? "animate-spin" : ""}
+                />
+              </button>
+            </div>
+          </SettingsRow>
+          <SettingsRow label="Output Device" description="Hardware output for the master bus">
+            <div className="flex items-center gap-1.5">
+              <DawSelect
+                className="w-44"
+                value={outputDeviceValue}
+                onChange={(v) =>
+                  audioSettings.setAudioOutputDevice(v === "__default__" ? null : v)
+                }
+                options={outputOptions}
+              />
+              <button
+                title="Refresh device list"
+                onClick={() => void refreshDevices()}
+                className={`flex h-7 w-7 items-center justify-center rounded border border-[rgba(255,255,255,0.08)] text-daw-faint hover:text-daw-text hover:bg-[rgba(255,255,255,0.06)] transition-colors ${
+                  devicesRefreshing ? "opacity-50 pointer-events-none" : ""
+                }`}
+              >
+                <RefreshCw
+                  size={11}
+                  className={devicesRefreshing ? "animate-spin" : ""}
+                />
+              </button>
+            </div>
+          </SettingsRow>
+        </>
       ) : (
         <SettingsRow
           label="Output Device"

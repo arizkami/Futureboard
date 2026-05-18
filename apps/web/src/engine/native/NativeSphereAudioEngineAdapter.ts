@@ -255,12 +255,30 @@ async function buildProjectSnapshotAsync(project: DawProject): Promise<EnginePro
   console.log(`[NativeSnapshot] projectRoot = ${projectRoot ?? "null (project loaded from cache or no folder project)"}`);
   console.log(`[NativeSnapshot] assets = ${assetCount} (project.assets), files = ${project.files.length}, clips = ${allClips.length}`);
 
+  // Build all clip snapshots, then validate paths in parallel (bounded concurrency).
+  const rawSnaps = allClips.map((c) => buildClipSnapshot(project, c, project.bpm));
+
+  // Stat all paths concurrently — max 8 in-flight IPC calls at a time.
+  const CONCURRENCY = 8;
+  const results: boolean[] = new Array(rawSnaps.length).fill(true);
+  for (let i = 0; i < rawSnaps.length; i += CONCURRENCY) {
+    const batch = rawSnaps.slice(i, i + CONCURRENCY);
+    const checks = await Promise.allSettled(
+      batch.map((snap) =>
+        snap.mediaPath
+          ? platform.fileSystem.statAudioFile(snap.mediaPath).then(() => true).catch(() => false)
+          : Promise.resolve(true),
+      ),
+    );
+    checks.forEach((r, j) => { results[i + j] = r.status === "fulfilled" ? r.value : false; });
+  }
+
   const clips: EngineClipSnapshot[] = [];
-  for (const c of allClips) {
-    const snap = buildClipSnapshot(project, c, project.bpm);
+  for (let i = 0; i < rawSnaps.length; i++) {
+    const snap = rawSnaps[i];
+    const c = allClips[i];
     if (snap.mediaPath) {
-      const stat = await platform.fileSystem.statAudioFile(snap.mediaPath).catch(() => null);
-      const exists = stat !== null;
+      const exists = results[i];
       console.log(
         `[NativeSnapshot] clip=${c.id} assetId=${snap.assetId} relativePath=${snap.relativePath ?? ""} mediaPath="${snap.mediaPath}" exists=${exists}`,
       );
@@ -648,6 +666,44 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
   subscribeTransport(callback: TransportCallback): () => void {
     this._transportCallbacks.add(callback);
     return () => this._transportCallbacks.delete(callback);
+  }
+
+  // ── Recording ──────────────────────────────────────────────────────────────
+
+  async startRecording(config: {
+    projectRoot: string;
+    sessionId: string;
+    bpm: number;
+    startBeat: number;
+    sampleRate: number;
+    inputDeviceId?: string | null;
+    tracks: Array<{ trackId: string; inputChannels: number[]; name: string }>;
+  }): Promise<void> {
+    const sphere = getSphere();
+    if (!sphere) {
+      console.error("[NativeSphere] startRecording(): sphere bridge absent");
+      return;
+    }
+    await sphere.startRecording(config);
+  }
+
+  async stopRecording(): Promise<Array<{
+    trackId: string;
+    filePath: string;
+    relativePath: string;
+    startBeat: number;
+    durationSeconds: number;
+    sampleRate: number;
+    channels: number;
+    success: boolean;
+    error?: string | null;
+  }>> {
+    const sphere = getSphere();
+    if (!sphere) {
+      console.error("[NativeSphere] stopRecording(): sphere bridge absent");
+      return [];
+    }
+    return sphere.stopRecording();
   }
 
   // ── Internal: realtime param update ───────────────────────────────────────

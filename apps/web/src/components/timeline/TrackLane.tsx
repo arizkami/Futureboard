@@ -4,12 +4,13 @@ import { AudioClip } from "./AudioClip";
 import { MidiClip } from "./MidiClip";
 import { HEADER_WIDTH, TRACK_HEIGHT } from "../../theme";
 import { useUIStore } from "../../store/uiStore";
-import { snapTime, secondsPerBeat } from "../../utils/musicalTime";
+import { snapTime, secondsPerBeat, timelineXToTime } from "../../utils/musicalTime";
 import { useProjectStore } from "../../store/projectStore";
 import { useHistoryStore } from "../../store/historyStore";
 import { AddClipCommand } from "../../commands";
 import { isPrimaryModifier } from "../../hooks/useModifierKeys";
-import { addFileToTimeline, importAudioFileToTimelineProgressive, importNativeAudioPathToTimeline } from "../../utils/importAudioToProject";
+import { addFileToTimeline, importAudioFileToTimelineProgressive, importNativeAudioPathToTimeline, isImportableAudioFile } from "../../utils/importAudioToProject";
+import { audioImportQueue } from "../../engine/AudioImportQueue";
 import { showToast } from "../ui/Toast";
 import { useState } from "react";
 
@@ -169,31 +170,44 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
         const { pixelsPerSecond, snapToGrid } = useUIStore.getState();
         const { project } = useProjectStore.getState();
 
-        const rect = e.currentTarget.getBoundingClientRect();
+        // Use the outer scroll container rect so coordinate math matches Timeline.tsx
+        const scrollEl = (e.currentTarget as HTMLElement).closest<HTMLElement>("[data-timeline-scroll]");
+        const scrollLeft = scrollEl?.scrollLeft ?? 0;
+        const rect = scrollEl?.getBoundingClientRect() ?? e.currentTarget.getBoundingClientRect();
         const dropX = e.clientX - rect.left;
-        let time = dropX / pixelsPerSecond;
+        let time = Math.max(0, timelineXToTime(dropX, pixelsPerSecond, scrollLeft));
 
         if (snapToGrid) {
           const spb = secondsPerBeat(project.bpm);
           time = snapTime(time, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb);
         }
 
+        if (import.meta.env.DEV) {
+          console.log("[DropDebug] TrackLane drop", { dropX, scrollLeft, time, trackId: track.id });
+        }
+
         if (hasMochiFile) {
           const fileId = e.dataTransfer.getData("application/x-mochi-file-id");
           const dawFile = project.files.find(f => f.id === fileId);
-          if (dawFile) addFileToTimeline(dawFile, Math.max(0, time), track.id);
+          if (dawFile) addFileToTimeline(dawFile, time, track.id);
           return;
         }
 
         if (hasNativeAudio) {
           const filePath = e.dataTransfer.getData(NATIVE_AUDIO_DRAG_TYPE);
-          await importNativeAudioPathToTimeline(filePath, Math.max(0, time), track.id);
+          await importNativeAudioPathToTimeline(filePath, time, track.id);
           return;
         }
 
         const list = e.dataTransfer.files;
         if (!list?.length) return;
-        for (const f of Array.from(list)) void importAudioFileToTimelineProgressive(f, Math.max(0, time), track.id);
+        const audioFiles = Array.from(list).filter(isImportableAudioFile);
+        if (audioFiles.length === 0) return;
+        if (audioFiles.length === 1) {
+          void importAudioFileToTimelineProgressive(audioFiles[0], time, track.id);
+        } else {
+          audioImportQueue.enqueueFiles(audioFiles, { startTime: time, trackId: track.id });
+        }
       }}
       className="relative min-w-0 flex-1 overflow-hidden border-b border-daw-border transition-colors"
       style={{

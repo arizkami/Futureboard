@@ -33,9 +33,11 @@ use crate::dsp::{meter::smooth_peak, oscillator::SineOscillator};
 use crate::error::SphereAudioError;
 use crate::graph::{MasterState, TrackState};
 use crate::runtime::{RuntimeInsert, RuntimePreviewMode, RuntimeProject, RuntimeTrack};
+use crate::recording::{self, RecordingSession};
 use crate::types::{
     EngineProjectSnapshot, EngineStatus, JsAudioDeviceInfo, JsDauxBackendInfo, JsDauxConfig,
-    JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsSphereAudioStatus,
+    JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsRecordingResult,
+    JsRecordingStatus, JsStartRecordingConfig, JsSphereAudioStatus,
     JsTrackMeterSnapshot,
 };
 
@@ -194,6 +196,9 @@ pub struct EngineInner {
     // DAUx config & glitch counter (shared with audio thread for diagnostics).
     glitch_counter: Arc<AtomicU64>,
     daux_config: Mutex<DauxDeviceConfig>,
+
+    // Active recording session (None when not recording).
+    recording: Mutex<Option<RecordingSession>>,
 }
 
 #[derive(Clone)]
@@ -243,6 +248,7 @@ impl EngineInner {
             audio_cache: Mutex::new(HashMap::new()),
             glitch_counter: Arc::new(AtomicU64::new(0)),
             daux_config: Mutex::new(DauxDeviceConfig::default()),
+            recording: Mutex::new(None),
         }
     }
 
@@ -593,11 +599,22 @@ impl EngineInner {
         *self.project.lock() = Some(snapshot.clone());
         *self.runtime.lock() = runtime.clone();
 
-        if self.cmd_tx.lock().is_some() {
-            self.send_command(EngineCommand::LoadProject(runtime))?;
-            eprintln!("[SphereAudio] LoadProject command sent to audio callback");
-        } else {
-            eprintln!("[SphereAudio] ⚠ WARNING: no audio stream open — LoadProject not sent to callback (will apply on next openDevice)");
+        for t in &snapshot.tracks {
+            let track_clips = runtime.clips.iter().filter(|c| c.track_id == t.id).count();
+            eprintln!(
+                "[SphereAudio] track '{}' type={} clips={} volume={:.2} pan={:.2} muted={} solo={}",
+                t.id, t.track_type, track_clips, t.volume, t.pan, t.muted, t.solo
+            );
+        }
+        match self.send_command(EngineCommand::LoadProject(runtime)) {
+            Ok(()) => eprintln!("[SphereAudio] LoadProject command sent to audio callback"),
+            Err(SphereAudioError::EngineNotOpen) => {
+                eprintln!(
+                    "[SphereAudio] ⚠ WARNING: no audio stream open — runtime stored, \
+                     will apply on next openDevice/openDaux"
+                );
+            }
+            Err(e) => return Err(e),
         }
 
         Ok(())
@@ -637,6 +654,47 @@ impl EngineInner {
             position_seconds: position_samples as f64 / sample_rate as f64,
             has_solo: runtime.has_solo,
             clip_summaries,
+        }
+    }
+
+    // ── Recording API ──────────────────────────────────────────────────────
+
+    /// Open an input stream and begin writing armed tracks to WAV files.
+    pub fn start_recording(&self, config: JsStartRecordingConfig) -> Result<(), SphereAudioError> {
+        let mut guard = self.recording.lock();
+        if guard.is_some() {
+            return Err(SphereAudioError::NativeError(
+                "A recording session is already active".to_string(),
+            ));
+        }
+        let session = recording::start_recording(config)?;
+        *guard = Some(session);
+        Ok(())
+    }
+
+    /// Stop the active recording, finalize WAV files, and return per-track results.
+    pub fn stop_recording(&self) -> Result<Vec<JsRecordingResult>, SphereAudioError> {
+        let session = self
+            .recording
+            .lock()
+            .take()
+            .ok_or_else(|| SphereAudioError::NativeError("No active recording session".to_string()))?;
+        recording::stop_recording(session)
+    }
+
+    /// Snapshot of current recording state (for UI status polling).
+    pub fn get_recording_status(&self) -> JsRecordingStatus {
+        match self.recording.lock().as_ref() {
+            None => JsRecordingStatus::default(),
+            Some(s) => {
+                // We don't track elapsed time with an atomic — returning track_count
+                // is sufficient for the UI to show a "recording" badge.
+                JsRecordingStatus {
+                    active: true,
+                    duration_seconds: 0.0,
+                    track_count: s.track_count as u32,
+                }
+            }
         }
     }
 

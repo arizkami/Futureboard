@@ -1,6 +1,6 @@
 import { useProjectStore } from "../store/projectStore";
 import { useHistoryStore } from "../store/historyStore";
-import { AddTrackCommand, AddClipCommand } from "../commands";
+import { AddTrackCommand, AddClipCommand, BatchImportCommand } from "../commands";
 import { getTrackColor } from "../theme";
 import type { DawClip, DawFile, DawTrack } from "../types/daw";
 import { useUIStore } from "../store/uiStore";
@@ -122,6 +122,57 @@ export function addFileToTimeline(dawFile: DawFile, startTime: number, targetTra
   useUIStore.getState().setSelectedClipIds([clipId]);
   useUIStore.getState().setSelectedTrackId(trackId);
   useUIStore.getState().setFocusedPanel("timeline");
+}
+
+export function batchAddFilesToTimeline(dawFiles: DawFile[], startTime: number, targetTrackId?: string): void {
+  if (dawFiles.length === 0) return;
+  const { project } = useProjectStore.getState();
+  const history = useHistoryStore.getState();
+
+  const newTracks: DawTrack[] = [];
+  const clips: Array<{ trackId: string; clip: DawClip }> = [];
+
+  for (const dawFile of dawFiles) {
+    const clipId = crypto.randomUUID();
+    let trackId = targetTrackId;
+    if (!trackId) {
+      trackId = crypto.randomUUID();
+      newTracks.push({
+        id: trackId,
+        name: dawFile.name.replace(/\.[^.]+$/, ""),
+        type: "audio",
+        color: getTrackColor(project.tracks.length + newTracks.length),
+        channelCount: dawFile.channels,
+        volume: 0.8,
+        pan: 0,
+        muted: false,
+        solo: false,
+        armed: false,
+        clips: [],
+      });
+    }
+    clips.push({
+      trackId,
+      clip: {
+        id: clipId,
+        name: dawFile.name.replace(/\.[^.]+$/, ""),
+        type: "audio",
+        fileId: dawFile.id,
+        assetId: dawFile.id,
+        trackId,
+        startTime,
+        offset: 0,
+        duration: dawFile.duration,
+        gain: 1,
+      },
+    });
+  }
+
+  history.execute(new BatchImportCommand(newTracks, clips));
+  const ui = useUIStore.getState();
+  ui.setSelectedClipIds(clips.map((c) => c.clip.id));
+  if (newTracks.length > 0) ui.setSelectedTrackId(newTracks[newTracks.length - 1].id);
+  ui.setFocusedPanel("timeline");
 }
 
 export async function importAudioFilesAsNewTracks(files: File[]): Promise<void> {

@@ -31,6 +31,9 @@ import type {
   SphereDauxBackendInfo,
   SphereDauxConfig,
   SphereDauxStatus,
+  SphereStartRecordingConfig,
+  SphereRecordingResult,
+  SphereRecordingStatus,
 } from "../ipc/channels.js";
 
 // ESM-safe __dirname (not available natively in "type":"module" packages)
@@ -157,6 +160,45 @@ interface NativeEngine {
   openDaux(config: NativeDauxConfig): void;
   openDauxSafe(config: NativeDauxConfig): void;
   getDauxStatus(): NativeDauxStatus;
+
+  // Recording
+  startRecording(config: NativeStartRecordingConfig): void;
+  stopRecording(): NativeRecordingResult[];
+  getRecordingStatus(): NativeRecordingStatus;
+}
+
+interface NativeRecordingTrackConfig {
+  trackId: string;
+  inputChannels: number[];
+  name: string;
+}
+
+interface NativeStartRecordingConfig {
+  projectRoot: string;
+  sessionId: string;
+  bpm: number;
+  startBeat: number;
+  sampleRate: number;
+  inputDeviceId?: string | null;
+  tracks: NativeRecordingTrackConfig[];
+}
+
+interface NativeRecordingResult {
+  trackId: string;
+  filePath: string;
+  relativePath: string;
+  startBeat: number;
+  durationSeconds: number;
+  sampleRate: number;
+  channels: number;
+  success: boolean;
+  error?: string | null;
+}
+
+interface NativeRecordingStatus {
+  active: boolean;
+  durationSeconds: number;
+  trackCount: number;
 }
 
 function encodeTrackParamValue(paramId: string, value: unknown): number {
@@ -541,6 +583,35 @@ export class SphereAudioNative {
       };
     }
     return this._engine.getDauxStatus();
+  }
+
+  // ── Recording ────────────────────────────────────────────────────────────
+
+  startRecording(config: SphereStartRecordingConfig): void {
+    if (!this._engine) throw new Error("[SphereAudio] Engine not available");
+    this._engine.startRecording({
+      projectRoot:   config.projectRoot,
+      sessionId:     config.sessionId,
+      bpm:           config.bpm,
+      startBeat:     config.startBeat,
+      sampleRate:    config.sampleRate,
+      inputDeviceId: config.inputDeviceId ?? null,
+      tracks:        config.tracks.map((t) => ({
+        trackId:       t.trackId,
+        inputChannels: t.inputChannels,
+        name:          t.name,
+      })),
+    });
+  }
+
+  stopRecording(): SphereRecordingResult[] {
+    if (!this._engine) throw new Error("[SphereAudio] Engine not available");
+    return this._engine.stopRecording();
+  }
+
+  getRecordingStatus(): SphereRecordingStatus {
+    if (!this._engine) return { active: false, durationSeconds: 0, trackCount: 0 };
+    return this._engine.getRecordingStatus();
   }
 }
 

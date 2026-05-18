@@ -26,6 +26,7 @@ mod dsp;
 pub mod engine;
 pub mod error;
 mod graph;
+pub mod recording;
 mod runtime;
 pub mod types;
 
@@ -36,7 +37,8 @@ use napi_derive::napi;
 use engine::EngineInner;
 use types::{
     EngineProjectSnapshot, JsAudioDeviceInfo, JsDauxBackendInfo, JsDauxConfig, JsDauxStatus,
-    JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsSphereAudioStatus,
+    JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsRecordingResult,
+    JsRecordingStatus, JsStartRecordingConfig, JsSphereAudioStatus,
 };
 
 // ── N-API class ───────────────────────────────────────────────────────────────
@@ -344,5 +346,40 @@ impl SphereDirectAudioEngine {
     #[napi]
     pub fn get_meters(&self) -> JsMeterSnapshot {
         self.inner.get_meters()
+    }
+
+    // ── Recording ────────────────────────────────────────────────────────────
+
+    /// Begin recording armed tracks to WAV files in `<projectRoot>/Media/Audio`.
+    ///
+    /// Opens a separate cpal input stream on the selected input device.
+    /// Audio data is routed through a lock-free channel to a disk writer thread —
+    /// the output audio callback is not affected.
+    ///
+    /// Throws if a session is already active or if the device cannot be opened.
+    #[napi]
+    pub fn start_recording(&self, config: JsStartRecordingConfig) -> napi::Result<()> {
+        self.inner
+            .start_recording(config)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
+
+    /// Stop the active recording session, finalize WAV files, and return per-track results.
+    ///
+    /// Drops the input stream (causing the disk writer to flush and close its
+    /// files), then waits up to 60 s for finalization before returning.
+    ///
+    /// Throws if no recording is active.
+    #[napi]
+    pub fn stop_recording(&self) -> napi::Result<Vec<JsRecordingResult>> {
+        self.inner
+            .stop_recording()
+            .map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
+
+    /// Return a lightweight recording status snapshot for UI polling.
+    #[napi]
+    pub fn get_recording_status(&self) -> JsRecordingStatus {
+        self.inner.get_recording_status()
     }
 }

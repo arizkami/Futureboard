@@ -67,6 +67,7 @@ type ProjectStore = {
 
   // ── Tracks ─────────────────────────────────────────────────────────────────
   addTrack: (track: DawTrack) => void;
+  batchImportTracks: (tracks: DawTrack[], clips: Array<{ trackId: string; clip: DawClip }>) => void;
   removeTrack: (trackId: TrackId) => void;
   setTrackName: (trackId: TrackId, name: string) => void;
   setTrackVolume: (trackId: TrackId, volume: number) => void;
@@ -189,6 +190,29 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   addTrack: (track) => {
     set((s) => ({ project: { ...s.project, tracks: [...s.project.tracks, normalizeTrack(track)] } }));
+    markDirty();
+  },
+
+  batchImportTracks: (tracks, clips) => {
+    if (tracks.length === 0 && clips.length === 0) return;
+    set((s) => {
+      const allTracks = [...s.project.tracks, ...tracks.map(normalizeTrack)];
+      const clipsByTrack = new Map<string, DawClip[]>();
+      for (const { trackId, clip } of clips) {
+        const arr = clipsByTrack.get(trackId);
+        if (arr) arr.push(clip);
+        else clipsByTrack.set(trackId, [clip]);
+      }
+      return {
+        project: {
+          ...s.project,
+          tracks: allTracks.map((t) => {
+            const extra = clipsByTrack.get(t.id);
+            return extra ? { ...t, clips: [...t.clips, ...extra] } : t;
+          }),
+        },
+      };
+    });
     markDirty();
   },
 

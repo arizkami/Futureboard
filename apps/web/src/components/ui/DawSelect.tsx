@@ -6,6 +6,8 @@ import {
   DropdownMenuContent,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
 } from "./menu";
 import "./DawSelect.css";
 
@@ -13,6 +15,8 @@ export interface DawSelectOption {
   value: string;
   label: string;
   disabled?: boolean;
+  /** When set, renders a section header above this item (and a separator if not the first group). */
+  groupHeader?: string;
 }
 
 interface DawSelectProps {
@@ -58,15 +62,22 @@ export const DawSelect: React.FC<DawSelectProps> = ({
         className="daw-select-content min-w-[var(--radix-dropdown-menu-trigger-width)]"
       >
         <DropdownMenuRadioGroup value={value} onValueChange={onChange}>
-          {options.map((option) => (
-            <DropdownMenuRadioItem
-              key={option.value}
-              value={option.value}
-              disabled={option.disabled}
-              className="daw-select-item"
-            >
-              {option.label}
-            </DropdownMenuRadioItem>
+          {options.map((option, i) => (
+            <React.Fragment key={option.value}>
+              {option.groupHeader && (
+                <>
+                  {i > 0 && <DropdownMenuSeparator />}
+                  <DropdownMenuLabel>{option.groupHeader}</DropdownMenuLabel>
+                </>
+              )}
+              <DropdownMenuRadioItem
+                value={option.value}
+                disabled={option.disabled}
+                className="daw-select-item"
+              >
+                {option.label}
+              </DropdownMenuRadioItem>
+            </React.Fragment>
           ))}
         </DropdownMenuRadioGroup>
       </DropdownMenuContent>

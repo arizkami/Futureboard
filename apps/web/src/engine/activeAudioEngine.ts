@@ -259,6 +259,48 @@ class ActiveAudioEngine {
     return this._adapter.subscribeTransport(callback);
   }
 
+  // ── Recording (native-only) ────────────────────────────────────────────────
+
+  async startRecording(config: {
+    projectRoot: string;
+    sessionId: string;
+    bpm: number;
+    startBeat: number;
+    sampleRate: number;
+    inputDeviceId?: string | null;
+    tracks: Array<{ trackId: string; inputChannels: number[]; name: string }>;
+  }): Promise<void> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const adapter = this._adapter as { startRecording?: (c: any) => Promise<void> } | null;
+    if (typeof adapter?.startRecording !== "function") {
+      console.warn("[ActiveEngine] startRecording: active adapter does not support recording");
+      return;
+    }
+    await adapter.startRecording(config);
+  }
+
+  async stopRecording(): Promise<Array<{
+    trackId: string;
+    filePath: string;
+    relativePath: string;
+    startBeat: number;
+    durationSeconds: number;
+    sampleRate: number;
+    channels: number;
+    success: boolean;
+    error?: string | null;
+  }>> {
+    const adapter = this._adapter as { stopRecording?: () => Promise<unknown[]> } | null;
+    if (typeof adapter?.stopRecording !== "function") {
+      console.warn("[ActiveEngine] stopRecording: active adapter does not support recording");
+      return [];
+    }
+    return adapter.stopRecording() as Promise<Array<{
+      trackId: string; filePath: string; relativePath: string; startBeat: number;
+      durationSeconds: number; sampleRate: number; channels: number; success: boolean; error?: string | null;
+    }>>;
+  }
+
   private async _init(preferredEngine: PreferredEngine): Promise<void> {
     const requested = resolveRequestedBackend(preferredEngine);
     const backendStore = useAudioBackendStore.getState();

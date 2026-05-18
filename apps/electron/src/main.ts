@@ -403,7 +403,7 @@ function createWindow(showOnReady = true): BrowserWindow {
       ? {
           color: "#00000000",
           symbolColor: "#c5ced9",
-          height: 32,
+          height: 35,
         }
       : undefined,
     frame: false,

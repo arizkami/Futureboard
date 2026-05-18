@@ -70,10 +70,15 @@ export const IpcChannels = {
   SphereAudioGetDebugInfo:     "daw:sphere:getDebugInfo",
 
   // DAUx low-latency backend selection
-  SphereAudioListDauxBackends: "daw:sphere:listDauxBackends",
-  SphereAudioOpenDaux:         "daw:sphere:openDaux",
-  SphereAudioOpenDauxSafe:     "daw:sphere:openDauxSafe",
-  SphereAudioGetDauxStatus:    "daw:sphere:getDauxStatus",
+  SphereAudioListDauxBackends:   "daw:sphere:listDauxBackends",
+  SphereAudioOpenDaux:           "daw:sphere:openDaux",
+  SphereAudioOpenDauxSafe:       "daw:sphere:openDauxSafe",
+  SphereAudioGetDauxStatus:      "daw:sphere:getDauxStatus",
+
+  // Recording
+  SphereAudioStartRecording:     "daw:sphere:startRecording",
+  SphereAudioStopRecording:      "daw:sphere:stopRecording",
+  SphereAudioGetRecordingStatus: "daw:sphere:getRecordingStatus",
 } as const;
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels];
@@ -314,4 +319,47 @@ export type SphereDauxStatus = {
   mmcssActive:         boolean;
   /** Last backend error (e.g. WASAPI Exclusive failed). Null when healthy. */
   lastError?:          string | null;
+};
+
+// ── Recording types ───────────────────────────────────────────────────────────
+
+export type SphereRecordingTrackConfig = {
+  trackId: string;
+  /** 0-based input channel indices (e.g. [0, 1] for the first stereo pair). */
+  inputChannels: number[];
+  /** Human-readable track name — used to derive the output filename. */
+  name: string;
+};
+
+export type SphereStartRecordingConfig = {
+  /** Absolute path to the project folder root (must exist). */
+  projectRoot: string;
+  /** Unique session ID used to name temp files. */
+  sessionId: string;
+  bpm: number;
+  startBeat: number;
+  sampleRate: number;
+  /** Input device name/id (undefined = system default). */
+  inputDeviceId?: string | null;
+  tracks: SphereRecordingTrackConfig[];
+};
+
+export type SphereRecordingResult = {
+  trackId: string;
+  /** Absolute path to the finalized WAV file. */
+  filePath: string;
+  /** Path relative to project root, e.g. "Media/Audio/Kick Rec 0001.wav". */
+  relativePath: string;
+  startBeat: number;
+  durationSeconds: number;
+  sampleRate: number;
+  channels: number;
+  success: boolean;
+  error?: string | null;
+};
+
+export type SphereRecordingStatus = {
+  active: boolean;
+  durationSeconds: number;
+  trackCount: number;
 };

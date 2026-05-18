@@ -39,12 +39,14 @@ import {
 import { useProjectStore } from "../store/projectStore";
 import { useTransportStore } from "../store/transportStore";
 import { useMetronomeStore } from "../store/metronomeStore";
+import { useAudioSettingsStore } from "../store/audioSettingsStore";
 import { useUIStore } from "../store/uiStore";
 import { DawSelect } from "./ui/DawSelect";
 import { NumberInput } from "./ui/NumberInput";
 import { formatBarBeatTick } from "../utils/musicalTime";
 import { ProjectDropdown } from "./project/ProjectDropdown";
 import { platform } from "../platform";
+import { commitRecordingResults } from "../engine/RecordingManager";
 
 const _isElectron = platform.kind === "electron";
 const _isMac = _isElectron && typeof window !== "undefined" && window.dawElectron?.platform === "darwin";
@@ -345,7 +347,7 @@ function MenuPanel({
 
 // ─── TransportBar ───────────────────────────────────────────────────────────
 export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSave?: () => void }) {
-  const { isPlaying, playheadTime, setIsPlaying } = useTransportStore();
+  const { isPlaying, playheadTime, setIsPlaying, isRecording, recordStartBeat: _recordStartBeat, setIsRecording } = useTransportStore();
   const { project, setBpm, setTimeSignature } = useProjectStore();
   const {
     panels,
@@ -361,6 +363,7 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
   } = useUIStore();
   const { enabled: metronomeEnabled, toggle: toggleMetronome, countInEnabled } =
     useMetronomeStore();
+  const audioInputDeviceId = useAudioSettingsStore((s) => s.audioInputDeviceId);
 
   // ── Layout mode ───────────────────────────────────────────────────────────
   const [layoutMode, setLayoutMode] = useState<MenuLayoutMode>("partial");
@@ -538,6 +541,59 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
   const handleStop = () => {
     activeAudioEngine.stop();
     setIsPlaying(false);
+  };
+
+  const handleRecord = async () => {
+    if (isRecording) {
+      setIsRecording(false);
+      try {
+        const results = await activeAudioEngine.stopRecording();
+        await commitRecordingResults(results);
+      } catch (e) {
+        console.error("[TransportBar] stopRecording error:", e);
+      }
+      return;
+    }
+
+    const projectRoot = platform.folderProject.getProjectRoot();
+    if (!projectRoot) {
+      console.warn("[TransportBar] Recording requires a saved folder project");
+      return;
+    }
+
+    const armedTracks = project.tracks.filter((t) => t.armed && t.type === "audio");
+    if (armedTracks.length === 0) {
+      console.warn("[TransportBar] No armed audio tracks — arm at least one track before recording");
+      return;
+    }
+
+    const startBeat = playheadTime * (project.bpm / 60);
+    const sessionId = `rec-${Date.now()}`;
+
+    const tracks = armedTracks.map((t) => {
+      const pair = t.routing?.input?.channelPair;
+      const inputChannels: number[] = pair ? [pair[0] - 1, pair[1] - 1] : [0, 1];
+      return { trackId: t.id, inputChannels, name: t.name };
+    });
+
+    try {
+      await activeAudioEngine.startRecording({
+        projectRoot,
+        sessionId,
+        bpm: project.bpm,
+        startBeat,
+        sampleRate: project.sampleRate,
+        inputDeviceId: audioInputDeviceId ?? null,
+        tracks,
+      });
+      setIsRecording(true, startBeat);
+      if (!isPlaying) {
+        await activeAudioEngine.play(playheadTime);
+        setIsPlaying(true);
+      }
+    } catch (e) {
+      console.error("[TransportBar] startRecording error:", e);
+    }
   };
 
   // Build a unified selection snapshot for menu enabled-state predicates.
@@ -815,7 +871,15 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
             onClick={handleStop}
             disabled={!isPlaying && playheadTime === 0}
           />
-          <IconBtn icon={Circle} label="Record" accent danger size={12} />
+          <IconBtn
+            icon={Circle}
+            label={isRecording ? "Stop Recording" : "Record"}
+            accent
+            danger
+            active={isRecording}
+            size={12}
+            onClick={handleRecord}
+          />
           <IconBtn icon={Repeat2} label="Loop [L]" active={loopEnabled} onClick={toggleLoop} size={13} />
           <IconBtn
             icon={Timer}

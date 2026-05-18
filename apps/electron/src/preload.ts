@@ -23,6 +23,9 @@ import {
   type SphereDeviceOpenConfig,
   type SphereTransportState,
   type SphereDauxConfig,
+  type SphereStartRecordingConfig,
+  type SphereRecordingResult,
+  type SphereRecordingStatus,
 } from "./ipc/channels.js";
 
 const invoke = ipcRenderer.invoke.bind(ipcRenderer);
@@ -144,6 +147,10 @@ const sphereAudioBridge = Object.freeze({
   openDaux:           (config: SphereDauxConfig)                    => invoke(IpcChannels.SphereAudioOpenDaux, config),
   openDauxSafe:       (config: SphereDauxConfig)                    => invoke(IpcChannels.SphereAudioOpenDauxSafe, config),
   getDauxStatus:      ()                                            => invoke(IpcChannels.SphereAudioGetDauxStatus),
+  // Recording
+  startRecording:     (config: SphereStartRecordingConfig)          => invoke(IpcChannels.SphereAudioStartRecording, config) as Promise<void>,
+  stopRecording:      ()                                            => invoke(IpcChannels.SphereAudioStopRecording) as Promise<SphereRecordingResult[]>,
+  getRecordingStatus: ()                                            => invoke(IpcChannels.SphereAudioGetRecordingStatus) as Promise<SphereRecordingStatus>,
 });
 
 const dawElectron = Object.freeze({

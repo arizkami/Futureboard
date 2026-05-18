@@ -601,6 +601,12 @@ function InspectorInsertsList({ trackId }: { trackId: string }) {
 function encodeInputValue(routing?: TrackRouting): string {
   if (!routing || routing.inputType === "none") return "none";
   if (routing.inputType === "audio-channel") {
+    // Structured input takes precedence (supports additional stereo pairs)
+    if (routing.input?.channelPair) {
+      const [l, r] = routing.input.channelPair;
+      if (l === 1 && r === 2) return "ch:stereo";
+      return `ch:pair:${Math.ceil(l / 2)}`;
+    }
     const ch = routing.inputChannel;
     if (ch === "stereo") return "ch:stereo";
     if (typeof ch === "number") return `ch:${ch}`;
@@ -619,6 +625,15 @@ function encodeInputValue(routing?: TrackRouting): string {
 function decodeInputValue(value: string): Partial<TrackRouting> {
   if (value === "none") return { inputType: "none", inputId: undefined, inputChannel: undefined };
   if (value === "ch:stereo") return { inputType: "audio-channel", inputId: undefined, inputChannel: "stereo" };
+  // ch:pair:N → stereo pair N (1-based), channels [(2N-1), 2N]
+  if (value.startsWith("ch:pair:")) {
+    const n = parseInt(value.slice(8), 10);
+    if (!isNaN(n) && n >= 1) {
+      const l = 2 * n - 1, r = 2 * n;
+      return { inputType: "audio-channel", inputId: undefined, input: { kind: "audio-channel", channelPair: [l, r] } };
+    }
+    return { inputType: "audio-channel", inputId: undefined, inputChannel: "stereo" };
+  }
   if (value.startsWith("ch:")) {
     const ch = parseInt(value.slice(3), 10);
     return { inputType: "audio-channel", inputId: undefined, inputChannel: isNaN(ch) ? "stereo" : ch };
@@ -651,8 +666,8 @@ function buildOutputReachable(project: { tracks: { id: string; output?: string }
 
 function TrackRoutingSection({ trackId }: { trackId: string }) {
   const { project, updateTrackRouting } = useProjectStore();
-  const { audioPermission, audioInputs, audioOutputs, midiPermission, midiInputs } = useDeviceStore();
-  const { audioInputDeviceId, midiEnabledInputIds } = useAudioSettingsStore();
+  const { audioPermission, midiPermission, midiInputs } = useDeviceStore();
+  const { audioInputDeviceId, audioInputChannelCount, audioOutputChannelCount, midiEnabledInputIds } = useAudioSettingsStore();
   const history = useHistoryStore.getState;
 
   const track = project.tracks.find((t) => t.id === trackId);
@@ -663,15 +678,13 @@ function TrackRoutingSection({ trackId }: { trackId: string }) {
   const isMidi = track.type === "midi";
   const isAudio = track.type === "audio" || track.type === "instrument" || track.type === "plugin";
 
-  // Global audio input device (for channel list)
-  const globalInput = audioInputDeviceId
-    ? audioInputs.find((d) => d.id === audioInputDeviceId)
-    : (audioInputs.find((d) => d.isDefault) ?? audioInputs[0] ?? null);
+  // Whether a global audio input device has been selected in Settings > Audio.
+  const hasInputDevice = !!audioInputDeviceId;
 
   // ── IN encoding ───────────────────────────────────────────────────────────
   const inValue = encodeInputValue(routing);
 
-  // Build IN option list using channel choices from global device
+  // Build IN option list using logical channel routes (no raw device names).
   const inOptions: DawSelectOption[] = (() => {
     if (isMaster) return [{ value: "system-mix", label: "System Mix" }];
 
@@ -687,18 +700,35 @@ function TrackRoutingSection({ trackId }: { trackId: string }) {
         opts.push({ value: `midi:${d.id}`, label: d.name });
       }
     } else {
-      // Audio/instrument/plugin/bus/group/return: channel choices from global device
-      if (globalInput) {
-        opts.push({ value: "ch:stereo", label: `${globalInput.name} (Stereo)` });
-        opts.push({ value: "ch:1", label: "Input 1 (Mono)" });
-        opts.push({ value: "ch:2", label: "Input 2 (Mono)" });
-      } else {
-        opts.push({ value: "ch:stereo", label: "System Input" });
+      // Audio/instrument/plugin: logical channel routes from selected device.
+      // Device name never appears here — only friendly channel labels.
+      // Layout mirrors Cubase: Stereo group first, then Mono group.
+      if (hasInputDevice) {
+        const count = Math.max(1, audioInputChannelCount || 2);
+
+        // ── Stereo group ──────────────────────────────────────────────────
+        let stereoAdded = false;
+        for (let i = 1; i + 1 <= count; i += 2) {
+          const pairNum = Math.ceil(i / 2);
+          const val = pairNum === 1 ? "ch:stereo" : `ch:pair:${pairNum}`;
+          const label = count > 2 ? `Stereo In ${pairNum} (${i}+${i + 1})` : "Stereo In (1+2)";
+          opts.push({ value: val, label, groupHeader: stereoAdded ? undefined : "Stereo" });
+          stereoAdded = true;
+        }
+
+        // ── Mono group ────────────────────────────────────────────────────
+        for (let i = 1; i <= count; i++) {
+          opts.push({
+            value: `ch:${i}`,
+            label: `Mono In ${i}`,
+            groupHeader: i === 1 ? "Mono" : undefined,
+          });
+        }
       }
       // Bus/group tracks as sources
-      for (const t of project.tracks) {
-        if (t.id === trackId) continue;
-        if (t.type === "bus" || t.type === "group") {
+      const busSources = project.tracks.filter((t) => t.id !== trackId && (t.type === "bus" || t.type === "group"));
+      if (busSources.length > 0) {
+        for (const t of busSources) {
           opts.push({ value: `bus:${t.id}`, label: t.name });
         }
       }
@@ -725,14 +755,17 @@ function TrackRoutingSection({ trackId }: { trackId: string }) {
       const wouldCycle = reachable.has(t.id) && t.id !== trackId;
       opts.push({ value: t.id, label: t.name, disabled: wouldCycle });
     }
-    if (audioOutputs.length > 0) {
-      for (const d of audioOutputs) {
-        opts.push({ value: `hw:${d.id}`, label: d.name, disabled: true });
+    // Logical hardware output channel pairs — no raw device names.
+    // Listed as informational/future-use (disabled until hardware routing is wired in engine).
+    const outCount = Math.max(2, audioOutputChannelCount || 2);
+    if (outCount > 0) {
+      for (let i = 1; i + 1 <= outCount; i += 2) {
+        opts.push({ value: `hw-out:${i}-${i + 1}`, label: `Hardware Out ${i}-${i + 1}`, disabled: true });
       }
     }
     opts.push({ value: "none", label: "None" });
     if (hasMissingOutput && !opts.some((o) => o.value === outValue)) {
-      opts.unshift({ value: outValue, label: "Missing target" });
+      opts.unshift({ value: outValue, label: `Missing: ${outValue}` });
     }
     return opts;
   })();
@@ -743,7 +776,7 @@ function TrackRoutingSection({ trackId }: { trackId: string }) {
   };
 
   const handleOutChange = (value: string) => {
-    if (value.startsWith("hw:")) return;
+    if (value.startsWith("hw-out:")) return;
     // Circular routing guard
     if (value !== "master" && value !== "none") {
       const reachable = buildOutputReachable(project, value);
@@ -761,7 +794,7 @@ function TrackRoutingSection({ trackId }: { trackId: string }) {
   const showMidiPermissionPrompt = isWeb && isMidi && (midiPermission === "unknown" || midiPermission === "prompting");
   const showMidiDenied           = isWeb && isMidi && midiPermission === "denied";
   // For audio: instead of permission prompt in routing section, we show a "no device" hint
-  const showNoAudioDevice = !isMidi && !isMaster && !globalInput && audioPermission !== "denied";
+  const showNoAudioDevice = !isMidi && !isMaster && !hasInputDevice && audioPermission !== "denied";
   const showAudioDenied   = isWeb && (isAudio) && audioPermission === "denied";
 
   return (

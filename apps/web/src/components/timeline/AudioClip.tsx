@@ -7,6 +7,7 @@ import {
   DuplicateClipsCommand,
   GlueClipsCommand,
   MoveClipCommand,
+  MoveClipsCommand,
   ResizeClipCommand,
   SplitClipCommand,
   UpdateClipCommand,
@@ -206,7 +207,17 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
     let duplicated = false;
     let lastSeconds = clip.startTime;
     let rafId: number | null = null;
-    let pendingTime = clip.startTime;
+
+    // Capture initial times for ALL selected clips so we can move them together.
+    const allClipsFlat = () => useProjectStore.getState().project.tracks.flatMap((t) => t.clips);
+    const ui0 = useUIStore.getState();
+    const groupIds = ui0.selectedClipIds.includes(clip.id) ? ui0.selectedClipIds : [clip.id];
+    // Map clipId → startTime at drag start (for computing deltas).
+    const initialTimes = new Map<string, number>(
+      allClipsFlat()
+        .filter((c) => groupIds.includes(c.id))
+        .map((c) => [c.id, c.startTime]),
+    );
 
     const onMove = (ev: MouseEvent) => {
       // Duplicate on threshold when Alt was held at drag start.
@@ -224,9 +235,7 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
 
         // Find the duplicate that corresponds to our specific dragged clip
         // (placed at clip.startTime + clip.duration by duplicateClips).
-        const dupClip = useProjectStore.getState().project.tracks
-          .flatMap((t) => t.clips)
-          .find(
+        const dupClip = allClipsFlat().find(
             (c) =>
               newIds.includes(c.id) &&
               c.trackId === clip.trackId &&
@@ -242,6 +251,12 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
           dragStartX.current    = ev.clientX; // recalibrate so movement starts from zero
         }
 
+        // Rebuild initialTimes for the new duplicate IDs.
+        initialTimes.clear();
+        allClipsFlat()
+          .filter((c) => newIds.includes(c.id))
+          .forEach((c) => initialTimes.set(c.id, c.startTime));
+
         ui.setSelectedClipIds(newIds);
       }
 
@@ -253,8 +268,8 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
         const spb = secondsPerBeat(project.bpm);
         t = snapTime(t, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb);
       }
+      const delta = t - dragStartTime.current;
       lastSeconds = t;
-      pendingTime = t;
 
       const slot = Math.round((ev.clientY - dragStartY.current) / TRACK_HEIGHT);
       useUIStore.getState().setDraggingClipTargetIdx(Math.max(0, Math.min(allTracks.length - 1, trackIndex + slot)));
@@ -262,7 +277,13 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
       if (rafId === null) {
         rafId = requestAnimationFrame(() => {
           rafId = null;
-          moveClip(draggedClipId, draggedTrackId, pendingTime);
+          // Move all clips in the group by the same delta.
+          const clips = allClipsFlat();
+          for (const [id, origTime] of initialTimes) {
+            const c = clips.find((x) => x.id === id);
+            if (!c) continue;
+            moveClip(id, c.trackId, Math.max(0, origTime + delta));
+          }
         });
       }
     };
@@ -270,10 +291,16 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
     const onUp = (ev: MouseEvent) => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      const delta = lastSeconds - dragStartTime.current;
       if (rafId !== null) {
         cancelAnimationFrame(rafId);
         rafId = null;
-        moveClip(draggedClipId, draggedTrackId, pendingTime);
+        const clips = allClipsFlat();
+        for (const [id, origTime] of initialTimes) {
+          const c = clips.find((x) => x.id === id);
+          if (!c) continue;
+          moveClip(id, c.trackId, Math.max(0, origTime + delta));
+        }
       }
       setDragging(false);
       useUIStore.getState().setDraggingClipTargetIdx(null);
@@ -284,19 +311,29 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
       const crossTrack  = targetTrack && targetTrack.id !== draggedTrackId;
 
       if (crossTrack) {
-        const currentTime = useProjectStore.getState().project.tracks
-          .flatMap((t) => t.clips).find((c) => c.id === draggedClipId)?.startTime ?? lastSeconds;
+        const currentTime = allClipsFlat().find((c) => c.id === draggedClipId)?.startTime ?? lastSeconds;
         moveClipToTrack(draggedClipId, targetTrack.id, currentTime);
       }
 
-      useHistoryStore.getState().push(
-        new MoveClipCommand(
-          draggedClipId, draggedTrackId,
-          lastSeconds, clip.startTime,
-          crossTrack ? targetTrack.id : undefined,
-          crossTrack ? draggedTrackId : undefined,
-        ),
-      );
+      if (initialTimes.size > 1) {
+        // Multi-clip move: push a grouped undo command.
+        const moves = Array.from(initialTimes.entries()).map(([id, oldTime]) => ({
+          clipId: id,
+          trackId: allClipsFlat().find((c) => c.id === id)?.trackId ?? id,
+          newTime: Math.max(0, oldTime + delta),
+          oldTime,
+        }));
+        useHistoryStore.getState().push(new MoveClipsCommand(moves));
+      } else {
+        useHistoryStore.getState().push(
+          new MoveClipCommand(
+            draggedClipId, draggedTrackId,
+            lastSeconds, clip.startTime,
+            crossTrack ? targetTrack.id : undefined,
+            crossTrack ? draggedTrackId : undefined,
+          ),
+        );
+      }
     };
 
     window.addEventListener("mousemove", onMove);

@@ -17,6 +17,7 @@ import type {
   SphereDeviceOpenConfig,
   SphereTransportState,
   SphereDauxConfig,
+  SphereStartRecordingConfig,
 } from "../ipc/channels.js";
 
 type NativeSnapshotLike = {
@@ -423,6 +424,23 @@ export function registerSphereAudioHandlers(_appDir: string): void {
 
   ipcMain.handle(IpcChannels.SphereAudioGetDauxStatus, () => {
     return svc.getDauxStatus();
+  });
+
+  // ── Recording ──────────────────────────────────────────────────────────────
+
+  ipcMain.handle(
+    IpcChannels.SphereAudioStartRecording,
+    (_event, config: SphereStartRecordingConfig) => {
+      svc.startRecording(config);
+    },
+  );
+
+  ipcMain.handle(IpcChannels.SphereAudioStopRecording, () => {
+    return svc.stopRecording();
+  });
+
+  ipcMain.handle(IpcChannels.SphereAudioGetRecordingStatus, () => {
+    return svc.getRecordingStatus();
   });
 
   console.log(
