@@ -14,7 +14,7 @@
     "build:native:audio:debug": "cd ../../frameworks/SphereDirectAudioEngine && cargo build && node ../../apps/electron/scripts/copy-native-audio.mjs --debug",
     "build:renderer": "bun run --cwd ../web build:electron",
     "copy:renderer": "node scripts/copy-renderer.cjs",
-    "build:all": "bun run build:renderer && bun run build && bun run copy:renderer",
+    "build:all": "bun run build:native:audio && bun run build:renderer && bun run build && bun run copy:renderer",
     "pack": "bun run build:all && electron-builder --dir",
     "dist": "bun run build:all && electron-builder --publish never",
     "dist:win": "bun run build:all && electron-builder --win --publish never",

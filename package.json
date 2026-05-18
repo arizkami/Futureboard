@@ -13,7 +13,7 @@
     "dev:electron": "concurrently -k -n web,electron \"bun run --cwd apps/web dev\" \"bun run --cwd apps/electron dev\"",
     "dev:server": "bun run --cwd apps/server dev",
     "build:web": "bun run --cwd apps/web build",
-    "build:electron": "bun run --cwd apps/electron build",
+    "build:electron": "bun run --cwd apps/electron build:all",
     "pack:electron": "bun run --cwd apps/electron pack",
     "dist:electron": "bun run --cwd apps/electron dist",
     "dist:electron:win": "bun run --cwd apps/electron dist:win",
