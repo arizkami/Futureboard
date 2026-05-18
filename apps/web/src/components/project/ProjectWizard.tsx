@@ -6,11 +6,11 @@ import { useProjectStore } from "../../store/projectStore";
 import { useUIStore } from "../../store/uiStore";
 import { useHistoryStore } from "../../store/historyStore";
 import { useWindowStore } from "../../store/windowStore";
-import { useRecentProjectsStore } from "../../store/recentProjectsStore";
 import { getTrackColor } from "../../theme";
 import type { DawTrack } from "../../types/daw";
 import { platform } from "../../platform";
 import { NumberInput } from "../ui/NumberInput";
+import { rememberSavedProject } from "../../utils/projectLifecycle";
 
 type Props = { windowId: string };
 
@@ -256,14 +256,10 @@ export function ProjectWizard({ windowId }: Props) {
           return;
         }
         useProjectStore.getState().loadProject(newProject);
-        await platform.projectStorage.saveProject(newProject);
-        useRecentProjectsStore.getState().addRecentProject({
-          id: newProject.id,
-          name: newProject.name,
-          projectFilePath: folderResult.projectFilePath,
+        const saveResult = await platform.projectStorage.saveProject(newProject);
+        rememberSavedProject(newProject, saveResult ?? {
+          path: folderResult.projectFilePath,
           projectRoot: folderResult.projectRoot,
-          storageMode: "folder",
-          source: "local",
         });
       } catch (e) {
         console.error("[ProjectWizard] folder create failed:", e);
@@ -272,12 +268,8 @@ export function ProjectWizard({ windowId }: Props) {
       }
     } else {
       useProjectStore.getState().loadProject(newProject);
-      useRecentProjectsStore.getState().addRecentProject({
-        id: newProject.id,
-        name: newProject.name,
-        storageMode: "browser",
-        source: "browser",
-      });
+      const saveResult = await platform.projectStorage.saveProject(newProject);
+      if (saveResult) rememberSavedProject(newProject, saveResult);
     }
 
     history.clear();

@@ -26,6 +26,7 @@ export const IpcChannels = {
   WindowMinimize: "daw:window:minimize",
   WindowToggleMaximize: "daw:window:toggleMaximize",
   WindowClose: "daw:window:close",
+  WindowForceClose: "daw:window:forceClose",
 
   // External floating windows (Electron only)
   WindowsOpenExternal: "daw:windows:openExternal",
@@ -140,6 +141,8 @@ export type MessageBoxOptions = {
   message: string;
   detail?: string;
   buttons?: string[];
+  defaultId?: number;
+  cancelId?: number;
 };
 
 export type MessageBoxResult = {

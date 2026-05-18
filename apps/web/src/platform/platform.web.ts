@@ -155,14 +155,19 @@ const projectStorage: ProjectStorageAdapter = {
 };
 
 const dialog: DialogAdapter = {
-  async showMessageBox(opts: MessageBoxOptions): Promise<void> {
+  async showMessageBox(opts: MessageBoxOptions) {
     const lines: string[] = [];
     if (opts.title) lines.push(opts.title);
     lines.push(opts.message);
     if (opts.detail) lines.push(opts.detail);
+    const cancelResponse = opts.cancelId ?? Math.max(0, (opts.buttons?.length ?? 1) - 1);
     if (typeof window !== "undefined") {
+      if (opts.buttons && opts.buttons.length > 1) {
+        return { response: window.confirm(lines.join("\n\n")) ? (opts.defaultId ?? 0) : cancelResponse };
+      }
       window.alert(lines.join("\n\n"));
     }
+    return { response: opts.defaultId ?? 0 };
   },
   async showErrorBox(title: string, message: string): Promise<void> {
     if (typeof window !== "undefined") {

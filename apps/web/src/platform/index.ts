@@ -19,6 +19,7 @@ export type {
   FileSystemAdapter,
   MessageBoxKind,
   MessageBoxOptions,
+  MessageBoxResult,
   PlatformCapabilities,
   PlatformKind,
   ProjectStorageAdapter,

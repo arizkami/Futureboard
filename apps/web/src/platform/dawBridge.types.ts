@@ -81,6 +81,8 @@ export type DawBridgeMessageBoxOptions = {
   message: string;
   detail?: string;
   buttons?: string[];
+  defaultId?: number;
+  cancelId?: number;
 };
 
 export type DawBridgeMessageBoxResult = {
@@ -170,6 +172,7 @@ export interface DawBridgeWindow {
   minimize(): Promise<void>;
   toggleMaximize(): Promise<void>;
   close(): Promise<void>;
+  forceClose(): Promise<void>;
 }
 
 // ── SphereDirectAudioEngine bridge ────────────────────────────────────────────

@@ -2,12 +2,11 @@ import { Check, Cloud, FolderOpen, Plus, Search, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { platform } from "../../platform";
 import { useProjectStore } from "../../store/projectStore";
-import { useHistoryStore } from "../../store/historyStore";
-import { useRecentProjectsStore, type RecentProject } from "../../store/recentProjectsStore";
+import { useRecentProjectsStore, isSavedRecentProject, type RecentProject } from "../../store/recentProjectsStore";
 import { useUIStore } from "../../store/uiStore";
 import { useWindowStore } from "../../store/windowStore";
-import { audioAssetManager } from "../../engine/AudioAssetManager";
 import { showToast } from "../ui/Toast";
+import { guardUnsavedProject, loadOpenedProject } from "../../utils/projectLifecycle";
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
@@ -139,36 +138,24 @@ export function ProjectDropdown({ onClose }: { onClose: () => void }) {
     saveStatus === "error" ? "Save error" :
     `${storageModeLabel}${missingAssets > 0 ? ` · ${missingAssets} missing asset${missingAssets === 1 ? "" : "s"}` : ""}`;
 
-  const filteredRecent = recentProjects.filter(
+  const savedRecentProjects = recentProjects.filter((p) =>
+    isSavedRecentProject(p) && (platform.kind !== "electron" || p.source === "local"),
+  );
+  const filteredRecent = savedRecentProjects.filter(
     (p) =>
       p.id !== project.id &&
       p.name.toLowerCase().includes(search.toLowerCase())
   );
 
   const handleOpenProjectFile = async () => {
+    const canContinue = await guardUnsavedProject("open");
+    if (!canContinue) return;
     onClose();
     if (platform.kind === "electron") {
       try {
         const opened = await platform.projectStorage.openProject();
         if (opened) {
-          useProjectStore.getState().loadProject(opened);
-          useHistoryStore.getState().clear();
-          useUIStore.getState().setSelectedClipIds([]);
-          useUIStore.getState().setSelectedTrackId(null);
-          useUIStore.getState().setSelectedBrowserFileId(null);
-          useUIStore.getState().setSaveStatus("saved");
-          const projectRoot = platform.folderProject.getProjectRoot();
-          useRecentProjectsStore.getState().addRecentProject({
-            id: opened.id ?? crypto.randomUUID(),
-            name: opened.name,
-            projectRoot: projectRoot ?? undefined,
-            projectFilePath: projectRoot
-              ? `${projectRoot}/${opened.name}.mochiproj`
-              : undefined,
-            storageMode: projectRoot ? "folder" : "browser",
-            source: "local",
-          });
-          void audioAssetManager.restoreProjectAssets(opened);
+          await loadOpenedProject(opened);
           showToast(`Opened: ${opened.name}`);
         }
       } catch {
@@ -183,23 +170,19 @@ export function ProjectDropdown({ onClose }: { onClose: () => void }) {
   };
 
   const handleSelectRecent = async (p: RecentProject) => {
+    const canContinue = await guardUnsavedProject("switch");
+    if (!canContinue) return;
     onClose();
     // Folder project: load by file path
     if (p.storageMode === "folder" && p.projectFilePath && platform.folderProject.isSupported) {
       try {
         const opened = await platform.folderProject.openByPath(p.projectFilePath);
         if (opened) {
-          useProjectStore.getState().loadProject(opened);
-          useHistoryStore.getState().clear();
-          useUIStore.getState().setSelectedClipIds([]);
-          useUIStore.getState().setSelectedTrackId(null);
-          useUIStore.getState().setSelectedBrowserFileId(null);
-          useUIStore.getState().setSaveStatus("saved");
+          await loadOpenedProject(opened);
           useRecentProjectsStore.getState().addRecentProject({
             ...p,
             lastOpenedAt: Date.now(),
           });
-          void audioAssetManager.restoreProjectAssets(opened);
           showToast(`Opened: ${opened.name}`);
           return;
         } else {
@@ -221,15 +204,18 @@ export function ProjectDropdown({ onClose }: { onClose: () => void }) {
   };
 
   const handleNewProject = () => {
-    onClose();
-    useWindowStore.getState().openDialog({
-      contentType: "projectWizard",
-      title: "New Project",
-      modal: true,
-      width: 780,
-      height: platform.kind === "electron" ? 560 : 510,
-      resizable: false,
-      closable: true,
+    void guardUnsavedProject("new").then((ok) => {
+      if (!ok) return;
+      onClose();
+      useWindowStore.getState().openDialog({
+        contentType: "projectWizard",
+        title: "New Project",
+        modal: true,
+        width: 780,
+        height: platform.kind === "electron" ? 560 : 510,
+        resizable: false,
+        closable: true,
+      });
     });
   };
 
@@ -289,7 +275,7 @@ export function ProjectDropdown({ onClose }: { onClose: () => void }) {
           </>
         )}
 
-        {search && filteredRecent.length === 0 && recentProjects.length > 0 && (
+        {search && filteredRecent.length === 0 && savedRecentProjects.length > 0 && (
           <div className="px-2 py-3 text-center text-[11px] text-daw-faint">
             No projects match &ldquo;{search}&rdquo;
           </div>
@@ -308,7 +294,7 @@ export function ProjectDropdown({ onClose }: { onClose: () => void }) {
         <ActionRow icon={Cloud} label="Open Remote Folder" disabled />
 
         {/* Footer */}
-        {recentProjects.length > 0 && (
+        {savedRecentProjects.length > 0 && (
           <>
             <div className="my-1 h-px bg-daw-border" />
             <button

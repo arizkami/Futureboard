@@ -36,11 +36,18 @@ function loadFromStorage(): RecentProject[] {
         typeof p === "object" &&
         p !== null &&
         typeof p.id === "string" &&
-        typeof p.name === "string"
+        typeof p.name === "string" &&
+        isSavedRecentProject(p as Partial<RecentProject>)
     );
   } catch {
     return [];
   }
+}
+
+export function isSavedRecentProject(project: Partial<RecentProject>): boolean {
+  if (!project.id || !project.name) return false;
+  if (project.projectFilePath || project.projectRoot || project.path) return true;
+  return project.storageMode === "browser" && project.source === "browser";
 }
 
 function saveToStorage(projects: RecentProject[]) {
@@ -57,9 +64,14 @@ export const useRecentProjectsStore = create<RecentProjectsStore>((set) => ({
   addRecentProject: (project) =>
     set((s) => {
       const entry: RecentProject = { lastOpenedAt: Date.now(), ...project };
+      if (!isSavedRecentProject(entry)) return s;
       // Deduplicate by id or path
       const filtered = s.recentProjects.filter(
-        (p) => p.id !== entry.id && !(entry.path && p.path === entry.path)
+        (p) =>
+          p.id !== entry.id &&
+          !(entry.path && p.path === entry.path) &&
+          !(entry.projectFilePath && p.projectFilePath === entry.projectFilePath) &&
+          !(entry.projectRoot && p.projectRoot === entry.projectRoot)
       );
       const next = [entry, ...filtered].slice(0, MAX_RECENT);
       saveToStorage(next);

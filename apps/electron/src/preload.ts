@@ -87,6 +87,7 @@ const windowBridge = Object.freeze({
   minimize: (): Promise<void> => invoke(IpcChannels.WindowMinimize),
   toggleMaximize: (): Promise<void> => invoke(IpcChannels.WindowToggleMaximize),
   close: (): Promise<void> => invoke(IpcChannels.WindowClose),
+  forceClose: (): Promise<void> => invoke(IpcChannels.WindowForceClose),
 });
 
 const waveformCacheBridge = Object.freeze({

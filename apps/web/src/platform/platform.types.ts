@@ -144,10 +144,16 @@ export type MessageBoxOptions = {
   message: string;
   detail?: string;
   buttons?: string[];
+  defaultId?: number;
+  cancelId?: number;
+};
+
+export type MessageBoxResult = {
+  response: number;
 };
 
 export interface DialogAdapter {
-  showMessageBox(opts: MessageBoxOptions): Promise<void>;
+  showMessageBox(opts: MessageBoxOptions): Promise<MessageBoxResult>;
   showErrorBox(title: string, message: string): Promise<void>;
 }
 
@@ -155,6 +161,7 @@ export interface WindowAdapter {
   minimize(): void;
   toggleMaximize(): void;
   close(): void;
+  forceClose?(): void;
 }
 
 export interface Platform {

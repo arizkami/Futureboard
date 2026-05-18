@@ -405,13 +405,15 @@ const folderProject: FolderProjectAdapter = {
 };
 
 const dialog: DialogAdapter = {
-  async showMessageBox(opts: MessageBoxOptions): Promise<void> {
-    await bridge().dialog.showMessageBox({
+  async showMessageBox(opts: MessageBoxOptions) {
+    return bridge().dialog.showMessageBox({
       type: opts.type,
       title: opts.title,
       message: opts.message,
       detail: opts.detail,
       buttons: opts.buttons,
+      defaultId: opts.defaultId,
+      cancelId: opts.cancelId,
     });
   },
   async showErrorBox(title: string, message: string): Promise<void> {
@@ -428,6 +430,9 @@ const windowAdapter: WindowAdapter = {
   },
   close() {
     void bridge().window.close();
+  },
+  forceClose() {
+    void bridge().window.forceClose();
   },
 };
 

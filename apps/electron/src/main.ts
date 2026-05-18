@@ -45,6 +45,7 @@ const PACKAGED_APP_URL = "miko://app/index.html";
 
 const isMac = process.platform === "darwin";
 const isWin = process.platform === "win32";
+const closeAllowed = new WeakSet<BrowserWindow>();
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -431,6 +432,16 @@ function createWindow(showOnReady = true): BrowserWindow {
   if (showOnReady) {
     win.once("ready-to-show", () => win.show());
   }
+
+  win.on("close", (event) => {
+    if (closeAllowed.has(win)) {
+      closeAllowed.delete(win);
+      return;
+    }
+    if (win.webContents.isDestroyed()) return;
+    event.preventDefault();
+    win.webContents.send("app-command", "app:request-close");
+  });
 
   if (app.isPackaged) {
     void win.loadURL(PACKAGED_APP_URL);
@@ -1216,6 +1227,8 @@ function registerIpcHandlers(): void {
         message: options?.message ?? "",
         detail: options?.detail,
         buttons: options?.buttons,
+        defaultId: options?.defaultId,
+        cancelId: options?.cancelId,
       };
       const res = win
         ? await dialog.showMessageBox(win, opts)
@@ -1247,6 +1260,13 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IpcChannels.WindowClose, (event): void => {
     senderWindow(event)?.close();
+  });
+
+  ipcMain.handle(IpcChannels.WindowForceClose, (event): void => {
+    const win = senderWindow(event);
+    if (!win) return;
+    closeAllowed.add(win);
+    win.close();
   });
 
   // ── Waveform peak cache ────────────────────────────────────────────────────

@@ -23,10 +23,10 @@ import { audioDeviceService } from "./engine/AudioDeviceService";
 import { midiDeviceService } from "./engine/MidiDeviceService";
 import { ToastContainer } from "./components/ui/Toast";
 import { PerfMonitor } from "./components/PerfMonitor";
-import { useRecentProjectsStore } from "./store/recentProjectsStore";
 import type { DawProject, InsertDevice } from "./types/daw";
 import { useSettingsStore } from "./store/settingsStore";
 import { useWindowStore } from "./store/windowStore";
+import { rememberSavedProject } from "./utils/projectLifecycle";
 import "./App.css";
 
 // Wire engine modules to app-layer state — runs once at module load time.
@@ -143,7 +143,12 @@ export default function App() {
   const handleSaveProject = async () => {
     useUIStore.getState().setSaveStatus("saving");
     try {
-      await platform.projectStorage.saveProject(useProjectStore.getState().project);
+      const result = await platform.projectStorage.saveProject(useProjectStore.getState().project);
+      if (!result) {
+        useUIStore.getState().setSaveStatus("unsaved");
+        return;
+      }
+      rememberSavedProject(useProjectStore.getState().project, result);
       useUIStore.getState().setSaveStatus("saved");
     } catch (e) {
       console.warn("[App] save project:", e);
@@ -160,13 +165,6 @@ export default function App() {
       loadLocal();
     }
     useUIStore.getState().setSaveStatus("saved");
-    // Register the loaded project as a recent entry
-    const { project: loaded } = useProjectStore.getState();
-    useRecentProjectsStore.getState().addRecentProject({
-      id: loaded.id,
-      name: loaded.name,
-      source: "browser",
-    });
     if (startupBehavior === "wizard" && !startupHandledRef.current) {
       startupHandledRef.current = true;
       const windows = useWindowStore.getState();

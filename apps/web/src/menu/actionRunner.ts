@@ -11,12 +11,17 @@ import { activeAudioEngine } from "../engine/activeAudioEngine";
 import { getTrackColor } from "../theme";
 import { platform } from "../platform";
 import { importAudioFilesAsNewTracks } from "../utils/importAudioToProject";
-import { audioAssetManager } from "../engine/AudioAssetManager";
 import { midiEditorBridge } from "./midiEditorBridge";
 import { audioDeviceService } from "../engine/AudioDeviceService";
 import { midiDeviceService } from "../engine/MidiDeviceService";
 import { showToast } from "../components/ui/Toast";
 import { buildSelectionState, getActiveSelectionContext } from "../store/selectionSelectors";
+import {
+  guardUnsavedProject,
+  loadOpenedProject,
+  rememberSavedProject,
+  saveCurrentProjectAndRemember,
+} from "../utils/projectLifecycle";
 import {
   AddTrackCommand,
   DeleteTrackCommand,
@@ -32,25 +37,6 @@ import {
   SetTrackVolumeCommand,
   SplitClipCommand,
 } from "../commands";
-
-function guardDirty(continuation: () => void): void {
-  const saveStatus = useUIStore.getState().saveStatus;
-  if (saveStatus !== "unsaved") {
-    continuation();
-    return;
-  }
-  const ws = useWindowStore.getState();
-  if (ws.isWindowOpen("unsavedChanges")) return;
-  ws.setPendingAction(continuation);
-  ws.openDialog({
-    contentType: "unsavedChanges",
-    title: "Unsaved Changes",
-    modal: true,
-    width: 400,
-    height: 210,
-    closable: true,
-  });
-}
 
 export function runAction(actionId: string) {
   const uiStore = useUIStore.getState();
@@ -530,7 +516,8 @@ export function runAction(actionId: string) {
 
     // ── Project ────────────────────────────────────────────────────────────
     case "project:new":
-      guardDirty(() => {
+      void guardUnsavedProject("new").then((ok) => {
+        if (!ok) return;
         useWindowStore.getState().openDialog({
           contentType: "projectWizard",
           title: "New Project",
@@ -552,31 +539,7 @@ export function runAction(actionId: string) {
     }
 
     case "project:save":
-      useUIStore.getState().setSaveStatus("saving");
-      void platform.projectStorage
-        .saveProject(useProjectStore.getState().project)
-        .then((result) => {
-          if (result) {
-            useUIStore.getState().setSaveStatus("saved");
-            const proj = useProjectStore.getState().project;
-            const projectRoot = result.projectRoot ?? platform.folderProject.getProjectRoot() ?? undefined;
-            const filePath = result.path ?? platform.folderProject.getProjectFilePath() ?? undefined;
-            useRecentProjectsStore.getState().addRecentProject({
-              id: proj.id,
-              name: proj.name,
-              projectFilePath: filePath,
-              projectRoot,
-              storageMode: projectRoot ? "folder" : (platform.kind === "electron" ? "folder" : "browser"),
-              source: platform.kind === "electron" ? "local" : "browser",
-            });
-          } else {
-            useUIStore.getState().setSaveStatus("unsaved");
-          }
-        })
-        .catch((e) => {
-          console.warn("[ActionRunner] save project:", e);
-          useUIStore.getState().setSaveStatus("error");
-        });
+      void saveCurrentProjectAndRemember();
       break;
 
     case "project:save-as":
@@ -587,17 +550,7 @@ export function runAction(actionId: string) {
         .then((result) => {
           if (result) {
             useUIStore.getState().setSaveStatus("saved");
-            const proj = useProjectStore.getState().project;
-            const projectRoot = result.projectRoot ?? platform.folderProject.getProjectRoot() ?? undefined;
-            const filePath = result.path ?? platform.folderProject.getProjectFilePath() ?? undefined;
-            useRecentProjectsStore.getState().addRecentProject({
-              id: proj.id,
-              name: proj.name,
-              projectFilePath: filePath,
-              projectRoot,
-              storageMode: projectRoot ? "folder" : (platform.kind === "electron" ? "folder" : "browser"),
-              source: platform.kind === "electron" ? "local" : "browser",
-            });
+            rememberSavedProject(useProjectStore.getState().project, result);
           } else {
             useUIStore.getState().setSaveStatus("unsaved");
           }
@@ -614,7 +567,9 @@ export function runAction(actionId: string) {
       break;
 
     case "project:close":
-      guardDirty(() => {
+      void guardUnsavedProject("close").then((ok) => {
+        if (!ok) return;
+        platform.folderProject.setProjectRoot(null);
         useProjectStore.setState({
           project: {
             id: crypto.randomUUID(),
@@ -630,6 +585,7 @@ export function runAction(actionId: string) {
         history.clear();
         uiStore.setSelectedClipIds([]);
         uiStore.setSelectedTrackId(null);
+        uiStore.setSelectedBrowserFileId(null);
         uiStore.setSaveStatus("saved");
       });
       break;
@@ -639,30 +595,14 @@ export function runAction(actionId: string) {
       break;
 
     case "project:open":
-      void platform.projectStorage
-        .openProject()
-        .then((p) => {
+      void guardUnsavedProject("open").then((ok) => {
+        if (!ok) return;
+        return platform.projectStorage.openProject().then((p) => {
           if (p) {
-            useProjectStore.getState().loadProject(p);
-            useHistoryStore.getState().clear();
-            useUIStore.getState().setSelectedClipIds([]);
-            useUIStore.getState().setSelectedTrackId(null);
-            useUIStore.getState().setSelectedBrowserFileId(null);
-            useUIStore.getState().setSaveStatus("saved");
-            const projectRoot = platform.folderProject.getProjectRoot() ?? undefined;
-            const filePath = platform.folderProject.getProjectFilePath() ?? undefined;
-            useRecentProjectsStore.getState().addRecentProject({
-              id: p.id,
-              name: p.name,
-              projectRoot,
-              projectFilePath: filePath,
-              storageMode: projectRoot ? "folder" : (platform.kind === "electron" ? "folder" : "browser"),
-              source: platform.kind === "electron" ? "local" : "browser",
-            });
-            void audioAssetManager.restoreProjectAssets(p);
+            void loadOpenedProject(p);
           }
-        })
-        .catch((e) => console.warn("[ActionRunner] open project:", e));
+        });
+      }).catch((e) => console.warn("[ActionRunner] open project:", e));
       break;
 
     case "project:new-from-template":
@@ -952,7 +892,9 @@ export function runAction(actionId: string) {
       break;
 
     case "window:close":
-      platform.window.close();
+      void guardUnsavedProject("close").then((ok) => {
+        if (ok) platform.window.close();
+      });
       break;
 
     case "window:toggle-fullscreen":
@@ -968,7 +910,10 @@ export function runAction(actionId: string) {
 
     // ── App ────────────────────────────────────────────────────────────────
     case "app:quit":
-      platform.window.close();
+    case "app:request-close":
+      void guardUnsavedProject("close").then((ok) => {
+        if (ok) (platform.window.forceClose ?? platform.window.close)();
+      });
       break;
 
     case "app:reload":
