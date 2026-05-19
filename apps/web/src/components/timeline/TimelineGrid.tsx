@@ -70,7 +70,11 @@ export function TimelineGrid() {
       canvas.style.height = `${H}px`;
 
       const ctx = canvas.getContext("2d", { alpha: true, desynchronized: true });
-      if (!ctx) return;
+      if (!ctx) {
+        canvas.style.display = "none";
+        return;
+      }
+      canvas.style.display = "block";
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, W, H);
 

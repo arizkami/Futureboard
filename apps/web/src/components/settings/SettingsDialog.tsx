@@ -880,7 +880,7 @@ function AppearanceTab({ draft, setDraft }: { draft: AppSettings; setDraft: (p: 
           </SettingsRow>
           <SettingsRow
             label="Graphic Rendering Mode"
-            description="Auto uses Electron defaults. Force GPU requests ANGLE D3D12 on Windows and bypasses conservative GPU blocking. Software Rendering is safest for unstable drivers."
+            description="Auto uses Electron defaults with ANGLE D3D11 on Windows. Force GPU bypasses conservative GPU blocking. Software Rendering is safest for unstable drivers."
           >
             <div className="flex flex-col items-end gap-1.5">
               <SettingsSelect<GraphicRenderingMode>
@@ -888,7 +888,7 @@ function AppearanceTab({ draft, setDraft }: { draft: AppSettings; setDraft: (p: 
                 onChange={(v) => setDraft({ graphicRenderingMode: v })}
                 options={[
                   { value: "auto",     label: "GPU Rendering (Auto)" },
-                  { value: "force",    label: "Force GPU (ANGLE D3D12)" },
+                  { value: "force",    label: "Force GPU (ANGLE D3D11)" },
                   { value: "software", label: "Software Rendering" },
                 ]}
               />

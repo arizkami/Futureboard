@@ -119,19 +119,21 @@ if (GPU_MODE === "software") {
   console.log("[GPU] Software rendering mode (FUTUREBOARD_GPU_MODE=software)");
 } else {
   if (isWin) {
-    app.commandLine.appendSwitch("use-angle", "d3d12");
-    console.log("[GPU] Windows ANGLE backend requested: D3D12");
+    // D3D12 is still unstable on some Electron/Chromium + NVIDIA driver
+    // combinations and can produce white WebGL surfaces. D3D11 keeps ANGLE on
+    // the hardware path while staying compatible with Chromium compositing.
+    app.commandLine.appendSwitch("use-angle", "d3d11");
+    console.log("[GPU] Windows ANGLE backend requested: D3D11");
   }
 }
 
 if (GPU_MODE === "force") {
   app.commandLine.appendSwitch("ignore-gpu-blocklist");
   app.commandLine.appendSwitch("enable-gpu-rasterization");
-  app.commandLine.appendSwitch("enable-zero-copy");
   app.commandLine.appendSwitch("enable-accelerated-2d-canvas");
   app.commandLine.appendSwitch("enable-webgl");
   app.disableDomainBlockingFor3DAPIs();
-  console.log("[GPU] Force hardware mode (FUTUREBOARD_GPU_MODE=force; ANGLE=D3D12 on Windows)");
+  console.log("[GPU] Force hardware mode (FUTUREBOARD_GPU_MODE=force; ANGLE=D3D11 on Windows)");
 } else if (GPU_MODE === "auto") {
   console.log("[GPU] Auto mode — GPU acceleration left to Electron defaults");
 }

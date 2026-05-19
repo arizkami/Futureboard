@@ -41,6 +41,11 @@ export class TimelineGpuPlayheadRenderer {
       canvas.getContext("webgl", { alpha: true, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false })
     ) as GpuContext | null;
     if (!gl) return null;
+    canvas.addEventListener("webglcontextlost", (event) => {
+      event.preventDefault();
+      canvas.style.display = "none";
+      console.warn("[TimelineGPU] Playhead WebGL context lost; hiding GPU playhead surface.");
+    }, { once: true });
     try {
       return new TimelineGpuPlayheadRenderer(gl);
     } catch (error) {
@@ -68,6 +73,7 @@ export class TimelineGpuPlayheadRenderer {
     this.height = Math.max(1, height);
     const ratio = Math.max(1, Math.min(2, dpr || 1));
     const canvas = this.gl.canvas as HTMLCanvasElement;
+    if (this.gl.isContextLost()) throw new Error("WebGL context lost");
     const bw = Math.ceil(this.width * ratio);
     const bh = Math.ceil(this.height * ratio);
     if (canvas.width !== bw || canvas.height !== bh) {
@@ -76,11 +82,13 @@ export class TimelineGpuPlayheadRenderer {
     }
     canvas.style.width = `${this.width}px`;
     canvas.style.height = `${this.height}px`;
+    canvas.style.display = "block";
     this.gl.viewport(0, 0, bw, bh);
   }
 
   render(x: number): void {
     const gl = this.gl;
+    if (gl.isContextLost()) throw new Error("WebGL context lost");
     gl.useProgram(this.program);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
     gl.disable(gl.DEPTH_TEST);
