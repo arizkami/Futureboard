@@ -50,7 +50,21 @@ import { commitRecordingResults } from "../engine/RecordingManager";
 
 const _isElectron = platform.kind === "electron";
 const _isMac = _isElectron && typeof window !== "undefined" && window.dawElectron?.platform === "darwin";
-const WCO_CLASS = _isElectron ? (_isMac ? "pl-35 pr-0" : "pr-35") : "";
+const _isLinux = _isElectron && typeof window !== "undefined" && window.dawElectron?.platform === "linux";
+// macOS: traffic lights span ~72px from the left edge (no WCO env vars available on mac).
+// Windows: WCO buttons on the right, ~140px wide — pr-35 stays unchanged.
+// Linux: WCO button size/side varies by DE; use CSS env(titlebar-area-*) via wcoStyle instead.
+const WCO_CLASS = _isElectron && !_isLinux
+  ? _isMac ? "pl-[72px] pr-0" : "pr-35"
+  : "";
+// Linux-only: env(titlebar-area-x/width) is set by Electron when titleBarOverlay is active
+// and correctly reflects the WCO geometry regardless of which side the DE places buttons on.
+const wcoStyle = _isLinux
+  ? {
+      paddingLeft: "max(8px, env(titlebar-area-x, 0px))",
+      paddingRight: "max(8px, calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)))",
+    }
+  : undefined;
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 const TIME_SIG_NUMERATORS = [2, 3, 4, 5, 6, 7, 8, 9, 12];
@@ -764,6 +778,7 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
     <div
       ref={barRef}
       className={`drag-region-app relative z-[100] flex h-9 shrink-0 select-none items-stretch border-b border-daw-border bg-daw-sunken px-2 shadow-[0_8px_24px_rgba(0,0,0,0.22)] ${WCO_CLASS}`}
+      style={wcoStyle}
     >
       <div className="flex w-full min-w-0 items-center justify-between gap-4">
         <div className="flex min-w-0 flex-1 items-center gap-2">
