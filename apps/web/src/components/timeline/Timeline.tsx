@@ -16,6 +16,7 @@ import { audioImportQueue } from "../../engine/AudioImportQueue";
 import { TIMELINE_Z } from "../../utils/timelineZ";
 import { useDragWorkflowStore, type DragPreviewState } from "../../store/dragWorkflowStore";
 import { HEADER_WIDTH, TRACK_HEIGHT } from "../../theme";
+import { notifyScroll } from "../../engine/scrollController";
 
 // Zoom range: 4 px/s lets you see ~250 bars in a typical viewport at 120 BPM.
 // 4000 px/s lets you inspect individual samples with 1/32-note subdivisions visible.
@@ -39,7 +40,7 @@ export function Timeline() {
   const dragRaf = useRef<number | null>(null);
   const lastDragEvent = useRef<React.DragEvent | null>(null);
   const dragPreview = useDragWorkflowStore((s) => s.preview);
-  const { pixelsPerSecond, setPixelsPerSecond, setScrollX, setScrollY, setTrackAreaHeight, snapToGrid, toggleSnapToGrid, currentTool, marqueeSelection, setMarqueeSelection } = useUIStore();
+  const { pixelsPerSecond, setPixelsPerSecond, setScrollX, setScrollY, setTrackAreaHeight, snapToGrid, arrangementGridDivision, toggleSnapToGrid, currentTool, marqueeSelection, setMarqueeSelection } = useUIStore();
 
   const TOOL_CURSOR: Record<ArrangementTool, string> = {
     pointer:    "default",
@@ -53,6 +54,8 @@ export function Timeline() {
   const { tracks, bpm } = useProjectStore((s) => s.project);
   const scrollRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const scrollRafRef = useRef<number | null>(null);
+  const pendingScrollRef = useRef<{ x: number; y: number } | null>(null);
 
   const isFileDrag = (e: React.DragEvent) => {
     const types = [...e.dataTransfer.types];
@@ -96,7 +99,7 @@ export function Timeline() {
     const spb = secondsPerBeat(geometry.bpm);
     const targetBeat = time / spb;
     const snappedTime = snapToGrid
-      ? snapTime(time, geometry.bpm, useProjectStore.getState().project.timeSignature ?? { numerator: 4, denominator: 4 }, geometry.pxPerSecond * spb)
+      ? snapTime(time, geometry.bpm, useProjectStore.getState().project.timeSignature ?? { numerator: 4, denominator: 4 }, geometry.pxPerSecond * spb, useUIStore.getState().arrangementGridDivision)
       : time;
     const y = e.clientY - geometry.rect.top + geometry.scrollTop;
     const targetTrackIndex = Math.max(0, Math.min(Math.max(0, geometry.trackCount - 1), Math.floor(y / TRACK_HEIGHT)));
@@ -196,7 +199,7 @@ export function Timeline() {
       if (geometry || scrollRef.current) {
         if (snapToGrid) {
           const spb = secondsPerBeat(bpm);
-          time = snapTime(time, bpm, useProjectStore.getState().project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb);
+          time = snapTime(time, bpm, useProjectStore.getState().project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb, arrangementGridDivision);
         }
       }
 
@@ -444,6 +447,7 @@ export function Timeline() {
   useEffect(() => {
     return () => {
       if (zoomRafRef.current !== null) cancelAnimationFrame(zoomRafRef.current);
+      if (scrollRafRef.current !== null) cancelAnimationFrame(scrollRafRef.current);
     };
   }, []);
 
@@ -516,8 +520,20 @@ export function Timeline() {
           className="absolute inset-0 overflow-auto"
           style={{ cursor: TOOL_CURSOR[currentTool], zIndex: TIMELINE_Z.scrollArea }}
           onScroll={(e) => {
-            setScrollX(e.currentTarget.scrollLeft);
-            setScrollY(e.currentTarget.scrollTop);
+            const sl = e.currentTarget.scrollLeft;
+            const st = e.currentTarget.scrollTop;
+            // Notify scroll subscribers immediately (no Zustand round-trip).
+            notifyScroll(sl);
+            // Throttle Zustand store updates to one per rAF to avoid cascading
+            // React re-renders from every raw scroll event.
+            pendingScrollRef.current = { x: sl, y: st };
+            if (scrollRafRef.current === null) {
+              scrollRafRef.current = requestAnimationFrame(() => {
+                scrollRafRef.current = null;
+                const p = pendingScrollRef.current;
+                if (p) { setScrollX(p.x); setScrollY(p.y); pendingScrollRef.current = null; }
+              });
+            }
             if (dragGeometry.current) cacheDragGeometry();
           }}
         >

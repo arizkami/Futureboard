@@ -385,6 +385,11 @@ export const APP_MENUS: AppMenuGroup[] = [
             action: "timeline:set-snap-bar",
           },
           {
+            id: "edit.snap.whole",
+            label: "1/1 Note",
+            action: "timeline:set-snap-whole",
+          },
+          {
             id: "edit.snap.beat",
             label: "Beat",
             checked: true,
@@ -404,6 +409,26 @@ export const APP_MENUS: AppMenuGroup[] = [
             id: "edit.snap.thirty_second",
             label: "1/32 Note",
             action: "timeline:set-snap-thirty-second",
+          },
+          {
+            id: "edit.snap.sixty_fourth",
+            label: "1/64 Note",
+            action: "timeline:set-snap-sixty-fourth",
+          },
+          {
+            id: "edit.snap.quarter_triplet",
+            label: "1/4T",
+            action: "timeline:set-snap-quarter-triplet",
+          },
+          {
+            id: "edit.snap.eighth_triplet",
+            label: "1/8T",
+            action: "timeline:set-snap-eighth-triplet",
+          },
+          {
+            id: "edit.snap.sixteenth_triplet",
+            label: "1/16T",
+            action: "timeline:set-snap-sixteenth-triplet",
           },
           {
             id: "edit.snap.off",

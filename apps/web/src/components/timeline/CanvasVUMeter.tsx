@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { meterStore } from "../../store/meterStore";
+import { shouldRunVisualFrame } from "../../utils/visualFrameRate";
 
 /** Stereo VU bar meter rendered entirely on canvas. Zero React re-renders during playback. */
 export function CanvasVUMeter({
@@ -31,6 +32,7 @@ export function CanvasVUMeter({
     const DECAY = 0.82;
 
     let rafId = 0;
+    let lastDrawAt = 0;
     const target = { l: 0, r: 0 };
     const unsubscribe = meterStore.subscribe(trackId, (meter) => {
       target.l = rmsToMeter(meter.peakL);
@@ -45,6 +47,12 @@ export function CanvasVUMeter({
     const barW = Math.max(1, Math.floor((width - 2) / 2)); // L and R bar pixel width
 
     const draw = () => {
+      const now = performance.now();
+      if (!shouldRunVisualFrame(lastDrawAt, now)) {
+        rafId = requestAnimationFrame(draw);
+        return;
+      }
+      lastDrawAt = now;
       const ctx = canvas.getContext("2d");
       if (!ctx) { rafId = requestAnimationFrame(draw); return; }
 

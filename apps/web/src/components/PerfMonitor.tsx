@@ -4,6 +4,8 @@ import { audioImportQueue } from "../engine/AudioImportQueue";
 import { useProjectStore } from "../store/projectStore";
 import { useDragWorkflowStore } from "../store/dragWorkflowStore";
 import { backgroundTaskStats } from "../store/backgroundTaskStore";
+import { isScrollingNow } from "../engine/scrollController";
+import { shouldRunVisualFrame } from "../utils/visualFrameRate";
 
 type GpuInfo = {
   hardwareAccelerationEnabled: boolean;
@@ -16,6 +18,7 @@ type GpuInfo = {
 type Stats = {
   fps: number;
   frameMs: number;
+  isScrolling: boolean;
   gpuInfo: GpuInfo;
   webgl: string;
   webgpu: string;
@@ -58,6 +61,7 @@ export function PerfMonitor({ visible }: { visible: boolean }) {
   const [stats, setStats] = useState<Stats>({
     fps: 0,
     frameMs: 0,
+    isScrolling: false,
     gpuInfo: null,
     webgl: "...",
     webgpu: "...",
@@ -89,6 +93,10 @@ export function PerfMonitor({ visible }: { visible: boolean }) {
     getWebGPUStatus().then((v) => setStats((s) => ({ ...s, webgpu: v })));
 
     const tick = (now: number) => {
+      if (!shouldRunVisualFrame(lastFrameRef.current, now)) {
+        rafRef.current = requestAnimationFrame(tick);
+        return;
+      }
       const delta = now - lastFrameRef.current;
       lastFrameRef.current = now;
 
@@ -103,6 +111,7 @@ export function PerfMonitor({ visible }: { visible: boolean }) {
         ...s,
         fps,
         frameMs: Math.round(avgMs * 10) / 10,
+        isScrolling: isScrollingNow(),
         audioImport: audioImportQueue.getDebugStats(),
         drag: getDragStats(),
         backgroundTasks: backgroundTaskStats(),
@@ -118,7 +127,7 @@ export function PerfMonitor({ visible }: { visible: boolean }) {
 
   if (!visible) return null;
 
-  const { fps, frameMs, gpuInfo, webgl, webgpu, audioImport, drag, backgroundTasks } = stats;
+  const { fps, frameMs, isScrolling, gpuInfo, webgl, webgpu, audioImport, drag, backgroundTasks } = stats;
   const { peakMeta, project } = useProjectStore.getState();
   const visibleTrackCount = project.tracks.length;
   const hwAccel  = gpuInfo?.hardwareAccelerationEnabled ?? (platform.kind !== "electron" ? true : null);
@@ -138,8 +147,9 @@ export function PerfMonitor({ visible }: { visible: boolean }) {
     >
       <div className="mb-1 text-[9px] font-semibold uppercase tracking-widest text-white/40">Perf Monitor</div>
 
-      <Row label="FPS"   value={`${fps}`}        ok={fps >= 55}      warn={fps >= 30} />
-      <Row label="Frame" value={`${frameMs} ms`} ok={frameMs <= 16.7} warn={frameMs <= 33} />
+      <Row label="FPS"      value={`${fps}`}        ok={fps >= 55}      warn={fps >= 30} />
+      <Row label="Frame"    value={`${frameMs} ms`} ok={frameMs <= 16.7} warn={frameMs <= 33} />
+      <Row label="Scrolling" value={isScrolling ? "active (fast draw)" : "idle"} ok={!isScrolling} warn={false} />
 
       <Divider />
 

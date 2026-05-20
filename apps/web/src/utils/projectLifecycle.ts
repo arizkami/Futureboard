@@ -1,5 +1,6 @@
 import type { DawProject } from "../types/daw";
 import { audioAssetManager } from "../engine/AudioAssetManager";
+import { nativeServices } from "../engine/nativeServices";
 import { platform } from "../platform";
 import type { SaveProjectResult } from "../platform";
 import { useHistoryStore } from "../store/historyStore";
@@ -9,6 +10,18 @@ import { useUIStore } from "../store/uiStore";
 import { showToast } from "../components/ui/Toast";
 
 type GuardIntent = "open" | "new" | "switch" | "close";
+
+export const PROJECT_ACTION_CHANNEL = "futureboard-project-actions";
+
+export type ProjectActionMessage =
+  | { type: "openProjectPath"; filePath: string };
+
+export function requestMainWindowOpenProject(filePath: string): void {
+  if (typeof BroadcastChannel === "undefined") return;
+  const channel = new BroadcastChannel(PROJECT_ACTION_CHANNEL);
+  channel.postMessage({ type: "openProjectPath", filePath } satisfies ProjectActionMessage);
+  channel.close();
+}
 
 function recentFromSavedProject(project: DawProject, result?: SaveProjectResult | null) {
   const projectRoot = result?.projectRoot ?? platform.folderProject.getProjectRoot() ?? undefined;
@@ -92,9 +105,51 @@ export async function guardUnsavedProject(intent: GuardIntent): Promise<boolean>
 }
 
 export async function loadOpenedProject(project: DawProject): Promise<void> {
+  // Pre-warm peak metadata concurrently so clips can render their waveforms on
+  // the very first mount, rather than flashing "Waveform pending" → "loading...".
+  const preWarmed = await Promise.all(
+    project.files.map(async (file) => ({
+      fileId: file.id,
+      meta:   await audioAssetManager.tryLoadWaveformMeta(file),
+    })),
+  );
+
   useProjectStore.getState().loadProject(project);
   clearProjectSelectionState();
   useUIStore.getState().setSaveStatus("saved");
   rememberSavedProject(project);
+
+  // Re-apply pre-warmed metadata immediately (loadProject reset the store).
+  const store = useProjectStore.getState();
+  for (const { fileId, meta } of preWarmed) {
+    if (meta) store.setPeakMeta(fileId, meta);
+  }
+
+  // Notify waveform components that all pre-warmed peak data is committed.
+  // WaveformCanvas listens for this to retry drawing after project open.
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("projectWaveformReady"));
+  }
+
   void audioAssetManager.restoreProjectAssets(project);
+}
+
+/**
+ * Single entry point for opening a project from a file path.
+ * Waits for native services to settle, reads the file, pre-warms peaks,
+ * commits to the store, and fires `projectWaveformReady`.
+ * All open-by-path code paths (Recent Projects, startup argv, app-command)
+ * must go through this function.
+ */
+export async function openProjectFromPath(filePath: string): Promise<boolean> {
+  if (!platform.folderProject.isSupported) return false;
+
+  // Ensure IPC / native services have settled before issuing peak reads.
+  await nativeServices.whenReadyOrSettled();
+
+  const project = await platform.folderProject.openByPath(filePath);
+  if (!project) return false;
+
+  await loadOpenedProject(project);
+  return true;
 }

@@ -150,10 +150,17 @@ app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
 
 // Canvas OOP rasterization: offloads canvas 2D rasterization to the GPU
 // process, eliminating main-thread stalls on waveform and meter draws.
+// HighRefreshRateAnimation: tells Chromium's frame scheduler to honour the
+// display's native vsync interval rather than defaulting to 60 Hz.
 app.commandLine.appendSwitch(
   "enable-features",
-  "CanvasOopRasterization,SharedArrayBuffer",
+  "CanvasOopRasterization,SharedArrayBuffer,HighRefreshRateAnimation",
 );
+
+// Remove Chromium's artificial 60 fps renderer cap so requestAnimationFrame
+// follows the actual display refresh rate (100 Hz, 120 Hz, 144 Hz, etc.).
+// Without this flag Chromium clamps RAF to 60 fps regardless of the monitor.
+app.commandLine.appendSwitch("disable-frame-rate-limit");
 
 // Single-instance lock — avoid duplicate processes hammering the audio
 // device when the user double-clicks the launcher.
@@ -1087,13 +1094,22 @@ function externalRouteForContent(contentType: string): string {
   switch (contentType) {
     case "mixer":
       return "/external/mixer";
+    case "projectWizard":
+      return "/projectwizard";
+    case "preferences":
+      return "/settings";
     default:
       return "/";
   }
 }
 
-function rendererRouteUrl(route: string): string {
-  const hashRoute = `#${route.startsWith("/") ? route : `/${route}`}`;
+function rendererRouteUrl(route: string, payload?: Record<string, unknown>): string {
+  const params = new URLSearchParams();
+  if (payload?.initialTab && typeof payload.initialTab === "string") {
+    params.set("tab", payload.initialTab);
+  }
+  const suffix = params.size > 0 ? `?${params.toString()}` : "";
+  const hashRoute = `#${route.startsWith("/") ? route : `/${route}`}${suffix}`;
   if (app.isPackaged) {
     return `miko://app/index.html${hashRoute}`;
   }
@@ -1119,6 +1135,7 @@ function openExternalRendererWindow(config: ExternalWindowConfig): string | null
     frame: config.frame ?? true,
     transparent: config.transparent ?? false,
     resizable: config.resizable ?? true,
+    maximizable: config.maximizable ?? true,
     alwaysOnTop: config.alwaysOnTop ?? false,
     backgroundColor: "#0b0f14",
     show: false,
@@ -1140,7 +1157,7 @@ function openExternalRendererWindow(config: ExternalWindowConfig): string | null
   win.on("closed", () => externalWindows.delete(id));
 
   const route = externalRouteForContent(config.contentType);
-  void win.loadURL(rendererRouteUrl(route));
+  void win.loadURL(rendererRouteUrl(route, config.payload));
 
   return id;
 }
@@ -1315,9 +1332,11 @@ function registerIpcHandlers(): void {
     IpcChannels.ProjectOpenDialog,
     async (event): Promise<OpenDialogResult> => {
       const win = senderWindow(event);
+      const defaultProjectsDir = path.join(app.getPath("documents"), "Futureboard Studio", "Projects");
       const opts: Electron.OpenDialogOptions = {
         title: "Open Project",
-        filters: [{ name: "Mochi Project", extensions: ["mochiproj", "json"] }],
+        defaultPath: defaultProjectsDir,
+        filters: [{ name: "Futureboard Project", extensions: ["mochiproj"] }],
         properties: ["openFile"],
       };
       const res = win
@@ -1641,6 +1660,16 @@ function registerIpcHandlers(): void {
     },
   );
 
+  ipcMain.handle(
+    IpcChannels.SysGetDefaultProjectsPath,
+    async (): Promise<string> => {
+      const docsDir = app.getPath("documents");
+      const projectsDir = path.join(docsDir, "Futureboard Studio", "Projects");
+      try { await fs.mkdir(projectsDir, { recursive: true }); } catch { /* already exists */ }
+      return projectsDir;
+    },
+  );
+
   // ── Folder-based project operations ────────────────────────────────────────
 
   ipcMain.handle(
@@ -1661,8 +1690,11 @@ function registerIpcHandlers(): void {
     IpcChannels.ProjectFolderBrowseLocation,
     async (event): Promise<BrowseFolderResult> => {
       const win = senderWindow(event);
+      const defaultProjectsDir = path.join(app.getPath("documents"), "Futureboard Studio", "Projects");
+      try { await fs.mkdir(defaultProjectsDir, { recursive: true }); } catch { /* already exists */ }
       const opts: Electron.OpenDialogOptions = {
         title: "Choose Project Location",
+        defaultPath: defaultProjectsDir,
         properties: ["openDirectory", "createDirectory"],
       };
       const res = win
@@ -1802,11 +1834,29 @@ function registerIpcHandlers(): void {
 // renderer's preload script issues its first `ipcRenderer.invoke`.
 registerIpcHandlers();
 
-app.on("second-instance", () => {
+function sendOpenFileCommand(win: BrowserWindow, filePath: string): void {
+  win.webContents.send("app-command", `project:open-file:${filePath}`);
+}
+
+function tryOpenFileArg(win: BrowserWindow, argv: string[]): void {
+  const file = argv.find((a) => a.endsWith(".mochiproj") && !a.startsWith("-"));
+  if (file) sendOpenFileCommand(win, file);
+}
+
+app.on("second-instance", (_event, argv) => {
   const [win] = BrowserWindow.getAllWindows();
   if (!win) return;
   if (win.isMinimized()) win.restore();
   win.focus();
+  tryOpenFileArg(win, argv);
+});
+
+// macOS: file opened via Finder / OS association while app is already running.
+app.on("open-file", (event, filePath) => {
+  event.preventDefault();
+  const [win] = BrowserWindow.getAllWindows();
+  if (!win) return;
+  sendOpenFileCommand(win, filePath);
 });
 
 app.whenReady().then(async () => {
@@ -1856,6 +1906,8 @@ app.whenReady().then(async () => {
   win.once("ready-to-show", () => {
     splash.close();
     win.show();
+    // Open project passed on the command line (e.g. double-click .mochiproj in Explorer).
+    tryOpenFileArg(win, process.argv);
   });
 
   app.on("activate", () => {

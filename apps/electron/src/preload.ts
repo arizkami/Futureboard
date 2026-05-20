@@ -35,6 +35,16 @@ const invoke = ipcRenderer.invoke.bind(ipcRenderer);
 const isMac = process.platform === "darwin";
 const APP_COMMAND_CHANNEL = "app-command";
 
+// Buffer app-command events that arrive before the renderer registers its
+// onCommand listener (e.g. the startup file-open arg from tryOpenFileArg fires
+// during ready-to-show, which can precede App.tsx's useEffect mount).
+const _earlyCommands: string[] = [];
+let _earlyAppCmdListener: ((_e: IpcRendererEvent, cmd: unknown) => void) | null =
+  (_e: IpcRendererEvent, cmd: unknown) => {
+    if (typeof cmd === "string") _earlyCommands.push(cmd);
+  };
+ipcRenderer.on(APP_COMMAND_CHANNEL, _earlyAppCmdListener);
+
 const fsBridge = Object.freeze({
   pickAudioFiles: (): Promise<PickedAudioFile[]> =>
     invoke(IpcChannels.FsPickAudioFiles),
@@ -130,6 +140,8 @@ const sysBridge = Object.freeze({
     invoke(IpcChannels.SysReadElectronSettings),
   writeElectronSettings: (settings: ElectronPersistedSettings): Promise<void> =>
     invoke(IpcChannels.SysWriteElectronSettings, settings),
+  getDefaultProjectsPath: (): Promise<string> =>
+    invoke(IpcChannels.SysGetDefaultProjectsPath),
 });
 
 const floatingWindowBridge = Object.freeze({
@@ -200,6 +212,16 @@ contextBridge.exposeInMainWorld("dawElectron", dawElectron);
 contextBridge.exposeInMainWorld("futureboard", Object.freeze({
   commands: Object.freeze({
     onCommand: (callback: (commandId: string) => void): (() => void) => {
+      // Remove the early-buffer listener and drain any buffered commands.
+      if (_earlyAppCmdListener) {
+        ipcRenderer.removeListener(APP_COMMAND_CHANNEL, _earlyAppCmdListener);
+        _earlyAppCmdListener = null;
+        for (const cmd of _earlyCommands.splice(0)) {
+          // Defer via setTimeout so the command runs after the useEffect
+          // that registered this handler has fully returned.
+          setTimeout(() => callback(cmd), 0);
+        }
+      }
       const listener = (_event: IpcRendererEvent, commandId: unknown) => {
         if (typeof commandId === "string") callback(commandId);
       };

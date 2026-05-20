@@ -6,7 +6,6 @@ import { useTransportStore } from "../store/transportStore";
 import { useMetronomeStore } from "../store/metronomeStore";
 import { useHistoryStore } from "../store/historyStore";
 import { useRecentProjectsStore } from "../store/recentProjectsStore";
-import { useWindowStore } from "../store/windowStore";
 import { activeAudioEngine } from "../engine/activeAudioEngine";
 import { getTrackColor } from "../theme";
 import { platform } from "../platform";
@@ -15,13 +14,16 @@ import { midiEditorBridge } from "./midiEditorBridge";
 import { audioDeviceService } from "../engine/AudioDeviceService";
 import { midiDeviceService } from "../engine/MidiDeviceService";
 import { showToast } from "../components/ui/Toast";
+import type { SnapDivision } from "../utils/musicalTime";
 import { buildSelectionState, getActiveSelectionContext } from "../store/selectionSelectors";
 import {
   guardUnsavedProject,
   loadOpenedProject,
+  openProjectFromPath,
   rememberSavedProject,
   saveCurrentProjectAndRemember,
 } from "../utils/projectLifecycle";
+import { openProjectWizardWindow, openSettingsWindow } from "../utils/dialogWindows";
 import {
   AddTrackCommand,
   DeleteTrackCommand,
@@ -242,11 +244,17 @@ export function runAction(actionId: string) {
       break;
 
     case "timeline:set-snap-bar":
+    case "timeline:set-snap-whole":
     case "timeline:set-snap-beat":
     case "timeline:set-snap-eighth":
     case "timeline:set-snap-sixteenth":
     case "timeline:set-snap-thirty-second":
+    case "timeline:set-snap-sixty-fourth":
+    case "timeline:set-snap-quarter-triplet":
+    case "timeline:set-snap-eighth-triplet":
+    case "timeline:set-snap-sixteenth-triplet":
       if (!useUIStore.getState().snapToGrid) uiStore.toggleSnapToGrid();
+      uiStore.setArrangementGridDivision(gridDivisionFromAction(actionId));
       break;
 
     case "timeline:set-snap-off":
@@ -518,15 +526,7 @@ export function runAction(actionId: string) {
     case "project:new":
       void guardUnsavedProject("new").then((ok) => {
         if (!ok) return;
-        useWindowStore.getState().openDialog({
-          contentType: "projectWizard",
-          title: "New Project",
-          modal: true,
-          width: 780,
-          height: platform.kind === "electron" ? 560 : 510,
-          resizable: false,
-          closable: true,
-        });
+        void openProjectWizardWindow();
       });
       break;
 
@@ -615,22 +615,7 @@ export function runAction(actionId: string) {
     case "project:settings":
     case "project:tempo-settings":
     case "project:time-signature": {
-      const ws = useWindowStore.getState();
-      if (!ws.isWindowOpen("preferences")) {
-        ws.openDialog({
-          contentType: "preferences",
-          title: "Preferences",
-          width: 860,
-          height: 600,
-          minWidth: 720,
-          minHeight: 480,
-          modal: true,
-          closable: true,
-          payload: { initialTab: "project" },
-        });
-      } else {
-        ws.windows.filter((w) => w.contentType === "preferences").forEach((w) => ws.focusWindow(w.id));
-      }
+      void openSettingsWindow("project");
       break;
     }
 
@@ -675,22 +660,7 @@ export function runAction(actionId: string) {
 
     // ── Audio processing (not yet implemented) ─────────────────────────────
     case "audio:settings": {
-      const ws = useWindowStore.getState();
-      if (!ws.isWindowOpen("preferences")) {
-        ws.openDialog({
-          contentType: "preferences",
-          title: "Preferences",
-          width: 860,
-          height: 600,
-          minWidth: 720,
-          minHeight: 480,
-          modal: true,
-          closable: true,
-          payload: { initialTab: "audio" },
-        });
-      } else {
-        ws.windows.filter((w) => w.contentType === "preferences").forEach((w) => ws.focusWindow(w.id));
-      }
+      void openSettingsWindow("audio");
       break;
     }
 
@@ -947,21 +917,7 @@ export function runAction(actionId: string) {
       break;
 
     case "app:preferences": {
-      const ws = useWindowStore.getState();
-      if (!ws.isWindowOpen("preferences")) {
-        ws.openDialog({
-          contentType: "preferences",
-          title: "Preferences",
-          width: 860,
-          height: 600,
-          minWidth: 720,
-          minHeight: 480,
-          modal: true,
-          closable: true,
-        });
-      } else {
-        ws.windows.filter((w) => w.contentType === "preferences").forEach((w) => ws.focusWindow(w.id));
-      }
+      void openSettingsWindow();
       break;
     }
     case "app:check-for-updates":
@@ -983,26 +939,7 @@ export function runAction(actionId: string) {
 
     // ── Help stubs ─────────────────────────────────────────────────────────
     case "help:keyboard-shortcuts": {
-      const ws = useWindowStore.getState();
-      if (!ws.isWindowOpen("preferences")) {
-        ws.openDialog({
-          contentType: "preferences",
-          title: "Preferences",
-          width: 860,
-          height: 600,
-          minWidth: 720,
-          minHeight: 480,
-          modal: true,
-          closable: true,
-          payload: { initialTab: "shortcuts" },
-        });
-      } else {
-        const prefsWin = ws.windows.find((w) => w.contentType === "preferences");
-        if (prefsWin) {
-          ws.updateWindowPayload(prefsWin.id, { initialTab: "shortcuts" });
-          ws.focusWindow(prefsWin.id);
-        }
-      }
+      void openSettingsWindow("shortcuts");
       break;
     }
     case "help:quick-start":
@@ -1029,6 +966,17 @@ export function runAction(actionId: string) {
       break;
 
     default:
+      // project:open-file:<path> — sent by Electron when the app is opened with a .mochiproj file
+      if (actionId.startsWith("project:open-file:")) {
+        const filePath = actionId.slice("project:open-file:".length);
+        if (filePath && platform.folderProject.isSupported) {
+          void guardUnsavedProject("open").then((ok) => {
+            if (!ok) return;
+            return openProjectFromPath(filePath);
+          }).catch((e: unknown) => console.warn("[ActionRunner] open-file:", e));
+        }
+        break;
+      }
       // file:reveal-in-folder:<path>
       if (actionId.startsWith("file:reveal-in-folder:")) {
         if (!platform.capabilities.filesystem) break;
@@ -1051,5 +999,22 @@ export function runAction(actionId: string) {
         break;
       }
       console.warn(`[ActionRunner] Unhandled action: ${actionId}`);
+  }
+}
+
+function gridDivisionFromAction(actionId: string): SnapDivision {
+  switch (actionId) {
+    case "timeline:set-snap-auto": return "auto";
+    case "timeline:set-snap-bar": return "1bar";
+    case "timeline:set-snap-whole": return "1/1";
+    case "timeline:set-snap-beat": return "1/4";
+    case "timeline:set-snap-eighth": return "1/8";
+    case "timeline:set-snap-sixteenth": return "1/16";
+    case "timeline:set-snap-thirty-second": return "1/32";
+    case "timeline:set-snap-sixty-fourth": return "1/64";
+    case "timeline:set-snap-quarter-triplet": return "1/4T";
+    case "timeline:set-snap-eighth-triplet": return "1/8T";
+    case "timeline:set-snap-sixteenth-triplet": return "1/16T";
+    default: return "auto";
   }
 }

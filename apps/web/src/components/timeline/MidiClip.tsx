@@ -7,6 +7,7 @@ import {
   DuplicateClipsCommand,
   GlueClipsCommand,
   MoveClipCommand,
+  MoveClipsCommand,
   ResizeClipCommand,
   SplitClipCommand,
   UpdateClipCommand,
@@ -193,10 +194,20 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
     dragStartTime.current = clip.startTime;
     setDragging(true);
 
-    let draggedClipId = clip.id;
+    let draggedClipId  = clip.id;
     let draggedTrackId = clip.trackId;
-    let duplicated = false;
-    let lastSeconds = clip.startTime;
+    let duplicated     = false;
+    let lastSeconds    = clip.startTime;
+    let rafId: number | null = null;
+
+    const allClipsFlat = () => useProjectStore.getState().project.tracks.flatMap((t) => t.clips);
+    const ui0      = useUIStore.getState();
+    const groupIds = ui0.selectedClipIds.includes(clip.id) ? ui0.selectedClipIds : [clip.id];
+    const initialTimes = new Map<string, number>(
+      allClipsFlat()
+        .filter((c) => groupIds.includes(c.id))
+        .map((c) => [c.id, c.startTime]),
+    );
 
     const onMove = (ev: MouseEvent) => {
       // Duplicate on threshold when Alt was held at drag start.
@@ -212,14 +223,12 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
         useHistoryStore.getState().execute(cmd);
         const newIds = cmd.newClipIds;
 
-        const dupClip = useProjectStore.getState().project.tracks
-          .flatMap((t) => t.clips)
-          .find(
-            (c) =>
-              newIds.includes(c.id) &&
-              c.trackId === clip.trackId &&
-              Math.abs(c.startTime - (clip.startTime + clip.duration)) < 0.001,
-          );
+        const dupClip = allClipsFlat().find(
+          (c) =>
+            newIds.includes(c.id) &&
+            c.trackId === clip.trackId &&
+            Math.abs(c.startTime - (clip.startTime + clip.duration)) < 0.001,
+        );
 
         if (dupClip) {
           moveClip(dupClip.id, dupClip.trackId, clip.startTime);
@@ -228,6 +237,11 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
           dragStartTime.current = clip.startTime;
           dragStartX.current    = ev.clientX;
         }
+
+        initialTimes.clear();
+        allClipsFlat()
+          .filter((c) => newIds.includes(c.id))
+          .forEach((c) => initialTimes.set(c.id, c.startTime));
 
         ui.setSelectedClipIds(newIds);
       }
@@ -238,18 +252,41 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
       );
       if (useUIStore.getState().snapToGrid) {
         const spb = secondsPerBeat(project.bpm);
-        t = snapTime(t, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb);
+        t = snapTime(t, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb, useUIStore.getState().arrangementGridDivision);
       }
+      const delta = t - dragStartTime.current;
       lastSeconds = t;
-      moveClip(draggedClipId, draggedTrackId, t);
 
       const slot = Math.round((ev.clientY - dragStartY.current) / TRACK_HEIGHT);
       useUIStore.getState().setDraggingClipTargetIdx(Math.max(0, Math.min(allTracks.length - 1, trackIndex + slot)));
+
+      if (rafId === null) {
+        rafId = requestAnimationFrame(() => {
+          rafId = null;
+          const clips = allClipsFlat();
+          for (const [id, origTime] of initialTimes) {
+            const c = clips.find((x) => x.id === id);
+            if (!c) continue;
+            moveClip(id, c.trackId, Math.max(0, origTime + delta));
+          }
+        });
+      }
     };
 
     const onUp = (ev: MouseEvent) => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      const delta = lastSeconds - dragStartTime.current;
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+        const clips = allClipsFlat();
+        for (const [id, origTime] of initialTimes) {
+          const c = clips.find((x) => x.id === id);
+          if (!c) continue;
+          moveClip(id, c.trackId, Math.max(0, origTime + delta));
+        }
+      }
       setDragging(false);
       useUIStore.getState().setDraggingClipTargetIdx(null);
 
@@ -259,19 +296,28 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
       const crossTrack  = targetTrack && targetTrack.id !== draggedTrackId;
 
       if (crossTrack) {
-        const currentTime = useProjectStore.getState().project.tracks
-          .flatMap((t) => t.clips).find((c) => c.id === draggedClipId)?.startTime ?? lastSeconds;
+        const currentTime = allClipsFlat().find((c) => c.id === draggedClipId)?.startTime ?? lastSeconds;
         moveClipToTrack(draggedClipId, targetTrack.id, currentTime);
       }
 
-      useHistoryStore.getState().push(
-        new MoveClipCommand(
-          draggedClipId, draggedTrackId,
-          lastSeconds, dragStartTime.current,
-          crossTrack ? targetTrack.id : undefined,
-          crossTrack ? draggedTrackId : undefined,
-        ),
-      );
+      if (initialTimes.size > 1) {
+        const moves = Array.from(initialTimes.entries()).map(([id, oldTime]) => ({
+          clipId: id,
+          trackId: allClipsFlat().find((c) => c.id === id)?.trackId ?? id,
+          newTime: Math.max(0, oldTime + delta),
+          oldTime,
+        }));
+        useHistoryStore.getState().push(new MoveClipsCommand(moves));
+      } else {
+        useHistoryStore.getState().push(
+          new MoveClipCommand(
+            draggedClipId, draggedTrackId,
+            lastSeconds, dragStartTime.current,
+            crossTrack ? targetTrack.id : undefined,
+            crossTrack ? draggedTrackId : undefined,
+          ),
+        );
+      }
     };
 
     window.addEventListener("mousemove", onMove);
@@ -330,7 +376,7 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
 
       if (useUIStore.getState().snapToGrid) {
         const spb = secondsPerBeat(project.bpm);
-        newStart  = snapTime(newStart, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb);
+        newStart  = snapTime(newStart, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb, useUIStore.getState().arrangementGridDivision);
         delta     = Math.max(-initOffset, Math.min(initDuration - 0.1, newStart - initStart));
       }
 
@@ -368,7 +414,7 @@ export function MidiClip({ clip, track, trackIndex, allTracks }: Props) {
       let d = Math.max(0.1, initDuration + (ev.clientX - startX) / pixelsPerSecond);
       if (useUIStore.getState().snapToGrid) {
         const spb    = secondsPerBeat(project.bpm);
-        const snapped = snapTime(clip.startTime + d, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb);
+        const snapped = snapTime(clip.startTime + d, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb, useUIStore.getState().arrangementGridDivision);
         d = Math.max(0.1, snapped - clip.startTime);
       }
       finalDuration = d;

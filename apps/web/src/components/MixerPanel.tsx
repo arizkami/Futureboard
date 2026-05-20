@@ -19,7 +19,6 @@ import { SetTrackVolumeCommand, SetTrackPanCommand, SetTrackMuteCommand, SetTrac
 import { activeAudioEngine } from "../engine/activeAudioEngine";
 import { Knob } from "./ui/Knob";
 import { MixerFader } from "./ui/MixerFader";
-import { useVuStereoLevels } from "../hooks/useVuLevel";
 import { meterStore } from "../store/meterStore";
 import { effectiveTrackMeterMode } from "../utils/meterMode";
 import type { DawFile, DawProject, DawTrack, InsertDevice, TrackPreviewMode, TrackSend } from "../types/daw";
@@ -414,7 +413,7 @@ function ChannelStrip({
 }: StripProps & { selected?: boolean; onClick?: () => void }) {
   const isMaster = !track;
   const accent = color;
-  const vu = useVuStereoLevels(isMaster ? "master" : (track?.id ?? "master"));
+  const meterTrackId = isMaster ? "master" : (track?.id ?? "master");
   const meterMode =
     isMaster ? "stereo" : track ? effectiveTrackMeterMode(track, files) : "stereo";
   const inserts: InsertDevice[] = track?.inserts ?? [];
@@ -537,8 +536,7 @@ function ChannelStrip({
       <div className="flex min-h-0 flex-1 overflow-hidden px-1.5 py-2">
         <MixerFader
           value={volume}
-          levelL={vu.l}
-          levelR={vu.r}
+          meterTrackId={meterTrackId}
           meterMode={meterMode}
           muted={muted}
           solo={solo}

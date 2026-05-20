@@ -4,9 +4,9 @@ import { platform } from "../../platform";
 import { useProjectStore } from "../../store/projectStore";
 import { useRecentProjectsStore, isSavedRecentProject, type RecentProject } from "../../store/recentProjectsStore";
 import { useUIStore } from "../../store/uiStore";
-import { useWindowStore } from "../../store/windowStore";
 import { showToast } from "../ui/Toast";
-import { guardUnsavedProject, loadOpenedProject } from "../../utils/projectLifecycle";
+import { guardUnsavedProject, loadOpenedProject, openProjectFromPath } from "../../utils/projectLifecycle";
+import { openProjectWizardWindow } from "../../utils/dialogWindows";
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
@@ -173,26 +173,23 @@ export function ProjectDropdown({ onClose }: { onClose: () => void }) {
     const canContinue = await guardUnsavedProject("switch");
     if (!canContinue) return;
     onClose();
-    // Folder project: load by file path
+    // Folder project: open via the single canonical open path.
     if (p.storageMode === "folder" && p.projectFilePath && platform.folderProject.isSupported) {
       try {
-        const opened = await platform.folderProject.openByPath(p.projectFilePath);
-        if (opened) {
-          await loadOpenedProject(opened);
+        const ok = await openProjectFromPath(p.projectFilePath);
+        if (ok) {
           useRecentProjectsStore.getState().addRecentProject({
             ...p,
             lastOpenedAt: Date.now(),
           });
-          showToast(`Opened: ${opened.name}`);
-          return;
+          showToast(`Opened: ${p.name}`);
         } else {
           showToast(`Could not open "${p.name}" — file may have moved.`, true);
-          return;
         }
       } catch {
         showToast(`Failed to open "${p.name}".`, true);
-        return;
       }
+      return;
     }
     // Fallback: just switch name (legacy behaviour)
     useProjectStore.getState().setProjectName(p.name);
@@ -207,15 +204,7 @@ export function ProjectDropdown({ onClose }: { onClose: () => void }) {
     void guardUnsavedProject("new").then((ok) => {
       if (!ok) return;
       onClose();
-      useWindowStore.getState().openDialog({
-        contentType: "projectWizard",
-        title: "New Project",
-        modal: true,
-        width: 780,
-        height: platform.kind === "electron" ? 560 : 510,
-        resizable: false,
-        closable: true,
-      });
+      void openProjectWizardWindow();
     });
   };
 

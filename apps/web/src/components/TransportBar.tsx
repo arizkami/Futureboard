@@ -369,6 +369,7 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
     loopEnabled,
     toggleLoop,
     snapToGrid,
+    arrangementGridDivision,
     currentTool,
     selectedClipIds,
     selectedTrackId,
@@ -639,11 +640,25 @@ export function TransportBar({ onImport, onSave }: { onImport?: () => void; onSa
       case "timeline:set-snap-off":
         return { checked: !snapToGrid };
       case "timeline:set-snap-bar":
+        return { checked: snapToGrid && arrangementGridDivision === "1bar" };
+      case "timeline:set-snap-whole":
+        return { checked: snapToGrid && arrangementGridDivision === "1/1" };
       case "timeline:set-snap-beat":
+        return { checked: snapToGrid && arrangementGridDivision === "1/4" };
       case "timeline:set-snap-eighth":
+        return { checked: snapToGrid && arrangementGridDivision === "1/8" };
       case "timeline:set-snap-sixteenth":
+        return { checked: snapToGrid && arrangementGridDivision === "1/16" };
       case "timeline:set-snap-thirty-second":
-        return { checked: false };
+        return { checked: snapToGrid && arrangementGridDivision === "1/32" };
+      case "timeline:set-snap-sixty-fourth":
+        return { checked: snapToGrid && arrangementGridDivision === "1/64" };
+      case "timeline:set-snap-quarter-triplet":
+        return { checked: snapToGrid && arrangementGridDivision === "1/4T" };
+      case "timeline:set-snap-eighth-triplet":
+        return { checked: snapToGrid && arrangementGridDivision === "1/8T" };
+      case "timeline:set-snap-sixteenth-triplet":
+        return { checked: snapToGrid && arrangementGridDivision === "1/16T" };
 
       case "panel:toggle-browser":
       case "window.show_browser":

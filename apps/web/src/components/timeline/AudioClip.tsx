@@ -267,7 +267,7 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
       );
       if (useUIStore.getState().snapToGrid) {
         const spb = secondsPerBeat(project.bpm);
-        t = snapTime(t, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb);
+        t = snapTime(t, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb, useUIStore.getState().arrangementGridDivision);
       }
       const delta = t - dragStartTime.current;
       lastSeconds = t;
@@ -398,7 +398,7 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
 
       if (useUIStore.getState().snapToGrid) {
         const spb = secondsPerBeat(project.bpm);
-        newStart  = snapTime(newStart, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb);
+        newStart  = snapTime(newStart, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb, useUIStore.getState().arrangementGridDivision);
         delta     = Math.max(-initOffset, Math.min(initDuration - 0.1, newStart - initStart));
       }
 
@@ -436,7 +436,7 @@ export function AudioClip({ clip, track, trackIndex, allTracks }: Props) {
       let d = Math.max(0.1, initDuration + (ev.clientX - startX) / pixelsPerSecond);
       if (useUIStore.getState().snapToGrid) {
         const spb    = secondsPerBeat(project.bpm);
-        const snapped = snapTime(clip.startTime + d, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb);
+        const snapped = snapTime(clip.startTime + d, project.bpm, project.timeSignature ?? { numerator: 4, denominator: 4 }, pixelsPerSecond * spb, useUIStore.getState().arrangementGridDivision);
         d = Math.max(0.1, snapped - clip.startTime);
       }
       finalDuration = d;

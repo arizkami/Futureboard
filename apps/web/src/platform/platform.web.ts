@@ -185,6 +185,7 @@ const folderProject: FolderProjectAdapter = {
   createProject: async () => null,
   importAudio: async () => null,
   openByPath: async () => null,
+  getDefaultProjectsPath: async () => "",
 };
 
 const windowAdapter: WindowAdapter = {

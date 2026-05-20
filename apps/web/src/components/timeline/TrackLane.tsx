@@ -1,3 +1,4 @@
+import { useRef, useState, useEffect } from "react";
 import type { DawClip, DawTrack } from "../../types/daw";
 import { clipType } from "../../types/daw";
 import { AudioClip } from "./AudioClip";
@@ -21,38 +22,98 @@ type Props = {
 // Overscan: render clips this many seconds beyond the visible edge on each side.
 const OVERSCAN_SECONDS = 4;
 
+function computeVisibleIds(
+  clips: DawClip[],
+  selectedClipIds: string[],
+  scrollX: number,
+  pixelsPerSecond: number,
+): string[] {
+  const viewW = typeof window !== "undefined" ? window.innerWidth - HEADER_WIDTH : 1200;
+  const start = Math.max(0, scrollX / pixelsPerSecond - OVERSCAN_SECONDS);
+  const end   = scrollX / pixelsPerSecond + viewW / pixelsPerSecond + OVERSCAN_SECONDS;
+  return clips
+    .filter((c) => selectedClipIds.includes(c.id) || (c.startTime < end && c.startTime + c.duration > start))
+    .map((c) => c.id);
+}
+
 export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
   const selectedTrackId       = useUIStore((s) => s.selectedTrackId);
+  const selectedTrackIds      = useUIStore((s) => s.selectedTrackIds);
   const draggingClipTargetIdx = useUIStore((s) => s.draggingClipTargetIdx);
   const selectedClipIds       = useUIStore((s) => s.selectedClipIds);
-  const scrollX               = useUIStore((s) => s.scrollX);
   const pixelsPerSecond       = useUIStore((s) => s.pixelsPerSecond);
 
-  // Viewport bounds in seconds — only clips overlapping this range are rendered.
-  const viewportWidth = typeof window !== "undefined" ? window.innerWidth - HEADER_WIDTH : 1200;
-  const visibleStart  = Math.max(0, scrollX / pixelsPerSecond - OVERSCAN_SECONDS);
-  const visibleEnd    = scrollX / pixelsPerSecond + viewportWidth / pixelsPerSecond + OVERSCAN_SECONDS;
+  // scrollX drives clip visibility — use ref + imperative subscribe to avoid
+  // re-rendering all TrackLane instances on every scroll frame.
+  const scrollXRef = useRef(useUIStore.getState().scrollX);
 
-  const selected = selectedTrackId === track.id;
+  const [visibleIds, setVisibleIds] = useState<string[]>(() =>
+    computeVisibleIds(track.clips, selectedClipIds, scrollXRef.current, pixelsPerSecond),
+  );
+
+  // Refs to latest props/state for use inside the store subscription callback.
+  const trackRef           = useRef(track);
+  const selectedIdsRef     = useRef(selectedClipIds);
+  const pixelsPerSecondRef = useRef(pixelsPerSecond);
+  trackRef.current           = track;
+  selectedIdsRef.current     = selectedClipIds;
+  pixelsPerSecondRef.current = pixelsPerSecond;
+
+  // Recompute when scrollX changes without triggering a React rerender per frame.
+  useEffect(() => {
+    const unsub = useUIStore.subscribe((state) => {
+      if (state.scrollX === scrollXRef.current) return;
+      scrollXRef.current = state.scrollX;
+      const next = computeVisibleIds(trackRef.current.clips, selectedIdsRef.current, state.scrollX, pixelsPerSecondRef.current);
+      setVisibleIds((prev) => {
+        if (prev.length === next.length && prev.every((id, i) => id === next[i])) return prev;
+        return next;
+      });
+    });
+    return unsub;
+  }, []);
+
+  // Recompute when clips/selection/zoom changes (non-scroll prop changes).
+  useEffect(() => {
+    const next = computeVisibleIds(track.clips, selectedClipIds, scrollXRef.current, pixelsPerSecond);
+    setVisibleIds((prev) => {
+      if (prev.length === next.length && prev.every((id, i) => id === next[i])) return prev;
+      return next;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [track.clips, selectedClipIds, pixelsPerSecond]);
+
+  const selected = selectedTrackId === track.id || selectedTrackIds.includes(track.id);
+  const primary  = selectedTrackId === track.id;
   const dropTarget = draggingClipTargetIdx === trackIndex;
   const even = trackIndex % 2 === 0;
 
-  const bg = selected
+  const bg = primary
     ? "rgba(255,255,255,0.028)"
-    : even
-      ? "rgba(255,255,255,0.010)"
-      : "rgba(0,0,0,0.12)";
+    : selected
+      ? "rgba(255,255,255,0.018)"
+      : even
+        ? "rgba(255,255,255,0.010)"
+        : "rgba(0,0,0,0.12)";
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     // Only handle clicks directly on the lane (not bubbled up from clips)
     if (e.target !== e.currentTarget) return;
 
-    const { currentTool, selectedBrowserFileId, pixelsPerSecond, snapToGrid } =
+    const { currentTool, selectedBrowserFileId, pixelsPerSecond, snapToGrid, arrangementGridDivision } =
       useUIStore.getState();
     const { project } = useProjectStore.getState();
 
     const selectTrack = () => {
-      useUIStore.getState().setSelectedTrackId(track.id);
+      if (e.shiftKey) {
+        useUIStore.getState().toggleTrackInSelection(track.id);
+        if (!useUIStore.getState().selectedTrackId) {
+          useUIStore.getState().setSelectedTrackId(track.id);
+        }
+      } else {
+        useUIStore.getState().setSelectedTrackId(track.id);
+        useUIStore.getState().setSelectedTrackIds([]);
+      }
       useUIStore.getState().setFocusedPanel("timeline");
     };
 
@@ -68,6 +129,7 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
           project.bpm,
           project.timeSignature ?? { numerator: 4, denominator: 4 },
           pixelsPerSecond * spb,
+          arrangementGridDivision,
         );
       }
 
@@ -151,7 +213,7 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
       {selected && (
         <div
           className="pointer-events-none absolute inset-x-0 top-0 h-px opacity-40"
-          style={{ background: track.color }}
+          style={{ background: primary ? track.color : "rgba(255,255,255,0.25)" }}
         />
       )}
       {dropTarget && (
@@ -161,12 +223,7 @@ export function TrackLane({ track, allTracks, trackIndex, width }: Props) {
         />
       )}
       {track.clips
-        .filter((clip) => {
-          // Keep selected clips mounted even when scrolled off — preserves selection state.
-          if (selectedClipIds.includes(clip.id)) return true;
-          // Visibility: clip overlaps [visibleStart, visibleEnd]
-          return clip.startTime < visibleEnd && clip.startTime + clip.duration > visibleStart;
-        })
+        .filter((clip) => visibleIds.includes(clip.id))
         .map((clip) =>
           clipType(clip) === "midi" ? (
             <MidiClip

@@ -27,6 +27,8 @@ import type {
   StereoMeterLevel,
 } from "./types";
 import { platform } from "../../platform";
+import { useSettingsStore } from "../../store/settingsStore";
+import { getVisualFrameIntervalMs } from "../../utils/visualFrameRate";
 // ── Bridge accessor ───────────────────────────────────────────────────────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -36,9 +38,20 @@ function getSphere(): any | null {
 }
 
 // ── Meters polling ────────────────────────────────────────────────────────────
-const METER_POLL_MS = 16; // ~60 fps for responsive VU lights
-const TRANSPORT_POLL_MS = 33; // ~30 fps is enough for UI transport sync
 const INSERT_PARAM_FLUSH_MS = 16; // coalesce dense slider drags to one native batch per frame
+
+function meterPollMs(): number {
+  const interval = getVisualFrameIntervalMs();
+  // unlimited → 120 fps cap for IPC safety; explicit fps values are honoured directly.
+  return Math.max(4, Math.round(interval || (1000 / 120)));
+}
+
+function transportPollMs(): number {
+  const interval = getVisualFrameIntervalMs();
+  // unlimited → poll at 60 fps via IPC (faster would overload the bridge);
+  // for explicit values (45/60/120) honour the setting; cap at 16 ms minimum.
+  return Math.max(16, Math.round(interval || (1000 / 60)));
+}
 
 // ── Snapshot builders ─────────────────────────────────────────────────────────
 
@@ -335,6 +348,7 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
   private _transportPollInFlight = false;
   private _lastTransport        = { playing: false, positionSeconds: 0 };
   private _lastProjectSignature: string | null = null;
+  private _settingsUnsubscribe: (() => void) | null = null;
   // Debounce timer for syncProject — rapid edits batch into one Rust rebuild.
   private _syncTimer:           ReturnType<typeof setTimeout> | null = null;
   private _insertParamTimer:    ReturnType<typeof setTimeout> | null = null;
@@ -368,6 +382,12 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
       }
       this._status = "running";
       this._startPolling();
+      this._settingsUnsubscribe?.();
+      this._settingsUnsubscribe = useSettingsStore.subscribe((state, prev) => {
+        if (state.visualFrameRate !== prev.visualFrameRate && this._status === "running") {
+          this._startPolling();
+        }
+      });
       console.log("[NativeSphere] Native audio engine ready");
     } catch (e) {
       console.error("[NativeSphere] Failed to start native engine:", e);
@@ -378,6 +398,8 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
 
   dispose(): void {
     this._stopPolling();
+    this._settingsUnsubscribe?.();
+    this._settingsUnsubscribe = null;
     this._meterCallbacks.clear();
     this._transportCallbacks.clear();
     const sphere = getSphere();
@@ -753,7 +775,7 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
   private _startPolling(): void {
     this._stopPolling();
 
-    // Meter poll — ~60 fps. Guard against overlapping IPC calls so slow
+    // Meter poll — follows Preferences > Timeline FPS. Guard against overlapping IPC calls so slow
     // machines do not build a backlog that makes the VU feel delayed.
     this._meterPollId = setInterval(() => {
       if (this._meterCallbacks.size === 0) return;
@@ -778,9 +800,9 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
         .finally(() => {
           this._meterPollInFlight = false;
         });
-    }, METER_POLL_MS);
+    }, meterPollMs());
 
-    // Transport poll — ~30 fps
+    // Transport poll — rate from Preferences > Timeline FPS
     this._transportPollId = setInterval(() => {
       if (this._transportCallbacks.size === 0) return;
       if (this._transportPollInFlight) return;
@@ -802,7 +824,7 @@ export class NativeSphereAudioEngineAdapter implements AudioEngineAdapter {
         .finally(() => {
           this._transportPollInFlight = false;
         });
-    }, TRANSPORT_POLL_MS);
+    }, transportPollMs());
   }
 
   private _stopPolling(): void {
@@ -842,6 +864,12 @@ function projectGraphSignature(project: DawProject): string {
     tracks: project.tracks.map((track) => ({
       id: track.id,
       type: track.type,
+      volume: track.volume,
+      pan: track.pan,
+      muted: track.muted,
+      solo: track.solo,
+      output: track.output,
+      routingOutputId: track.routing?.outputId,
       clips: track.clips.map((clip) => ({
         id: clip.id,
         fileId: clip.fileId,
@@ -860,6 +888,13 @@ function projectGraphSignature(project: DawProject): string {
         type: insert.type,
         enabled: insert.enabled,
         order: insert.order,
+      })),
+      sends: (track.sends ?? []).map((send) => ({
+        id: send.id,
+        targetTrackId: send.targetTrackId,
+        level: send.level,
+        enabled: send.enabled,
+        preFader: send.preFader,
       })),
     })),
   });

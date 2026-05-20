@@ -10,6 +10,8 @@ import { pxPerBeat } from "../utils/musicalGrid";
 import { audioCacheManager } from "../audio/AudioCacheManager";
 import { getPeakCacheStats } from "../engine/peakChunkCache";
 import { useBackgroundTaskStore, type BackgroundTask } from "../store/backgroundTaskStore";
+import { shouldRunVisualFrame } from "../utils/visualFrameRate";
+import { useSettingsStore } from "../store/settingsStore";
 
 // ── Save status ───────────────────────────────────────────────────────────────
 type SaveStatus = "saved" | "unsaved" | "saving" | "error";
@@ -68,8 +70,10 @@ export function StatusBar() {
   const focusedPanel          = useUIStore((s) => s.focusedPanel);
   const currentTool           = useUIStore((s) => s.currentTool);
   const snapToGrid            = useUIStore((s) => s.snapToGrid);
+  const gridDivision          = useUIStore((s) => s.arrangementGridDivision);
   const pixelsPerSecond       = useUIStore((s) => s.pixelsPerSecond);
   const saveStatus            = useUIStore((s) => s.saveStatus);
+  const visualFrameRate       = useSettingsStore((s) => s.visualFrameRate);
   const backgroundTasks       = useBackgroundTaskStore((s) => s.tasks);
   const taskPanelOpen         = useBackgroundTaskStore((s) => s.panelOpen);
   const setTaskPanelOpen      = useBackgroundTaskStore((s) => s.setPanelOpen);
@@ -94,10 +98,14 @@ export function StatusBar() {
   useEffect(() => {
     let frames    = 0;
     let lastFlush = performance.now();
+    let lastFrameAt = 0;
     let raf: number;
 
     const tick = (now: number) => {
-      frames++;
+      if (shouldRunVisualFrame(lastFrameAt, now)) {
+        frames++;
+        lastFrameAt = now;
+      }
       if (now - lastFlush >= 250) {        // ~4 Hz refresh
         const elapsed = now - lastFlush;
         setFps(Math.round((frames * 1000) / elapsed));
@@ -132,10 +140,12 @@ export function StatusBar() {
     return getSelectionSummary(project, sel) || "No selection";
   }, [focusedPanel, selectedTrackId, selectedClipIds, selectedBrowserFileId, project]);
 
-  const timeSig  = timeSignature ?? { numerator: 4, denominator: 4 };
-  const ppb      = Math.round(pxPerBeat(pixelsPerSecond, bpm));
-  const saveSt   = saveStatus as SaveStatus;
-  const fpsColor = fps >= 55 ? C.green : fps >= 30 ? C.yellow : C.red;
+  const timeSig   = timeSignature ?? { numerator: 4, denominator: 4 };
+  const ppb       = Math.round(pxPerBeat(pixelsPerSecond, bpm));
+  const saveSt    = saveStatus as SaveStatus;
+  const isUnlimitedFps = visualFrameRate === "unlimited";
+  const fpsLabel  = isUnlimitedFps ? `${fps} fps ∞` : `${fps} fps`;
+  const fpsColor  = fps >= 55 ? C.green : fps >= 30 ? C.yellow : C.red;
   const audioStats = audioCacheManager.getStats();
   const sourceBytes = project.files.reduce((sum, file) => sum + (file.size ?? 0), 0);
   const peakBytes = getPeakCacheStats().cacheBytes;
@@ -186,10 +196,10 @@ export function StatusBar() {
         </span>
         <Sep />
         <span
-          title={snapToGrid ? "Snap to grid: ON" : "Snap to grid: OFF"}
+          title={snapToGrid ? `Snap to grid: ${gridDivision}` : "Snap to grid: OFF"}
           style={{ color: snapToGrid ? C.accent : C.faint }}
         >
-          {snapToGrid ? "Snap" : "Free"}
+          {snapToGrid ? `Snap ${gridDivision}` : "Free"}
         </span>
         <Sep />
         <span className="tabular-nums text-daw-faint">{ppb} px/bt</span>
@@ -211,7 +221,7 @@ export function StatusBar() {
           style={{ color: fpsColor }}
           title="UI frames per second"
         >
-          {fps} fps
+          {fpsLabel}
         </span>
         {memMB !== null && (
           <>

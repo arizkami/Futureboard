@@ -96,6 +96,7 @@ export type MixerFaderProps = {
   value: number;               // linear 0..1
   levelL?: number;             // VU meter left
   levelR?: number;             // VU meter right
+  meterTrackId?: string | "master";
   meterMode?: "mono" | "stereo";
   muted?: boolean;
   solo?: boolean;
@@ -114,6 +115,7 @@ export function MixerFader({
   value,
   levelL = 0,
   levelR = 0,
+  meterTrackId,
   meterMode = "mono",
   muted,
   solo,
@@ -303,6 +305,7 @@ export function MixerFader({
             mode={meterMode}
             levelL={levelL}
             levelR={levelR}
+            meterTrackId={meterTrackId}
             columnWidth={meterMode === "stereo" ? 5 : 6}
           />
         </div>

@@ -380,6 +380,10 @@ const folderProject: FolderProjectAdapter = {
     return result.folderPath;
   },
 
+  async getDefaultProjectsPath(): Promise<string> {
+    return bridge().sys.getDefaultProjectsPath();
+  },
+
   async createProject(opts: { name: string; location: string }): Promise<{ projectRoot: string; projectFilePath: string } | null> {
     const result = await bridge().project.createFolderProject(opts);
     if (!result) return null;

@@ -24,6 +24,7 @@ export type ExtraFolderSetting = {
 };
 
 export type GraphicRenderingMode = "auto" | "force" | "software";
+export type VisualFrameRate = 45 | 60 | 120 | "unlimited";
 
 export type AppSettings = {
   startupBehavior: StartupBehavior;
@@ -41,6 +42,8 @@ export type AppSettings = {
   enableDevTools: boolean;
   /** GPU vs software rendering (Electron only). Requires restart. Persisted to settings.json. */
   graphicRenderingMode: GraphicRenderingMode;
+  /** Visual/UI refresh cap for meters, playhead, timeline overlays, and diagnostics. */
+  visualFrameRate: VisualFrameRate;
 };
 
 const DEFAULTS: AppSettings = {
@@ -55,7 +58,14 @@ const DEFAULTS: AppSettings = {
   compactUI: false,
   enableDevTools: false,
   graphicRenderingMode: "auto",
+  visualFrameRate: 60,
 };
+
+function normalizeVisualFrameRate(raw: unknown): VisualFrameRate {
+  return raw === 45 || raw === 60 || raw === 120 || raw === "unlimited"
+    ? raw
+    : DEFAULTS.visualFrameRate;
+}
 
 function normalizeExtraFolders(raw: unknown): ExtraFolderSetting[] {
   if (!Array.isArray(raw)) return [];
@@ -86,7 +96,12 @@ function loadFromStorage(): AppSettings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...DEFAULTS };
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
-    return { ...DEFAULTS, ...parsed, extraFolders: normalizeExtraFolders(parsed.extraFolders) };
+    return {
+      ...DEFAULTS,
+      ...parsed,
+      extraFolders: normalizeExtraFolders(parsed.extraFolders),
+      visualFrameRate: normalizeVisualFrameRate(parsed.visualFrameRate),
+    };
   } catch {
     return { ...DEFAULTS };
   }
@@ -122,6 +137,7 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
         compactUI:            patch.compactUI            ?? s.compactUI,
         enableDevTools:       patch.enableDevTools       ?? s.enableDevTools,
         graphicRenderingMode: patch.graphicRenderingMode ?? s.graphicRenderingMode,
+        visualFrameRate:      patch.visualFrameRate      ?? s.visualFrameRate,
       };
       saveToStorage(next);
       return next;

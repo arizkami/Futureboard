@@ -1,4 +1,5 @@
 import type { DawFile, DawProject, FileId } from "../types/daw";
+import type { PeakLevelMeta } from "../store/projectStore";
 import { audioStorage } from "./AudioStorage";
 import { audioEngine } from "./AudioEngine";
 import {
@@ -123,6 +124,18 @@ class AudioAssetManager {
    * Returns true when a valid cache entry was found.
    */
   async loadCachedWaveform(file: DawFile): Promise<boolean> {
+    const meta = await this.tryLoadWaveformMeta(file);
+    if (!meta) return false;
+    useProjectStore.getState().setPeakMeta(file.id, meta);
+    return true;
+  }
+
+  /**
+   * Like `loadCachedWaveform` but returns the metadata without touching the
+   * Zustand store. Used to pre-warm metadata before `loadProject` clears it,
+   * so the caller can re-apply immediately after.
+   */
+  async tryLoadWaveformMeta(file: DawFile): Promise<PeakLevelMeta | null> {
     const cacheKeys = (file.waveformCacheKeys?.length
       ? file.waveformCacheKeys
       : [...WAVEFORM_PEAK_LEVELS].reverse().map((level) => buildCacheKey(file.id, level)));
@@ -139,22 +152,35 @@ class AudioAssetManager {
       // many peak chunks; WaveformCanvas requests visible chunks on demand.
       putChunk(file.id, entry.samplesPerPeak, 0, chunk0);
 
-      useProjectStore.getState().setPeakMeta(file.id, {
+      return {
         spp:          entry.samplesPerPeak,
         peakCount:    entry.peakCount,
         channelCount: entry.channelCount,
         sampleRate:   entry.sampleRate,
         duration:     entry.duration,
-      });
-      return true;
+      };
     }
 
-    return false;
+    return null;
   }
 
   async restoreProjectAssets(project: DawProject): Promise<void> {
     const store = useProjectStore.getState();
     for (const file of project.files) {
+      const status = store.waveformStatus.get(file.id);
+      if (status === "pending" || status === "copying" || status === "indexing" || status === "generating-peaks") {
+        continue;
+      }
+
+      // Skip files that were pre-warmed by loadOpenedProject — they already
+      // have peakMeta set and show the waveform. Only validate asset existence.
+      const preWarmed = status === "ready";
+      if (preWarmed) {
+        const resolution = await this.resolveAudioAsset(file);
+        if (resolution.status === "missing") store.setWaveformStatus(file.id, "missing");
+        continue;
+      }
+
       store.setWaveformStatus(file.id, "loading");
 
       const hasCached = await this.loadCachedWaveform(file);
@@ -163,7 +189,8 @@ class AudioAssetManager {
       if (resolution.status === "missing") {
         store.setWaveformStatus(file.id, "missing");
       } else if (!hasCached) {
-        store.setWaveformStatus(file.id, "idle");
+        const queued = audioImportQueue.enqueuePeakGenerationForFile(file);
+        if (!queued) store.setWaveformStatus(file.id, "idle");
       }
     }
 

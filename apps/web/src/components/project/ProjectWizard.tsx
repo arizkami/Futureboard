@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   FileText, Mic2, Music, SlidersHorizontal, Square, FolderOpen, Plus, Loader, Check,
 } from "lucide-react";
@@ -10,9 +10,9 @@ import { getTrackColor } from "../../theme";
 import type { DawTrack } from "../../types/daw";
 import { platform } from "../../platform";
 import { NumberInput } from "../ui/NumberInput";
-import { rememberSavedProject } from "../../utils/projectLifecycle";
+import { rememberSavedProject, requestMainWindowOpenProject } from "../../utils/projectLifecycle";
 
-type Props = { windowId: string };
+type Props = { windowId: string; external?: boolean };
 
 type Template = "empty" | "recording" | "beat-making" | "mixing" | "scoring";
 
@@ -153,7 +153,7 @@ function Stepper({
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export function ProjectWizard({ windowId }: Props) {
+export function ProjectWizard({ windowId, external = false }: Props) {
   const nameRef = useRef<HTMLInputElement>(null);
 
   const isElectron = platform.kind === "electron" && platform.folderProject.isSupported;
@@ -171,6 +171,15 @@ export function ProjectWizard({ windowId }: Props) {
   });
   const [isCreating, setIsCreating] = useState(false);
   const [nameTouched, setNameTouched] = useState(false);
+
+  // Pre-fill the project location with the OS default path on Electron
+  useEffect(() => {
+    if (!isElectron) return;
+    platform.folderProject.getDefaultProjectsPath()
+      .then((dir) => { if (dir) set({ location: dir }); })
+      .catch(() => { /* ignore — dialog will default correctly */ });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const set = (patch: Partial<WizardState>) => setState((s) => ({ ...s, ...patch }));
 
@@ -257,10 +266,16 @@ export function ProjectWizard({ windowId }: Props) {
         }
         useProjectStore.getState().loadProject(newProject);
         const saveResult = await platform.projectStorage.saveProject(newProject);
-        rememberSavedProject(newProject, saveResult ?? {
+        const rememberedResult = saveResult ?? {
           path: folderResult.projectFilePath,
           projectRoot: folderResult.projectRoot,
-        });
+        };
+        rememberSavedProject(newProject, rememberedResult);
+        if (external && platform.kind === "electron") {
+          requestMainWindowOpenProject(rememberedResult.path ?? folderResult.projectFilePath);
+          platform.window.close();
+          return;
+        }
       } catch (e) {
         console.error("[ProjectWizard] folder create failed:", e);
         setIsCreating(false);
@@ -277,7 +292,11 @@ export function ProjectWizard({ windowId }: Props) {
     uiStore.setSelectedTrackId(null);
     uiStore.setSaveStatus("saved");
 
-    ws.closeWindow(windowId);
+    if (external && platform.kind === "electron") {
+      platform.window.close();
+    } else {
+      ws.closeWindow(windowId);
+    }
   };
 
   const nameEmpty = nameTouched && state.name.trim() === "";
@@ -287,7 +306,7 @@ export function ProjectWizard({ windowId }: Props) {
   const templateLabel = TEMPLATES.find((t) => t.id === state.template)?.label ?? state.template;
 
   return (
-    <div className="flex h-full flex-col" style={{ minHeight: 0 }}>
+    <div className={`flex h-full flex-col ${external ? "bg-[#0e1319]" : ""}`} style={{ minHeight: 0 }}>
 
       {/* ── Subtitle ── */}
       <div
@@ -635,7 +654,10 @@ export function ProjectWizard({ windowId }: Props) {
         <button
           type="button"
           disabled={isCreating}
-          onClick={() => useWindowStore.getState().closeWindow(windowId)}
+          onClick={() => {
+            if (external && platform.kind === "electron") platform.window.close();
+            else useWindowStore.getState().closeWindow(windowId);
+          }}
           className="h-8 rounded-md border border-white/[0.08] bg-transparent px-4 text-[12px] font-medium text-daw-faint transition-colors hover:bg-white/[0.05] hover:text-daw-text disabled:opacity-40"
         >
           Cancel

@@ -47,6 +47,7 @@ export const IpcChannels = {
   SysGetGpuInfo: "daw:sys:getGpuInfo",
   SysReadElectronSettings:  "daw:sys:readElectronSettings",
   SysWriteElectronSettings: "daw:sys:writeElectronSettings",
+  SysGetDefaultProjectsPath: "daw:sys:getDefaultProjectsPath",
 
   // Folder-based project operations (Electron only)
   ProjectFolderBrowseLocation: "daw:project:folderBrowseLocation",
@@ -277,6 +278,7 @@ export type ExternalWindowConfig = {
   frame?: boolean;
   transparent?: boolean;
   resizable?: boolean;
+  maximizable?: boolean;
 };
 
 // ── SphereDirectAudioEngine IPC types ─────────────────────────────────────────

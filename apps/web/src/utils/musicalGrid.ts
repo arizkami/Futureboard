@@ -8,10 +8,11 @@
 import {
   beatsPerBar,
   getGridIntervalBeats,
+  getGridStepBeats,
   getGridSubBeats,
   secondsPerBeat,
 } from "./musicalTime";
-import type { TimeSignature } from "./musicalTime";
+import type { SnapDivision, TimeSignature } from "./musicalTime";
 
 export type GridLineLevel = "bar" | "beat" | "sub";
 
@@ -47,10 +48,16 @@ export function getArrangementGridLines(
   timeSig: TimeSignature,
   scrollX: number,
   viewportWidth: number,
+  gridDivision?: SnapDivision,
 ): GridLine[] {
   const ppb      = pxPerBeat(pixelsPerSecond, bpm);
   const bpb      = beatsPerBar(timeSig);
-  const sub      = getGridSubBeats(ppb, timeSig);
+  const isFixed  = gridDivision && gridDivision !== "off" && gridDivision !== "auto";
+  const baseSub  = isFixed
+    ? (gridDivision === "1bar" ? bpb : getGridStepBeats(gridDivision))
+    : getGridSubBeats(ppb, timeSig);
+  let sub = baseSub;
+  while (sub * ppb < 4) sub *= 2;
   const interval = getGridIntervalBeats(ppb, timeSig);
   // tolerance proportional to the finest subdivision to handle float drift
   const eps      = sub * 0.01;

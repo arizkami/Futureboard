@@ -1,4 +1,4 @@
-import type { InsertDevice, TrackId, TrackPreviewMode } from "../types/daw";
+import type { InsertDevice, TrackId, TrackPreviewMode, TrackSend } from "../types/daw";
 import { audioEngine } from "./AudioEngine";
 import { getDspFactory } from "./plugins/dspRegistry";
 import type { InsertAudioNode } from "./plugins/types";
@@ -17,6 +17,7 @@ function readAnalyserTimeDomain(analyser: AnalyserNode, dest: Float32Array): voi
 export type StereoLevel = { l: number; r: number };
 
 type TrackNodes = {
+  input:       GainNode;
   gain:        GainNode;
   insertInput:  GainNode;
   insertOutput: GainNode;
@@ -42,6 +43,15 @@ type TrackNodes = {
   previewMode: TrackPreviewMode;
   insertNodes: Map<string, InsertAudioNode>;
   insertChain: InsertAudioNode[];
+  sendNodes:   Map<string, SendRoute>;
+};
+
+type SendRoute = {
+  gain: GainNode;
+  source: AudioNode;
+  output: AudioNode;
+  targetTrackId: TrackId;
+  preFader: boolean;
 };
 
 class Mixer {
@@ -92,6 +102,7 @@ class Mixer {
     if (!this.tracks.has(trackId)) {
       const ctx = audioEngine.ctx;
 
+      const input        = ctx.createGain();
       const gain         = ctx.createGain();
       const insertInput  = ctx.createGain();
       const insertOutput = ctx.createGain();
@@ -121,7 +132,8 @@ class Mixer {
       previewRToL.gain.value = 0;
       previewRToR.gain.value = 1;
 
-      // gain → insertInput → [insert chain] → insertOutput → phaseNode → panner → split → analysers → merger → master
+      // input → gain → insertInput → [insert chain] → insertOutput → phaseNode → panner → split → analysers → merger → master
+      input.connect(gain);
       gain.connect(insertInput);
       insertInput.connect(insertOutput);
       insertOutput.connect(phaseNode);
@@ -145,6 +157,7 @@ class Mixer {
 
       this.tracks.set(trackId, {
         gain,
+        input,
         insertInput,
         insertOutput,
         phaseNode,
@@ -169,17 +182,67 @@ class Mixer {
         previewMode: "stereo",
         insertNodes: new Map(),
         insertChain: [],
+        sendNodes: new Map(),
       });
     }
     return this.tracks.get(trackId)!;
   }
 
   getTrackInput(trackId: TrackId): GainNode {
-    return this.getOrCreateTrack(trackId).gain;
+    return this.getOrCreateTrack(trackId).input;
   }
 
   getMasterInput(): GainNode {
     return this.master;
+  }
+
+  // ── sends ───────────────────────────────────────────────────────────────────
+
+  syncTrackSends(trackId: TrackId, sends: TrackSend[]): void {
+    const nodes = this.getOrCreateTrack(trackId);
+    const incomingIds = new Set(sends.map((send) => send.id));
+
+    for (const [sendId, route] of nodes.sendNodes) {
+      if (!incomingIds.has(sendId)) {
+        this.disconnectSendRoute(route);
+        nodes.sendNodes.delete(sendId);
+      }
+    }
+
+    for (const send of sends) {
+      const target = this.tracks.get(send.targetTrackId);
+      if (!target || send.targetTrackId === trackId) {
+        const existing = nodes.sendNodes.get(send.id);
+        if (existing) {
+          this.disconnectSendRoute(existing);
+          nodes.sendNodes.delete(send.id);
+        }
+        continue;
+      }
+
+      const level = send.enabled === false ? 0 : Math.max(0, send.level ?? 1);
+      const preFader = send.preFader === true;
+      const source = preFader ? nodes.input : nodes.merger;
+      const output = target.gain;
+      const existing = nodes.sendNodes.get(send.id);
+
+      if (!existing || existing.source !== source || existing.output !== output || existing.preFader !== preFader) {
+        if (existing) this.disconnectSendRoute(existing);
+        const gain = audioEngine.ctx.createGain();
+        gain.gain.value = level;
+        source.connect(gain);
+        gain.connect(output);
+        nodes.sendNodes.set(send.id, {
+          gain,
+          source,
+          output,
+          targetTrackId: send.targetTrackId,
+          preFader,
+        });
+      } else {
+        existing.gain.gain.setTargetAtTime(level, audioEngine.currentTime, 0.01);
+      }
+    }
   }
 
   // ── insert chain ─────────────────────────────────────────────────────────────
@@ -365,6 +428,10 @@ class Mixer {
       nodes.analyserL.disconnect();
       nodes.analyserR.disconnect();
       nodes.merger.disconnect();
+      for (const route of nodes.sendNodes.values()) {
+        this.disconnectSendRoute(route);
+      }
+      nodes.sendNodes.clear();
       this.tracks.delete(trackId);
       this._outputNodes.delete(trackId);
     }
@@ -405,6 +472,11 @@ class Mixer {
   private recalcGain(nodes: TrackNodes) {
     const target = nodes.muted ? 0 : nodes.volume;
     nodes.gain.gain.setTargetAtTime(target, audioEngine.currentTime, 0.01);
+  }
+
+  private disconnectSendRoute(route: SendRoute): void {
+    try { route.source.disconnect(route.gain); } catch { /* already disconnected */ }
+    try { route.gain.disconnect(route.output); } catch { /* already disconnected */ }
   }
 }
 

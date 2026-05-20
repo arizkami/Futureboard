@@ -169,6 +169,8 @@ export interface DawBridgeSys {
   getGpuInfo(): Promise<DawBridgeGpuFeatureStatus>;
   readElectronSettings(): Promise<DawBridgeElectronSettings>;
   writeElectronSettings(settings: DawBridgeElectronSettings): Promise<void>;
+  /** Returns the OS path for the default projects folder (Documents/Futureboard Studio/Projects). */
+  getDefaultProjectsPath(): Promise<string>;
 }
 
 export interface DawBridgePeakChunk {
@@ -204,6 +206,7 @@ export interface DawBridgeExternalWindows {
     frame?: boolean;
     transparent?: boolean;
     resizable?: boolean;
+    maximizable?: boolean;
   }): Promise<string | null>;
   closeExternal(id: string): Promise<void>;
   focusExternal(id: string): Promise<void>;

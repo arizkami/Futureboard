@@ -26,10 +26,17 @@ import { ToastContainer } from "./components/ui/Toast";
 import { PerfMonitor } from "./components/PerfMonitor";
 import type { DawProject, InsertDevice } from "./types/daw";
 import { useSettingsStore } from "./store/settingsStore";
-import { useWindowStore } from "./store/windowStore";
 import { useBackgroundTaskStore } from "./store/backgroundTaskStore";
 import { useDragWorkflowStore } from "./store/dragWorkflowStore";
-import { rememberSavedProject } from "./utils/projectLifecycle";
+import { useRecentProjectsStore } from "./store/recentProjectsStore";
+import {
+  PROJECT_ACTION_CHANNEL,
+  guardUnsavedProject,
+  openProjectFromPath,
+  rememberSavedProject,
+  type ProjectActionMessage,
+} from "./utils/projectLifecycle";
+import { openProjectWizardWindow } from "./utils/dialogWindows";
 import "./App.css";
 
 // Wire engine modules to app-layer state — runs once at module load time.
@@ -104,6 +111,16 @@ function syncInsertDeltasToEngine(project: DawProject, previous: DawProject): vo
   }
 }
 
+function getStartupRecentProjectPath(): string | null {
+  if (platform.kind !== "electron" || !platform.folderProject.isSupported) return null;
+  const recent = useRecentProjectsStore
+    .getState()
+    .recentProjects
+    .filter((project) => project.source === "local" && project.storageMode === "folder" && project.projectFilePath)
+    .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)[0];
+  return recent?.projectFilePath ?? null;
+}
+
 export default function App() {
   const { setWaveformStatus, loadLocal, project } = useProjectStore();
   const [perfVisible, setPerfVisible] = useState(false);
@@ -114,6 +131,19 @@ export default function App() {
     return window.futureboard?.commands.onCommand((commandId) => {
       runAction(commandId);
     });
+  }, []);
+
+  useEffect(() => {
+    if (typeof BroadcastChannel === "undefined") return;
+    const channel = new BroadcastChannel(PROJECT_ACTION_CHANNEL);
+    channel.onmessage = (event: MessageEvent<ProjectActionMessage>) => {
+      const message = event.data;
+      if (message?.type !== "openProjectPath" || typeof message.filePath !== "string") return;
+      void guardUnsavedProject("open")
+        .then((ok) => (ok ? openProjectFromPath(message.filePath) : false))
+        .catch((error) => console.warn("[App] external project open:", error));
+    };
+    return () => channel.close();
   }, []);
 
   useEffect(() => {
@@ -171,30 +201,57 @@ export default function App() {
     }
   };
 
-  // Load saved project metadata from localStorage on mount, then mark as saved.
+  // Load startup project once. Electron folder projects must be opened by path
+  // so waveform cache/chunk adapters receive the active project root.
   useEffect(() => {
+    let cancelled = false;
     const startupBehavior = useSettingsStore.getState().startupBehavior;
-    if (startupBehavior === "newProject") {
-      useProjectStore.getState().createNewProject();
-    } else {
-      loadLocal();
-    }
-    useUIStore.getState().setSaveStatus("saved");
-    if (startupBehavior === "wizard" && !startupHandledRef.current) {
+
+    const openWizard = () => {
+      if (startupHandledRef.current) return;
       startupHandledRef.current = true;
-      const windows = useWindowStore.getState();
-      if (!windows.isWindowOpen("projectWizard")) {
-        windows.openDialog({
-          contentType: "projectWizard",
-          title: "New Project",
-          modal: true,
-          width: 780,
-          height: platform.kind === "electron" ? 560 : 510,
-          resizable: false,
-          closable: true,
-        });
+      void openProjectWizardWindow();
+    };
+
+    const restoreLocalProject = () => {
+      if (startupBehavior === "newProject") {
+        useProjectStore.getState().createNewProject();
+      } else {
+        loadLocal();
       }
+      useUIStore.getState().setSaveStatus("saved");
+    };
+
+    if (startupBehavior === "lastProject") {
+      const filePath = getStartupRecentProjectPath();
+      if (filePath) {
+        void openProjectFromPath(filePath)
+          .then((opened) => {
+            if (cancelled || opened) return;
+            restoreLocalProject();
+          })
+          .catch((error) => {
+            console.warn("[App] startup open recent:", error);
+            if (!cancelled) restoreLocalProject();
+          });
+      } else {
+        restoreLocalProject();
+      }
+    } else if (startupBehavior === "newProject") {
+      // Start with a clean blank project immediately
+      useProjectStore.getState().createNewProject();
+      useUIStore.getState().setSaveStatus("saved");
+    } else {
+      // "wizard" — start with a blank canvas so the previous project
+      // is never visible while the wizard is open.
+      useProjectStore.getState().createNewProject();
+      useUIStore.getState().setSaveStatus("saved");
+      openWizard();
     }
+
+    return () => {
+      cancelled = true;
+    };
   }, [loadLocal]);
 
   // Mark status bar "unsaved" whenever the project data actually changes.

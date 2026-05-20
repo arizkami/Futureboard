@@ -13,6 +13,7 @@ import { mixer } from "./Mixer";
 import { clipScheduler } from "./ClipScheduler";
 import { WasmAudioEngineAdapter } from "./WasmAudioEngineAdapter";
 import { useAudioBackendStore } from "../store/audioBackendStore";
+import { getVisualFrameIntervalMs, shouldRunVisualFrame } from "../utils/visualFrameRate";
 
 class WebAudioEngineAdapter implements AudioEngineAdapter {
   private _meterCallbacks = new Set<MeterCallback>();
@@ -129,6 +130,8 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
       mixer.setPreviewMode(track.id, track.monitor?.previewMode ?? "stereo");
       const outId = track.routing?.outputId;
       if (outId && outId !== "master") mixer.setTrackOutput(track.id, outId);
+      else mixer.setTrackOutput(track.id, track.output ?? "master");
+      mixer.syncTrackSends(track.id, track.sends ?? []);
     }
   }
 
@@ -138,8 +141,16 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
       mixer.getOrCreateTrack(track.id, track.volume, track.pan);
       mixer.setVolume(track.id, track.volume);
       mixer.setPan(track.id, track.pan);
+      mixer.setMute(track.id, track.muted ?? false);
+      mixer.setSolo(track.id, track.solo ?? false);
       mixer.setPhaseInvert(track.id, track.advanced?.phaseInvert ?? false);
       mixer.setPreviewMode(track.id, track.monitor?.previewMode ?? "stereo");
+    }
+    for (const track of project.tracks) {
+      const outId = track.routing?.outputId;
+      if (outId && outId !== "master") mixer.setTrackOutput(track.id, outId);
+      else mixer.setTrackOutput(track.id, track.output ?? "master");
+      mixer.syncTrackSends(track.id, track.sends ?? []);
     }
   }
 
@@ -187,6 +198,8 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
     mixer.setPreviewMode(track.id, track.monitor?.previewMode ?? "stereo");
     const outId = track.routing?.outputId;
     if (outId && outId !== "master") mixer.setTrackOutput(track.id, outId);
+    else mixer.setTrackOutput(track.id, track.output ?? "master");
+    mixer.syncTrackSends(track.id, track.sends ?? []);
   }
 
   removeTrack(trackId: TrackId): void {
@@ -293,8 +306,8 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
         this._meterRafId = null;
         return;
       }
-      // Throttle to display refresh for responsive meters.
-      if (now - this._meterTickMs >= 16) {
+      // Throttle from Preferences > Timeline FPS; unlimited follows RAF.
+      if (shouldRunVisualFrame(this._meterTickMs, now)) {
         this._meterTickMs = now;
         for (const cb of this._meterCallbacks) {
           cb("master", mixer.getMasterLevel() as StereoLevel);
@@ -309,16 +322,22 @@ class WebAudioEngineAdapter implements AudioEngineAdapter {
   }
 
   private _startTransportLoop(): void {
-    const tick = () => {
+    let lastTransportAt = 0;
+    const tick = (now: number) => {
       if (this._transportCallbacks.size === 0) {
         this._transportRafId = null;
         return;
       }
-      const state = {
-        playing: transport.isPlaying,
-        positionSeconds: transport.projectTime,
-      };
-      for (const cb of this._transportCallbacks) cb(state);
+      // 0 = unlimited → run every RAF tick (true unlimited via RAF)
+      const interval = getVisualFrameIntervalMs();
+      if (now - lastTransportAt >= interval) {
+        lastTransportAt = now;
+        const state = {
+          playing: transport.isPlaying,
+          positionSeconds: transport.projectTime,
+        };
+        for (const cb of this._transportCallbacks) cb(state);
+      }
       this._transportRafId = requestAnimationFrame(tick);
     };
     this._transportRafId = requestAnimationFrame(tick);

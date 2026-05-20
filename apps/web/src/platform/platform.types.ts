@@ -23,6 +23,8 @@ export interface FolderProjectAdapter {
   importAudio(sourcePath: string): Promise<FolderImportAudioResult | null>;
   /** Loads a .mochiproj file from a specific absolute path. Sets projectRoot as side effect. */
   openByPath(filePath: string): Promise<DawProject | null>;
+  /** Returns the OS path of the default projects folder, creating it if needed. Web: returns "". */
+  getDefaultProjectsPath(): Promise<string>;
 }
 
 export type PlatformKind = "web" | "electron" | "sphere-native";

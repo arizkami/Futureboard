@@ -17,6 +17,7 @@ import type {
   AudioSampleRate,
   ExtraFolderSetting,
   GraphicRenderingMode,
+  VisualFrameRate,
 } from "../../store/settingsStore";
 import { RefreshCw, AlertCircle, FolderOpen, FolderPlus, Trash2 } from "lucide-react";
 import { activeAudioEngine } from "../../engine/activeAudioEngine";
@@ -36,7 +37,7 @@ type ProjectDraft = {
   sampleRate: number;
 };
 
-type Props = { windowId: string; initialTab?: SettingsTab };
+type Props = { windowId: string; initialTab?: SettingsTab; external?: boolean };
 
 // ── Shared control classes ────────────────────────────────────────────────────
 
@@ -490,6 +491,7 @@ function AudioTab({
 }) {
   const audioSettings = useAudioSettingsStore();
   const isElectron = platform.kind === "electron";
+  const { audioInputs, audioOutputs } = useDeviceStore();
 
   // OS platform from Electron bridge (win32 / darwin / linux)
   const osPlatform = (window.dawElectron?.platform ?? "") as string;
@@ -556,10 +558,13 @@ function AudioTab({
   // ── Device select options ─────────────────────────────────────────────────
   const inputOptions = [
     { value: "__default__", label: "System Default" },
-    ...nativeInputs.map((d) => ({
+    ...(nativeInputs.length > 0 ? nativeInputs.map((d) => ({
       value: d.id,
       label: d.isDefault ? `${d.name} (Default)` : d.name,
-    })),
+    })) : audioInputs.map((d) => ({
+      value: d.id,
+      label: d.isDefault ? `${d.name} (Default)` : d.name,
+    }))),
   ];
   const inputDeviceValue =
     audioSettings.audioInputDeviceId &&
@@ -569,10 +574,13 @@ function AudioTab({
 
   const outputOptions = [
     { value: "__default__", label: "System Default" },
-    ...nativeOutputs.map((d) => ({
+    ...(nativeOutputs.length > 0 ? nativeOutputs.map((d) => ({
       value: d.id,
       label: d.isDefault ? `${d.name} (Default)` : d.name,
-    })),
+    })) : audioOutputs.map((d) => ({
+      value: d.id,
+      label: d.isDefault ? `${d.name} (Default)` : d.name,
+    }))),
   ];
   const outputDeviceValue =
     audioSettings.audioOutputDeviceId &&
@@ -871,6 +879,21 @@ function AppearanceTab({ draft, setDraft }: { draft: AppSettings; setDraft: (p: 
         <>
           <SectionHeader>Graphics</SectionHeader>
           <SettingsRow
+            label="Timeline FPS"
+            description="Caps visual refresh for timeline, meters, playhead, and diagnostics. Unlimited follows the display refresh rate."
+          >
+            <SettingsSelect<VisualFrameRate>
+              value={draft.visualFrameRate}
+              onChange={(v) => setDraft({ visualFrameRate: v })}
+              options={[
+                { value: 45, label: "45 FPS" },
+                { value: 60, label: "60 FPS" },
+                { value: 120, label: "120 FPS" },
+                { value: "unlimited", label: "Unlimited" },
+              ]}
+            />
+          </SettingsRow>
+          <SettingsRow
             label="GPU Device"
             description={gpuBackend || "Renderer device currently reported by Electron/Chromium."}
           >
@@ -1065,7 +1088,7 @@ function AdvancedTab({ draft, setDraft, onReset }: { draft: AppSettings; setDraf
 
 // ── Main Dialog ──────────────────────────────────────────────────────────────
 
-export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
+export function SettingsDialog({ windowId, initialTab = "general", external = false }: Props) {
   const store = useSettingsStore();
   const { project } = useProjectStore();
   const { closeWindow, updateWindowPayload } = useWindowStore();
@@ -1106,6 +1129,7 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
     compactUI:            store.compactUI,
     enableDevTools:       store.enableDevTools,
     graphicRenderingMode: store.graphicRenderingMode,
+    visualFrameRate:      store.visualFrameRate,
   });
 
   const patchProject = (p: Partial<ProjectDraft>) => setProjectDraft((s) => ({ ...s, ...p }));
@@ -1242,10 +1266,14 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
     return true;
   };
 
-  const handleCancel = () => closeWindow(windowId);
+  const closeSelf = () => {
+    if (external && platform.kind === "electron") platform.window.close();
+    else closeWindow(windowId);
+  };
+  const handleCancel = () => closeSelf();
   const handleDone = async () => {
     const ok = await handleApply();
-    if (ok) closeWindow(windowId);
+    if (ok) closeSelf();
   };
 
   const tabs: { id: SettingsTab; label: string }[] = [
@@ -1260,7 +1288,7 @@ export function SettingsDialog({ windowId, initialTab = "general" }: Props) {
   ];
 
   return (
-    <div className="flex h-full w-full overflow-hidden border border-white/[0.07] bg-[#0e1319] shadow-2xl select-none">
+    <div className={`flex h-full w-full overflow-hidden bg-[#0e1319] select-none ${external ? "" : "border border-white/[0.07] shadow-2xl"}`}>
       {/* Sidebar */}
       <div className="flex w-[166px] flex-shrink-0 flex-col border-r border-white/[0.06] bg-[#0a0e13] px-1.5 py-2">
         {tabs.map((tab) => (

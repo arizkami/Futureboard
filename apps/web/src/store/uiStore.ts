@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { ClipId, TrackId } from "../types/daw";
 import type { AppMenuItem } from "../menu/menuItems";
+import type { SnapDivision } from "../utils/musicalTime";
 import { MIXER_HEIGHT, BROWSER_WIDTH, INSPECTOR_WIDTH } from "../theme";
 
 export type PanelDock = "left" | "right" | "bottom" | "float";
@@ -44,6 +45,7 @@ type UIStore = {
   scrollX: number;
   selectedClipIds: ClipId[];
   selectedTrackId: TrackId | null;
+  selectedTrackIds: TrackId[];
   selectedMixerTrackId: TrackId | "master" | null;
   focusedPanel: "timeline" | "mixer" | "browser" | "inspector" | null;
   masterVolume: number;
@@ -52,6 +54,7 @@ type UIStore = {
   togglePanel: (id: string) => void;
   applyWorkspaceLayout: (layoutName: string) => void;
   snapToGrid: boolean;
+  arrangementGridDivision: SnapDivision;
   loopEnabled: boolean;
   loopStart: number;
   loopEnd: number;
@@ -66,10 +69,13 @@ type UIStore = {
   setSelectedClipIds: (ids: ClipId[]) => void;
   toggleClipSelection: (id: ClipId) => void;
   setSelectedTrackId: (id: TrackId | null) => void;
+  setSelectedTrackIds: (ids: TrackId[]) => void;
+  toggleTrackInSelection: (id: TrackId) => void;
   setSelectedMixerTrackId: (id: TrackId | "master" | null) => void;
   setFocusedPanel: (panel: UIStore["focusedPanel"]) => void;
   setMasterVolume: (v: number) => void;
   toggleSnapToGrid: () => void;
+  setArrangementGridDivision: (division: SnapDivision) => void;
   toggleLoop: () => void;
   setLoopStart: (seconds: number) => void;
   setLoopEnd: (seconds: number) => void;
@@ -111,6 +117,7 @@ export const useUIStore = create<UIStore>((set) => ({
   scrollX: 0,
   selectedClipIds: [],
   selectedTrackId: null,
+  selectedTrackIds: [],
   selectedMixerTrackId: null,
   focusedPanel: "timeline",
   masterVolume: 1,
@@ -150,6 +157,7 @@ export const useUIStore = create<UIStore>((set) => ({
     return { panels: p };
   }),
   snapToGrid: true,
+  arrangementGridDivision: "auto",
   loopEnabled: false,
   loopStart: 0,
   loopEnd: 4,
@@ -167,10 +175,17 @@ export const useUIStore = create<UIStore>((set) => ({
       : [...s.selectedClipIds, id]
   })),
   setSelectedTrackId: (selectedTrackId) => set({ selectedTrackId }),
+  setSelectedTrackIds: (selectedTrackIds) => set({ selectedTrackIds }),
+  toggleTrackInSelection: (id) => set((s) => ({
+    selectedTrackIds: s.selectedTrackIds.includes(id)
+      ? s.selectedTrackIds.filter((x) => x !== id)
+      : [...s.selectedTrackIds, id],
+  })),
   setSelectedMixerTrackId: (selectedMixerTrackId) => set({ selectedMixerTrackId }),
   setFocusedPanel: (focusedPanel) => set({ focusedPanel }),
   setMasterVolume: (masterVolume) => set({ masterVolume }),
   toggleSnapToGrid: () => set((s) => ({ snapToGrid: !s.snapToGrid })),
+  setArrangementGridDivision: (arrangementGridDivision) => set({ arrangementGridDivision }),
   toggleLoop: () => set((s) => ({ loopEnabled: !s.loopEnabled })),
   setLoopStart: (loopStart) => set({ loopStart }),
   setLoopEnd: (loopEnd) => set({ loopEnd }),

@@ -8,3 +8,6 @@
 [submodule "packages/shared/lucide"]
 	path = packages/shared/lucide
 	url = https://github.com/lucide-icons/lucide
+[submodule "external/vst3sdk"]
+	path = external/vst3sdk
+	url = https://github.com/steinbergmedia/vst3sdk

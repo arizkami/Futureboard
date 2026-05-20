@@ -4,8 +4,9 @@ import { useProjectStore } from "../../store/projectStore";
 import { HEADER_WIDTH } from "../../theme";
 import { getArrangementGridLines, pxPerBeat, type GridLineLevel } from "../../utils/musicalGrid";
 import { beatsPerBar } from "../../utils/musicalTime";
-import type { TimeSignature } from "../../utils/musicalTime";
+import type { SnapDivision, TimeSignature } from "../../utils/musicalTime";
 import { TimelineGpuGridRenderer } from "./timelineGpuGridRenderer";
+import { subscribeScroll, getScrollX } from "../../engine/scrollController";
 
 // ── Color hierarchy: sub (ghost) → beat (medium) → bar (anchor) ───────────────
 // Values chosen to be clearly readable on a dark surface without feeling harsh.
@@ -23,14 +24,17 @@ export function TimelineGrid() {
   const rendererRef = useRef<TimelineGpuGridRenderer | null>(null);
   const stateRef = useRef({
     pixelsPerSecond: 0,
-    scrollX: 0,
     bpm: 120,
     timeSig: { numerator: 4, denominator: 4 } as TimeSignature,
+    gridDivision: "1/16" as SnapDivision,
   });
-  const { pixelsPerSecond, scrollX } = useUIStore();
+  // Subscribe only to pixelsPerSecond (not scrollX) — scrollX is handled by
+  // subscribeScroll below to avoid React re-renders on every scroll event.
+  const pixelsPerSecond = useUIStore((s) => s.pixelsPerSecond);
+  const gridDivision = useUIStore((s) => s.arrangementGridDivision);
   const { bpm, timeSignature } = useProjectStore((s) => s.project);
   const timeSig: TimeSignature = timeSignature ?? { numerator: 4, denominator: 4 };
-  stateRef.current = { pixelsPerSecond, scrollX, bpm, timeSig };
+  stateRef.current = { pixelsPerSecond, bpm, timeSig, gridDivision };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -45,12 +49,14 @@ export function TimelineGrid() {
       const W   = wrap.offsetWidth  || 2000;
       const H   = wrap.offsetHeight || 1000;
       const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
-      const { pixelsPerSecond, scrollX, bpm, timeSig } = stateRef.current;
+      const { pixelsPerSecond, bpm, timeSig, gridDivision } = stateRef.current;
+      // Read scrollX directly from controller — avoids Zustand round-trip.
+      const scrollX = getScrollX();
 
       const ppb  = pxPerBeat(pixelsPerSecond, bpm);
       const bpb  = beatsPerBar(timeSig);
       const barW = bpb * ppb;
-      const lines = getArrangementGridLines(pixelsPerSecond, bpm, timeSig, scrollX, W);
+      const lines = getArrangementGridLines(pixelsPerSecond, bpm, timeSig, scrollX, W, gridDivision);
 
       if (rendererRef.current) {
         try {
@@ -132,8 +138,10 @@ export function TimelineGrid() {
     scheduleDraw();
     ro = new ResizeObserver(() => scheduleDraw());
     ro.observe(wrap);
+    const unsubScroll = subscribeScroll(() => scheduleDraw());
 
     return () => {
+      unsubScroll();
       ro?.disconnect();
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
       rendererRef.current?.dispose();
@@ -148,7 +156,7 @@ export function TimelineGrid() {
       rafRef.current = null;
       drawRef.current?.();
     });
-  }, [bpm, timeSig, pixelsPerSecond, scrollX]);
+  }, [bpm, timeSig, pixelsPerSecond, gridDivision]);
 
   return (
     <div

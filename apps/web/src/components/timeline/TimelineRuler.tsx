@@ -1,20 +1,23 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useUIStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
 import { C, HEADER_WIDTH, RULER_HEIGHT } from "../../theme";
 import {
   Magnet,
   Plus,
+  ChevronDown,
 } from "lucide-react";
 import {
+  ARRANGEMENT_GRID_DIVISIONS,
   contentXToTime,
   formatBarBeat,
+  getGridStepBeats,
   secondsPerBeat,
   snapTime,
   timeToContentX,
 } from "../../utils/musicalTime";
 import { TIMELINE_Z } from "../../utils/timelineZ";
-import { getArrangementGridLines } from "../../utils/musicalGrid";
+import { getArrangementGridLines, pxPerBeat } from "../../utils/musicalGrid";
 import { activeAudioEngine } from "../../engine/activeAudioEngine";
 import type { TimeSignature } from "../../utils/musicalTime";
 
@@ -25,12 +28,25 @@ type TimelineRulerProps = {
   onToggleSnapToGrid: () => void;
 };
 
+// Minimum grid-step width (CSS px) for a division to appear in the dropdown.
+// Below this threshold lines are too close together to be useful as snap targets.
+const MIN_GRID_STEP_PX = 8;
+
 export function TimelineRuler({ width, onAddTrack, snapToGrid, onToggleSnapToGrid }: TimelineRulerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef  = useRef<HTMLDivElement>(null);
-  const { pixelsPerSecond, scrollX, loopEnabled, loopStart, loopEnd, setLoopStart, setLoopEnd } = useUIStore();
+  const [gridOpen, setGridOpen] = useState(false);
+  const { pixelsPerSecond, scrollX, loopEnabled, loopStart, loopEnd, setLoopStart, setLoopEnd, arrangementGridDivision, setArrangementGridDivision } = useUIStore();
   const { bpm, timeSignature } = useProjectStore((s) => s.project);
   const timeSig: TimeSignature = timeSignature ?? { numerator: 4, denominator: 4 };
+
+  // Divisions whose grid step is wide enough to be meaningful at the current zoom.
+  // The currently selected division is always included so it stays accessible.
+  const ppb = pxPerBeat(pixelsPerSecond, bpm);
+  const visibleDivisions = ARRANGEMENT_GRID_DIVISIONS.filter((div) => {
+    const stepPx = getGridStepBeats(div) * ppb;
+    return stepPx >= MIN_GRID_STEP_PX || div === arrangementGridDivision;
+  });
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -71,7 +87,7 @@ export function TimelineRuler({ width, onAddTrack, snapToGrid, onToggleSnapToGri
 
       ctx.textBaseline = "middle";
 
-      const lines = getArrangementGridLines(pixelsPerSecond, bpm, timeSig, scrollX, W);
+      const lines = getArrangementGridLines(pixelsPerSecond, bpm, timeSig, scrollX, W, arrangementGridDivision);
 
       // Draw sub and beat ticks first, bar ticks on top
       for (const line of lines) {
@@ -138,7 +154,7 @@ export function TimelineRuler({ width, onAddTrack, snapToGrid, onToggleSnapToGri
     return () => {
       if (resizeObserver) resizeObserver.disconnect();
     };
-  }, [bpm, timeSig, pixelsPerSecond, scrollX, width]);
+  }, [bpm, timeSig, pixelsPerSecond, scrollX, width, arrangementGridDivision]);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!wrapRef.current) return;
@@ -146,12 +162,12 @@ export function TimelineRuler({ width, onAddTrack, snapToGrid, onToggleSnapToGri
     const updateTime = (clientX: number) => {
       const rect = wrapRef.current!.getBoundingClientRect();
       const contentX = clientX - rect.left;
-      const { scrollX: sx, pixelsPerSecond: pps, snapToGrid } = useUIStore.getState();
+      const { scrollX: sx, pixelsPerSecond: pps, snapToGrid, arrangementGridDivision } = useUIStore.getState();
       const rawSeconds = contentXToTime(contentX, pps, sx);
 
       if (snapToGrid) {
         const spb = secondsPerBeat(bpm);
-        activeAudioEngine.seekSeconds(snapTime(rawSeconds, bpm, timeSig, pps * spb));
+        activeAudioEngine.seekSeconds(snapTime(rawSeconds, bpm, timeSig, pps * spb, arrangementGridDivision));
       } else {
         activeAudioEngine.seekSeconds(rawSeconds);
       }
@@ -199,7 +215,57 @@ export function TimelineRuler({ width, onAddTrack, snapToGrid, onToggleSnapToGri
         >
           <Magnet size={12} />
         </button>
-        <span className="relative z-10 shrink-0 rounded-md border border-daw-border bg-daw-bg px-1.5 py-0.5 text-[10px] text-daw-faint">
+        <div className="relative z-10 shrink-0">
+          <button
+            type="button"
+            onClick={() => setGridOpen((v) => !v)}
+            title="Arrangement grid resolution"
+            className="flex h-6 items-center gap-1 rounded-md border border-daw-border bg-daw-bg px-1.5 text-[10px] font-medium tabular-nums text-daw-dim transition-colors hover:border-daw-border-light hover:bg-daw-surface-high hover:text-daw-text"
+          >
+            {arrangementGridDivision === "auto" ? "Auto" : arrangementGridDivision}
+            <ChevronDown size={10} />
+          </button>
+          {gridOpen && (
+            <div className="absolute right-0 top-[28px] z-50 w-[164px] rounded-md border border-daw-border bg-daw-surface p-1 shadow-xl">
+              <div className="px-2 pb-1 pt-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-daw-faint">
+                Grid
+              </div>
+              {/* Auto row — always full-width at top */}
+              <button
+                type="button"
+                onClick={() => { setArrangementGridDivision("auto"); setGridOpen(false); }}
+                className={`mb-0.5 h-6 w-full rounded px-2 text-left text-[10px] font-medium transition-colors ${
+                  arrangementGridDivision === "auto"
+                    ? "bg-daw-accent/20 text-daw-accent"
+                    : "text-daw-dim hover:bg-daw-surface-high hover:text-daw-text"
+                }`}
+              >
+                Auto
+                <span className="ml-1 text-[9px] opacity-50">adapts to zoom</span>
+              </button>
+              <div className="grid grid-cols-2 gap-0.5">
+                {visibleDivisions.map((division) => (
+                  <button
+                    key={division}
+                    type="button"
+                    onClick={() => {
+                      setArrangementGridDivision(division);
+                      setGridOpen(false);
+                    }}
+                    className={`h-6 rounded px-2 text-left text-[10px] font-medium tabular-nums transition-colors ${
+                      division === arrangementGridDivision
+                        ? "bg-daw-accent/20 text-daw-accent"
+                        : "text-daw-dim hover:bg-daw-surface-high hover:text-daw-text"
+                    }`}
+                  >
+                    {division}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        <span className="relative z-10 hidden shrink-0 rounded-md border border-daw-border bg-daw-bg px-1.5 py-0.5 text-[10px] text-daw-faint min-[400px]:inline">
           bar.beat
         </span>
       </div>
@@ -241,7 +307,7 @@ export function TimelineRuler({ width, onAddTrack, snapToGrid, onToggleSnapToGri
                     let newStart = Math.max(0, initialStart + (ev.clientX - startX) / pixelsPerSecond);
                     if (useUIStore.getState().snapToGrid) {
                       const spb = secondsPerBeat(bpm);
-                      newStart = snapTime(newStart, bpm, timeSig, pixelsPerSecond * spb);
+                      newStart = snapTime(newStart, bpm, timeSig, pixelsPerSecond * spb, useUIStore.getState().arrangementGridDivision);
                     }
                     setLoopStart(Math.min(newStart, loopEnd - 0.1));
                   };
@@ -267,7 +333,7 @@ export function TimelineRuler({ width, onAddTrack, snapToGrid, onToggleSnapToGri
                     let newEnd = Math.max(0, initialEnd + (ev.clientX - startX) / pixelsPerSecond);
                     if (useUIStore.getState().snapToGrid) {
                       const spb = secondsPerBeat(bpm);
-                      newEnd = snapTime(newEnd, bpm, timeSig, pixelsPerSecond * spb);
+                      newEnd = snapTime(newEnd, bpm, timeSig, pixelsPerSecond * spb, useUIStore.getState().arrangementGridDivision);
                     }
                     setLoopEnd(Math.max(loopStart + 0.1, newEnd));
                   };

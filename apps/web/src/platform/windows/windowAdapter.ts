@@ -14,6 +14,7 @@ export type ExternalWindowConfig = {
   frame?: boolean;
   transparent?: boolean;
   resizable?: boolean;
+  maximizable?: boolean;
 };
 
 export interface ExternalWindowAdapter {

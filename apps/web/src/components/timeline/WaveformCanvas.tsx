@@ -1,7 +1,6 @@
 import { memo, useLayoutEffect, useRef, useEffect } from "react";
 import type { WaveformStatus } from "../../types/daw";
 import type { PeakLevelMeta } from "../../store/projectStore";
-import { useUIStore } from "../../store/uiStore";
 import { HEADER_WIDTH } from "../../theme";
 import {
   CHUNK_PEAKS,
@@ -9,6 +8,12 @@ import {
   updateCanvasPixels,
 } from "../../engine/peakChunkCache";
 import { readPeakChunk } from "../../engine/peakChunkStore";
+import {
+  subscribeScroll,
+  subscribeScrollIdle,
+  isScrollingNow,
+  getScrollX,
+} from "../../engine/scrollController";
 
 /**
  * Each tile covers at most TILE_SIZE CSS pixels of the clip.
@@ -61,7 +66,7 @@ export const WaveformCanvas = memo(function WaveformCanvas(props: Props) {
 
   const tile0Ref = useRef<HTMLCanvasElement>(null);
   const tile1Ref = useRef<HTMLCanvasElement>(null);
-  const scrollXRef = useRef(useUIStore.getState().scrollX);
+  const scrollXRef = useRef(getScrollX());
   const rafRef = useRef<number | null>(null);
   const drawVersionRef = useRef(0);
 
@@ -161,6 +166,9 @@ export const WaveformCanvas = memo(function WaveformCanvas(props: Props) {
     const amp = cssH * 0.45;
     const peaksPerColumn = Math.max(1, (peakIdxEnd - peakIdxStart + 1) / Math.max(1, cssW));
     const dense = peaksPerColumn > DENSE_WAVEFORM_THRESHOLD;
+    // During active scroll, skip the 4-step horizontal smear (5× fillRect → 1×
+    // per pixel at close zoom). A refine redraw fires 100 ms after scroll stops.
+    const scrolling = isScrollingNow();
 
     ctx.fillStyle = p.color ?? "rgba(255,255,255,0.7)";
     const baseAlpha = p.muted ? 0.4 : p.selected ? 1 : 0.9;
@@ -199,7 +207,7 @@ export const WaveformCanvas = memo(function WaveformCanvas(props: Props) {
       const y2 = mid - lo * amp;
       const barH = Math.max(1, y2 - y1);
 
-      if (!dense) {
+      if (!dense && !scrolling) {
         // Subtle horizontal smear makes close-up waveforms feel less
         // stroboscopic while keeping the real peak envelope centered and sharp.
         ctx.globalAlpha = baseAlpha * 0.14;
@@ -209,7 +217,7 @@ export const WaveformCanvas = memo(function WaveformCanvas(props: Props) {
       }
       ctx.globalAlpha = baseAlpha;
       ctx.fillRect(x, y1, 1, barH);
-      if (!dense) {
+      if (!dense && !scrolling) {
         ctx.globalAlpha = baseAlpha * 0.16;
         ctx.fillRect(x + 1, y1, 1, barH);
       }
@@ -300,16 +308,19 @@ export const WaveformCanvas = memo(function WaveformCanvas(props: Props) {
   // ── Imperative scroll tracking (no React rerender) ──────────────────────────
   useEffect(() => {
     if (clipStartPx === undefined) return;
-    scrollXRef.current = useUIStore.getState().scrollX;
+    scrollXRef.current = getScrollX();
 
-    const unsub = useUIStore.subscribe((state) => {
-      if (state.scrollX !== scrollXRef.current) {
-        scrollXRef.current = state.scrollX;
-        scheduleDraw();
-      }
+    const unsubScroll = subscribeScroll((x) => {
+      scrollXRef.current = x;
+      scheduleDraw();
     });
+    // After scroll idle: refine redraw to restore smear and flush any
+    // partially-loaded chunks that arrived during fast scroll.
+    const unsubIdle = subscribeScrollIdle(() => scheduleDraw());
+
     return () => {
-      unsub();
+      unsubScroll();
+      unsubIdle();
       if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -320,6 +331,16 @@ export const WaveformCanvas = memo(function WaveformCanvas(props: Props) {
     scheduleDraw();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileId, levelMeta, width, height, color, muted, selected, clipOffset, clipDuration, sampleRate, sourceDuration, status, clipStartPx]);
+
+  // ── Retry draw when a project finishes opening (projectWaveformReady) ────────
+  // loadOpenedProject dispatches this event after committing all pre-warmed
+  // peak metadata so waveforms that mounted before peaks arrived can retry.
+  useEffect(() => {
+    const onReady = () => scheduleDraw();
+    window.addEventListener("projectWaveformReady", onReady);
+    return () => window.removeEventListener("projectWaveformReady", onReady);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Cleanup canvas pixel tracking on unmount ─────────────────────────────────
   useEffect(() => {

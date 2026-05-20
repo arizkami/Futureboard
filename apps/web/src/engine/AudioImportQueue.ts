@@ -76,7 +76,7 @@ class AudioImportQueue {
   private jobs = new Map<string, AudioImportJob>();
   private sources = new Map<string, QueueSource>();
   private targets = new Map<string, TimelineTarget>();
-  private taskGroups = new Map<string, { importTaskId: string; peakTaskId: string; total: number }>();
+  private taskGroups = new Map<string, { importTaskId?: string; peakTaskId: string; total: number }>();
   private queue: string[] = [];
   private activeCopies = 0;
   private activePeaks = 0;
@@ -196,6 +196,57 @@ class AudioImportQueue {
       }
     }
     return imported;
+  }
+
+  enqueuePeakGenerationForFile(file: DawFile): boolean {
+    if (this.jobs.has(file.id) || this.peakWorkers.has(file.id)) return false;
+    const nativePath = file.cacheKey ?? file.storageKey;
+    if (!nativePath) return false;
+
+    const peakTaskId = useBackgroundTaskStore.getState().addTask({
+      kind: "peak-generation",
+      title: `Generating waveform for ${file.name}`,
+      detail: `Queued ${file.name}`,
+      status: "queued",
+      progress: { current: 0, total: 1 },
+      cancellable: false,
+    });
+
+    this.jobs.set(file.id, {
+      id: crypto.randomUUID(),
+      fileId: file.id,
+      fileName: file.name,
+      size: file.size ?? 0,
+      sourcePath: nativePath,
+      state: "pending",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    this.taskGroups.set(file.id, { peakTaskId, total: 1 });
+
+    this.queuePeakJob(
+      file.id,
+      {
+        sourcePath: nativePath,
+        name: file.name,
+        size: file.size ?? 0,
+        lastModified: file.lastModified,
+        mimeType: file.mimeType,
+      },
+      {
+        storageProvider: file.storageProvider,
+        storageKey: file.storageKey,
+        cacheKey: file.cacheKey,
+        waveformCacheKeys: file.waveformCacheKeys,
+        size: file.size,
+        lastModified: file.lastModified,
+        originalFileName: file.originalFileName,
+        relativePath: file.relativePath,
+        name: file.name,
+      },
+      file.duration,
+    );
+    return true;
   }
 
   evictDecodedBuffer(fileId: FileId): void {
@@ -658,7 +709,7 @@ class AudioImportQueue {
 
   private updateImportTask(fileId: FileId, status: "queued" | "running", detail: string): void {
     const group = this.taskGroups.get(fileId);
-    if (!group) return;
+    if (!group?.importTaskId) return;
     useBackgroundTaskStore.getState().updateTask(group.importTaskId, { status, detail });
   }
 
@@ -672,6 +723,7 @@ class AudioImportQueue {
     const group = this.taskGroups.get(fileId);
     if (!group) return;
     const taskId = kind === "import" ? group.importTaskId : group.peakTaskId;
+    if (!taskId) return;
     const task = useBackgroundTaskStore.getState().tasks[taskId];
     if (!task) return;
     const current = Math.min(group.total, taskProgressCurrent(taskId) + 1);

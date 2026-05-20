@@ -6,6 +6,7 @@ import { C } from "../../theme";
 import { TIMELINE_CONTENT_LEFT, timeToContentX } from "../../utils/musicalTime";
 import { TIMELINE_Z } from "../../utils/timelineZ";
 import { TimelineGpuPlayheadRenderer } from "./timelineGpuPlayheadRenderer";
+import { shouldRunVisualFrame } from "../../utils/visualFrameRate";
 
 /**
  * Renders the playhead inside a clip container that starts at the timeline
@@ -28,6 +29,7 @@ export function Playhead() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const gpuRef = useRef<TimelineGpuPlayheadRenderer | null>(null);
   const rafRef   = useRef<number>(0);
+  const lastDrawAt = useRef(0);
   const lastStore = useRef(0);
   const setPlayheadTime = useTransportStore((s) => s.setPlayheadTime);
 
@@ -36,6 +38,7 @@ export function Playhead() {
     if (canvas) gpuRef.current = TimelineGpuPlayheadRenderer.create(canvas);
 
     const tick = () => {
+      const now = performance.now();
       const { pixelsPerSecond: pps, scrollX, loopEnabled, loopStart, loopEnd } =
         useUIStore.getState();
       const t = activeAudioEngine.projectTime;
@@ -49,29 +52,31 @@ export function Playhead() {
       // Content-area x — wrapper already begins at TIMELINE_CONTENT_LEFT,
       // so the line/marker never paint over the sticky track-header lane.
       const x = timeToContentX(t, pps, scrollX);
-      const wrap = wrapRef.current;
-      const canvas = canvasRef.current;
-      if (wrap && canvas) {
-        const width = wrap.clientWidth || 1;
-        const height = wrap.clientHeight || 1;
-        const dpr = window.devicePixelRatio || 1;
+      if (shouldRunVisualFrame(lastDrawAt.current, now)) {
+        lastDrawAt.current = now;
+        const wrap = wrapRef.current;
+        const canvas = canvasRef.current;
+        if (wrap && canvas) {
+          const width = wrap.clientWidth || 1;
+          const height = wrap.clientHeight || 1;
+          const dpr = window.devicePixelRatio || 1;
 
-        if (gpuRef.current) {
-          try {
-            gpuRef.current.resize(width, height, dpr);
-            gpuRef.current.render(x);
-          } catch (error) {
-            console.warn("[TimelineGPU] Playhead render failed; falling back to Canvas2D:", error);
-            gpuRef.current.dispose();
-            gpuRef.current = null;
+          if (gpuRef.current) {
+            try {
+              gpuRef.current.resize(width, height, dpr);
+              gpuRef.current.render(x);
+            } catch (error) {
+              console.warn("[TimelineGPU] Playhead render failed; falling back to Canvas2D:", error);
+              gpuRef.current.dispose();
+              gpuRef.current = null;
+            }
           }
-        }
-        if (!gpuRef.current) {
-          drawCanvasPlayhead(canvas, width, height, dpr, x);
+          if (!gpuRef.current) {
+            drawCanvasPlayhead(canvas, width, height, dpr, x);
+          }
         }
       }
 
-      const now = performance.now();
       if (now - lastStore.current > 100) {
         setPlayheadTime(Math.round(t * 100) / 100);
         lastStore.current = now;

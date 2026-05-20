@@ -198,20 +198,28 @@ export function TrackHeader({
   const { setTrackArmed } = useProjectStore();
   const {
     selectedTrackId, setSelectedTrackId,
+    selectedTrackIds, setSelectedTrackIds, toggleTrackInSelection,
     setSelectedMixerTrackId, setSelectedClipIds, setFocusedPanel,
   } = useUIStore();
-  const selected = selectedTrackId === track.id;
-  const headerBg = selected ? "#252c35" : "#1c2028";
+  const isPrimary  = selectedTrackId === track.id;
+  const isInGroup  = selectedTrackIds.includes(track.id);
+  const selected   = isPrimary || isInGroup;
+  const headerBg   = isPrimary ? "#252c35" : isInGroup ? "#1f2730" : "#1c2028";
   const TypeIcon = TYPE_ICONS[track.type] ?? Mic2;
 
   const trackValue = `${(track.volume * 100).toFixed(1)}%`;
 
   return (
     <div
-      onClick={() => {
-        setSelectedTrackId(track.id);
-        setSelectedMixerTrackId(track.id);
-        setSelectedClipIds([]);
+      onClick={(e) => {
+        if (e.shiftKey && selectedTrackId) {
+          toggleTrackInSelection(track.id);
+        } else {
+          setSelectedTrackId(track.id);
+          setSelectedTrackIds([]);
+          setSelectedMixerTrackId(track.id);
+          setSelectedClipIds([]);
+        }
         setFocusedPanel("timeline");
       }}
       onContextMenu={(e) => {
@@ -268,7 +276,7 @@ export function TrackHeader({
           {/* Name + type badge */}
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-center gap-1">
-              <span className={`truncate text-[11px] font-semibold leading-4 ${selected ? "text-daw-text" : "text-daw-dim"}`}>
+              <span className={`truncate text-[11px] font-semibold leading-4 ${isPrimary ? "text-daw-text" : selected ? "text-daw-dim/90" : "text-daw-dim"}`}>
                 {track.name}
               </span>
               <span

@@ -7,28 +7,63 @@ export const DEFAULT_TIME_SIGNATURE: TimeSignature = { numerator: 4, denominator
 
 export const TICKS_PER_BEAT = 100;
 
-/** Snap grid divisions. "off" = no snap. */
+/** Snap grid divisions. "off" = no snap. "auto" = adapts to zoom level. */
 export type SnapDivision =
+  | "auto"
   | "off"
   | "1bar"
+  | "1/1"
   | "1/2"
   | "1/4"
   | "1/8"
   | "1/16"
   | "1/32"
-  | "1/64";
+  | "1/64"
+  | "1/1T"
+  | "1/2T"
+  | "1/4T"
+  | "1/8T"
+  | "1/16T"
+  | "1/32T"
+  | "1/64T";
+
+export const ARRANGEMENT_GRID_DIVISIONS: SnapDivision[] = [
+  "1/1",
+  "1/2",
+  "1/4",
+  "1/8",
+  "1/16",
+  "1/32",
+  "1/64",
+  "1/1T",
+  "1/2T",
+  "1/4T",
+  "1/8T",
+  "1/16T",
+  "1/32T",
+  "1/64T",
+];
 
 /** How many quarter-note beats one snap step covers for a given division. */
 export function getGridStepBeats(div: SnapDivision): number {
   switch (div) {
+    case "auto":  return 0; // dynamic — caller must resolve via getGridSubBeats
     case "off":   return 0;
     case "1bar":  return 4; // caller should multiply by beatsPerBar if needed
+    case "1/1":   return 4;
     case "1/2":   return 2;
     case "1/4":   return 1;
     case "1/8":   return 0.5;
     case "1/16":  return 0.25;
     case "1/32":  return 0.125;
     case "1/64":  return 0.0625;
+    case "1/1T":  return 4 / 3;
+    case "1/2T":  return 2 / 3;
+    case "1/4T":  return 1 / 3;
+    case "1/8T":  return 1 / 6;
+    case "1/16T": return 1 / 12;
+    case "1/32T": return 1 / 24;
+    case "1/64T": return 1 / 48;
   }
 }
 
@@ -250,8 +285,15 @@ export function snapTime(
   bpm: number,
   timeSig: TimeSignature,
   pixelsPerBeat: number,
+  division?: SnapDivision,
 ): number {
-  const subDiv = getGridSubBeats(pixelsPerBeat, timeSig);
+  const isAuto = !division || division === "auto";
+  const subDiv = isAuto
+    ? getGridSubBeats(pixelsPerBeat, timeSig)
+    : division === "1bar"
+      ? beatsPerBar(timeSig)
+      : getGridStepBeats(division);
+  if (subDiv <= 0) return seconds;
   const spb = secondsPerBeat(bpm);
   const totalBeats = seconds / spb;
   const snapped = Math.round(totalBeats / subDiv) * subDiv;
