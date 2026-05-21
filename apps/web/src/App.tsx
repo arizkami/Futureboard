@@ -25,6 +25,7 @@ import { midiDeviceService } from "./engine/MidiDeviceService";
 import { ToastContainer } from "./components/ui/Toast";
 import { PerfMonitor } from "./components/PerfMonitor";
 import type { DawProject, InsertDevice } from "./types/daw";
+import { closeNativeInsertEditor, openNativeInsertEditor } from "./components/plugins/nativePluginEditorLifecycle";
 import { useSettingsStore } from "./store/settingsStore";
 import { useBackgroundTaskStore } from "./store/backgroundTaskStore";
 import { useDragWorkflowStore } from "./store/dragWorkflowStore";
@@ -85,6 +86,7 @@ function syncInsertDeltasToEngine(project: DawProject, previous: DawProject): vo
     const prev = previousByKey.get(key)?.insert;
     if (!prev) {
       activeAudioEngine.addInsertDevice(trackId, insert);
+      void openNativeInsertEditor(trackId, insert);
       return;
     }
 
@@ -107,6 +109,7 @@ function syncInsertDeltasToEngine(project: DawProject, previous: DawProject): vo
     );
     if (!stillExists) {
       activeAudioEngine.removeInsertDevice(trackId, insert.id);
+      void closeNativeInsertEditor(trackId, insert.id);
     }
   }
 }

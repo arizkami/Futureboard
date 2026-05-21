@@ -10,9 +10,13 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <new>
+#include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 #include <unordered_map>
+#include <utility>
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -103,11 +107,11 @@ RECT rect_from_node(YGNodeRef node, int offset_x = 0, int offset_y = 0) {
 
 class MinimalComponentHandler : public Steinberg::Vst::IComponentHandler {
  public:
-  MinimalComponentHandler() = default;
+  explicit MinimalComponentHandler(std::string window_id) : window_id_(std::move(window_id)) {}
   ~MinimalComponentHandler() = default;
 
   Steinberg::tresult PLUGIN_API beginEdit(Steinberg::Vst::ParamID) override { return Steinberg::kResultOk; }
-  Steinberg::tresult PLUGIN_API performEdit(Steinberg::Vst::ParamID, Steinberg::Vst::ParamValue) override { return Steinberg::kResultOk; }
+  Steinberg::tresult PLUGIN_API performEdit(Steinberg::Vst::ParamID, Steinberg::Vst::ParamValue) override;
   Steinberg::tresult PLUGIN_API endEdit(Steinberg::Vst::ParamID) override { return Steinberg::kResultOk; }
   Steinberg::tresult PLUGIN_API restartComponent(Steinberg::int32) override { return Steinberg::kResultOk; }
 
@@ -127,7 +131,49 @@ class MinimalComponentHandler : public Steinberg::Vst::IComponentHandler {
 
  private:
   std::atomic<Steinberg::uint32> ref_count_{1};
+  std::string window_id_;
 };
+
+struct EditorParamEvent {
+  std::string window_id;
+  Steinberg::Vst::ParamID id = 0;
+  Steinberg::Vst::ParamValue value = 0.0;
+};
+
+std::mutex g_param_events_mutex;
+std::vector<EditorParamEvent> g_param_events;
+
+std::string escape_json_local(const std::string& value) {
+  std::string out;
+  out.reserve(value.size() + 8);
+  for (char c : value) {
+    switch (c) {
+      case '\\': out += "\\\\"; break;
+      case '"': out += "\\\""; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default: out += c; break;
+    }
+  }
+  return out;
+}
+
+SpherePluginHostString make_string_local(std::string value) {
+  auto* data = new (std::nothrow) char[value.size() + 1];
+  if (!data) return {nullptr, 0};
+  std::memcpy(data, value.data(), value.size());
+  data[value.size()] = '\0';
+  return {data, static_cast<unsigned long long>(value.size())};
+}
+
+Steinberg::tresult PLUGIN_API MinimalComponentHandler::performEdit(
+    Steinberg::Vst::ParamID id,
+    Steinberg::Vst::ParamValue value) {
+  std::lock_guard<std::mutex> lock(g_param_events_mutex);
+  g_param_events.push_back(EditorParamEvent{window_id_, id, value});
+  return Steinberg::kResultOk;
+}
 
 struct AttachVst3Request {
   const char* plugin_path = nullptr;
@@ -141,6 +187,8 @@ struct Vst3EditorAttachment {
   Steinberg::IPtr<MinimalComponentHandler> component_handler;
   Steinberg::IPtr<Steinberg::Vst::IComponent> component;
   Steinberg::IPtr<Steinberg::Vst::IEditController> controller;
+  Steinberg::IPtr<Steinberg::Vst::IConnectionPoint> component_connection;
+  Steinberg::IPtr<Steinberg::Vst::IConnectionPoint> controller_connection;
   Steinberg::IPtr<Steinberg::IPlugView> view;
   bool controller_is_component = false;
   bool attached = false;
@@ -475,6 +523,12 @@ void cleanup_vst3_editor(EditorWindowState* state) {
   if (vst3.controller) {
     vst3.controller->setComponentHandler(nullptr);
   }
+  if (vst3.component_connection && vst3.controller_connection) {
+    vst3.component_connection->disconnect(vst3.controller_connection);
+    vst3.controller_connection->disconnect(vst3.component_connection);
+  }
+  vst3.component_connection = nullptr;
+  vst3.controller_connection = nullptr;
   if (vst3.component) {
     if (auto plug_base = Steinberg::FUnknownPtr<Steinberg::IPluginBase>(vst3.component)) {
       plug_base->terminate();
@@ -646,8 +700,34 @@ bool attach_vst3_view_on_window_thread(EditorWindowState* state, const char* plu
     }
   }
 
-  attachment->component_handler = Steinberg::IPtr<MinimalComponentHandler>::adopt(new MinimalComponentHandler());
-  attachment->controller->setComponentHandler(attachment->component_handler);
+  attachment->component_handler =
+      Steinberg::IPtr<MinimalComponentHandler>::adopt(new MinimalComponentHandler(state->window_id));
+  const auto component_handler_result = attachment->controller->setComponentHandler(attachment->component_handler);
+  std::fprintf(
+      stderr,
+      "[SpherePluginHost] VST3 editor setComponentHandler result=%d windowId=%s\n",
+      (int)component_handler_result,
+      state->window_id.c_str());
+
+  attachment->component_connection =
+      Steinberg::FUnknownPtr<Steinberg::Vst::IConnectionPoint>(attachment->component);
+  attachment->controller_connection =
+      Steinberg::FUnknownPtr<Steinberg::Vst::IConnectionPoint>(attachment->controller);
+  if (attachment->component_connection && attachment->controller_connection) {
+    const auto component_connect = attachment->component_connection->connect(attachment->controller_connection);
+    const auto controller_connect = attachment->controller_connection->connect(attachment->component_connection);
+    std::fprintf(
+        stderr,
+        "[SpherePluginHost] VST3 editor component/controller connect componentResult=%d controllerResult=%d windowId=%s\n",
+        (int)component_connect,
+        (int)controller_connect,
+        state->window_id.c_str());
+  } else {
+    std::fprintf(
+        stderr,
+        "[SpherePluginHost] VST3 editor component/controller connection unavailable windowId=%s\n",
+        state->window_id.c_str());
+  }
 
   attachment->view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
       attachment->controller->createView(Steinberg::Vst::ViewType::kEditor));
@@ -1114,6 +1194,8 @@ void run_win32_editor(EditorWindowConfig* config) {
 
   ShowWindow(hwnd, SW_SHOW);
   UpdateWindow(hwnd);
+  // Pin always-on-top so the plugin editor floats above the DAW window.
+  SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
   MSG msg{};
   while (IsWindow(hwnd)) {
@@ -1281,5 +1363,28 @@ extern "C" void sphere_plugin_editor_resize_window(unsigned long long handle, in
   (void)handle;
   (void)width;
   (void)height;
+#endif
+}
+
+extern "C" SpherePluginHostString sphere_plugin_editor_drain_param_events_json() {
+#ifdef _WIN32
+  std::vector<EditorParamEvent> events;
+  {
+    std::lock_guard<std::mutex> lock(g_param_events_mutex);
+    events.swap(g_param_events);
+  }
+
+  std::ostringstream json;
+  json << "[";
+  for (std::size_t i = 0; i < events.size(); ++i) {
+    if (i > 0) json << ",";
+    json << "{\"windowId\":\"" << escape_json_local(events[i].window_id)
+         << "\",\"paramId\":" << static_cast<unsigned long long>(events[i].id)
+         << ",\"value\":" << events[i].value << "}";
+  }
+  json << "]";
+  return make_string_local(json.str());
+#else
+  return make_string_local("[]");
 #endif
 }

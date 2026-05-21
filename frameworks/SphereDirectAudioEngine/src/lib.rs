@@ -266,6 +266,41 @@ impl SphereDirectAudioEngine {
             .map_err(Into::into)
     }
 
+    /// Open the native VST3 editor bound to the existing insert processor.
+    ///
+    /// This must be called from the UI/control side only. It does not route
+    /// audio through JS; editor parameter changes are queued natively and
+    /// consumed by the audio callback on the next process block.
+    #[napi]
+    pub fn open_insert_editor(
+        &self,
+        track_id: String,
+        insert_id: String,
+        window_id: String,
+        title: String,
+        width: i32,
+        height: i32,
+    ) -> napi::Result<f64> {
+        self.inner
+            .open_insert_editor(&track_id, &insert_id, &window_id, &title, width, height)
+            .map(|handle| handle as f64)
+            .map_err(Into::into)
+    }
+
+    #[napi]
+    pub fn close_insert_editor(&self, track_id: String, insert_id: String) -> napi::Result<()> {
+        self.inner
+            .close_insert_editor(&track_id, &insert_id)
+            .map_err(Into::into)
+    }
+
+    #[napi]
+    pub fn focus_insert_editor(&self, track_id: String, insert_id: String) -> napi::Result<bool> {
+        self.inner
+            .focus_insert_editor(&track_id, &insert_id)
+            .map_err(Into::into)
+    }
+
     /// Apply a JSON-encoded patch to a clip.
     ///
     /// **MVP note:** not yet processed by the audio callback; stored for future use.

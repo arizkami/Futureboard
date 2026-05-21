@@ -205,6 +205,10 @@ const sphereAudioBridge = Object.freeze({
   getTransportState:  ()                                            => invoke(IpcChannels.SphereAudioGetTransport),
   updateTrackParam:   (trackId: string, paramId: string, value: unknown)                           => invoke(IpcChannels.SphereAudioUpdateTrackParam, trackId, paramId, value),
   updateInsertParam:  (trackId: string, insertId: string, paramId: string, value: unknown)         => invoke(IpcChannels.SphereAudioUpdateInsertParam, trackId, insertId, paramId, value),
+  openInsertEditor:   (options: { trackId: string; insertId: string; windowId: string; title: string; width?: number; height?: number }) =>
+    invoke(IpcChannels.SphereAudioOpenInsertEditor, options) as Promise<number | null>,
+  closeInsertEditor:  (trackId: string, insertId: string) => invoke(IpcChannels.SphereAudioCloseInsertEditor, trackId, insertId) as Promise<void>,
+  focusInsertEditor:  (trackId: string, insertId: string) => invoke(IpcChannels.SphereAudioFocusInsertEditor, trackId, insertId) as Promise<boolean>,
   loadProject:        (snapshot: unknown)                           => invoke(IpcChannels.SphereAudioLoadProject, snapshot),
   updateClip:         (clipId: string, patch: unknown)              => invoke(IpcChannels.SphereAudioUpdateClip, clipId, patch),
   getMeters:          ()                                            => invoke(IpcChannels.SphereAudioGetMeters),

@@ -12,6 +12,7 @@ import type {
   AudioPluginScanProgressEvent,
   AudioPluginScanResult,
 } from "../ipc/channels.js";
+import { sphereAudioNative } from "../native-audio/SphereAudioNative.js";
 
 const _dirname = path.dirname(fileURLToPath(import.meta.url));
 const req = createRequire(import.meta.url);
@@ -53,6 +54,7 @@ type PluginHostAddon = {
   closePluginEditorWindow?: (handle: number) => void;
   focusPluginEditorWindow?: (handle: number) => void;
   resizePluginEditorWindow?: (handle: number, width: number, height: number) => void;
+  drainPluginEditorParamEvents?: () => Array<{ windowId?: string; window_id?: string; paramId?: number; param_id?: number; value?: number }>;
   getBackendVersion?: () => string;
 };
 
@@ -70,6 +72,8 @@ type SqliteDatabase = {
 let addon: PluginHostAddon | null | undefined;
 let addonLoadError: string | null = null;
 let db: SqliteDatabase | null | undefined;
+let editorParamPoll: NodeJS.Timeout | null = null;
+let forwardedEditorParamCount = 0;
 
 function workspaceRoot(): string {
   return path.resolve(_dirname, "..", "..", "..", "..");
@@ -229,6 +233,13 @@ function normalizeCategoryLabel(format: string, category: string, subCategories?
     .filter(Boolean);
 
   if (format === "VST3") {
+    const has = (needle: string) => tags.some((tag) => tag.toLowerCase() === needle.toLowerCase());
+    if (has("Instrument")) return "Instrument";
+    if (has("EQ")) return "EQ";
+    if (has("Dynamics")) return "Dynamics";
+    if (has("Reverb")) return "Reverb";
+    if (has("Delay")) return "Delay";
+    if (/^audio module class$/i.test(category)) return tags.find((tag) => !/^fx$/i.test(tag)) ?? "Effect";
     return tags.length > 0 ? tags.join("|") : category;
   }
 
@@ -242,6 +253,50 @@ function normalizeCategoryLabel(format: string, category: string, subCategories?
   }
 
   return category;
+}
+
+function parseEditorWindowIdentity(windowId: string): { trackId: string; insertId: string } | null {
+  const parts = windowId.split(":");
+  if (parts.length < 4 || parts[0] !== "plugin-editor") return null;
+  return { trackId: parts[1], insertId: parts[2] };
+}
+
+function startEditorParamPolling(): void {
+  if (editorParamPoll) return;
+  editorParamPoll = setInterval(() => {
+    const native = loadAddon();
+    if (!native?.drainPluginEditorParamEvents) return;
+    let events: Array<{ windowId?: string; window_id?: string; paramId?: number; param_id?: number; value?: number }> = [];
+    try {
+      events = native.drainPluginEditorParamEvents();
+    } catch (error) {
+      console.warn("[PluginHost] Failed draining editor parameter events:", error);
+      return;
+    }
+    for (const event of events) {
+      const windowId = event.windowId ?? event.window_id;
+      const paramId = event.paramId ?? event.param_id;
+      const value = event.value;
+      if (typeof windowId !== "string" || typeof paramId !== "number" || typeof value !== "number") continue;
+      const target = parseEditorWindowIdentity(windowId);
+      if (!target) continue;
+      try {
+        forwardedEditorParamCount += 1;
+        if (forwardedEditorParamCount <= 16 || forwardedEditorParamCount % 50 === 0) {
+          console.log(
+            `[PluginHost] editor param -> audio track=${target.trackId} insert=${target.insertId} param=${Math.trunc(paramId)} value=${value.toFixed(6)} count=${forwardedEditorParamCount}`,
+          );
+        }
+        sphereAudioNative.updateInsertParam(target.trackId, target.insertId, String(Math.trunc(paramId)), value);
+      } catch (error) {
+        console.warn(
+          `[PluginHost] Failed forwarding editor param track=${target.trackId} insert=${target.insertId} param=${paramId}:`,
+          error,
+        );
+      }
+    }
+  }, 16);
+  editorParamPoll.unref?.();
 }
 
 function rowFromDb(row: Record<string, unknown>): AudioPluginRegistryEntry {
@@ -634,12 +689,14 @@ export class PluginHostNative {
   openPluginEditorWindow(options: PluginEditorWindowOptions): number | null {
     const native = loadAddon();
     if (!native?.openPluginEditorWindow) return null;
+    startEditorParamPolling();
     return native.openPluginEditorWindow(options);
   }
 
   openPluginEditorForPath(pluginPath: string): number | null {
     const native = loadAddon();
     if (!native?.openPluginEditorForPath) return null;
+    startEditorParamPolling();
     return native.openPluginEditorForPath(pluginPath);
   }
 

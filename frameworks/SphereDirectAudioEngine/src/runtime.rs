@@ -32,6 +32,10 @@ pub struct RuntimeTrack {
     pub meter_peak_r: f32,
     pub meter_sum_sq_l: f32,
     pub meter_sum_sq_r: f32,
+    pub callback_insert_log_done: bool,
+    pub callback_clip_route_log_done: bool,
+    pub block_l: Vec<f32>,
+    pub block_r: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,9 +114,15 @@ pub struct RuntimeInsert {
     pub params: HashMap<String, Value>,
     pub dsp: InsertDspState,
     pub vst3: Option<Vst3RuntimeProcessor>,
+    pub callback_process_log_done: bool,
+    pub silent_process_blocks: u32,
+    pub scratch_l: Vec<f32>,
+    pub scratch_r: Vec<f32>,
 }
 
 pub type InsertDspState = AudioPluginDspState;
+
+const DEFAULT_AUDIO_BLOCK_CAPACITY: usize = 8192;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeSend {
@@ -143,10 +153,19 @@ pub struct RuntimeProject {
 }
 
 impl RuntimeProject {
+    /// Build a RuntimeProject from a snapshot.
+    ///
+    /// `existing_vst3` — if provided, VST3 processors from a previous runtime
+    /// whose insert ID + plugin path + class_id + sample_rate still match are
+    /// REUSED (taken out of the map) rather than recreated.  This keeps the
+    /// same C++ processor alive across project reloads so editor windows stay
+    /// valid.  Any entries left in the map after build were not matched and will
+    /// be dropped by the caller (triggering `sphere_daux_vst3_destroy`).
     pub fn build(
         snapshot: &EngineProjectSnapshot,
         output_sample_rate: u32,
         decoded_by_path: &mut HashMap<String, Arc<AudioFileBuffer>>,
+        mut existing_vst3: Option<&mut HashMap<String, Vst3RuntimeProcessor>>,
     ) -> Self {
         let output_sample_rate = output_sample_rate.max(1);
         let beats_per_second = snapshot.bpm.max(1.0) / 60.0;
@@ -221,10 +240,93 @@ impl RuntimeProject {
             );
         }
 
-        let tracks: Vec<RuntimeTrack> = snapshot
-            .tracks
-            .iter()
-            .map(|t| RuntimeTrack {
+        // Use an explicit loop so we can mutably borrow existing_vst3 on each insert.
+        let mut tracks: Vec<RuntimeTrack> = Vec::with_capacity(snapshot.tracks.len());
+        for t in &snapshot.tracks {
+            let mut inserts: Vec<RuntimeInsert> = Vec::with_capacity(t.inserts.len());
+            for insert in &t.inserts {
+                let is_native_vst3 = insert.kind.eq_ignore_ascii_case("native-plugin")
+                    && insert
+                        .params
+                        .get("format")
+                        .and_then(Value::as_str)
+                        .map(|f| f.eq_ignore_ascii_case("VST3"))
+                        .unwrap_or(false);
+
+                let vst3 = if is_native_vst3 {
+                    let new_path = insert
+                        .params
+                        .get("modulePath")
+                        .or_else(|| insert.params.get("path"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let new_class_id = insert
+                        .params
+                        .get("classId")
+                        .or_else(|| insert.params.get("class_id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+
+                    // Try to reuse an existing processor matching insert ID +
+                    // plugin path + class_id + sample_rate.
+                    let reused: Option<Vst3RuntimeProcessor> =
+                        if let Some(ref mut map) = existing_vst3 {
+                            let can_reuse = map.get(&insert.id).map(|e| {
+                                e.plugin_path().map(|p| p == new_path.as_str()).unwrap_or(false)
+                                    && e.class_id()
+                                        .map(|c| c == new_class_id.as_str())
+                                        .unwrap_or(false)
+                                    && e.sample_rate() == output_sample_rate
+                                    && e.is_ready()
+                            }).unwrap_or(false);
+                            if can_reuse { map.remove(&insert.id) } else { None }
+                        } else {
+                            None
+                        };
+
+                    let reused_flag = reused.is_some();
+                    let processor = reused.or_else(|| {
+                        Vst3RuntimeProcessor::from_params(&insert.params, output_sample_rate)
+                    });
+                    let processor_handle = processor.as_ref().map(|p| p.handle_value()).unwrap_or(0);
+                    eprintln!(
+                        "[SphereAudio] native VST3 insert track='{}' insert='{}' pluginInstanceId='{}' reused={} ready={} processorHandle=0x{:x} path='{}'",
+                        t.id,
+                        insert.id,
+                        insert.params.get("pluginInstanceId").and_then(Value::as_str).unwrap_or(&insert.id),
+                        reused_flag,
+                        processor.as_ref().map(|p| p.is_ready()).unwrap_or(false),
+                        processor_handle,
+                        insert.params.get("path").and_then(Value::as_str).unwrap_or(""),
+                    );
+                    processor
+                } else {
+                    None
+                };
+
+                inserts.push(RuntimeInsert {
+                    id: insert.id.clone(),
+                    kind: insert.kind.clone(),
+                    enabled: insert.enabled,
+                    params: insert.params.clone(),
+                    dsp: InsertDspState::new(
+                        canonical_plugin_id(&insert.kind),
+                        &insert.params,
+                        output_sample_rate,
+                    ),
+                    vst3,
+                    callback_process_log_done: false,
+                    silent_process_blocks: 0,
+                    scratch_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+                    scratch_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+                });
+            }
+
+            tracks.push(RuntimeTrack {
                 id: t.id.clone(),
                 track_type: t.track_type.clone(),
                 volume: t.volume.clamp(0.0, 2.0),
@@ -233,46 +335,7 @@ impl RuntimeProject {
                 solo: t.solo,
                 preview_mode: RuntimePreviewMode::from_str(&t.preview_mode),
                 output_track_id: t.output_track_id.clone(),
-                inserts: t
-                    .inserts
-                    .iter()
-                    .map(|insert| RuntimeInsert {
-                        id: insert.id.clone(),
-                        kind: insert.kind.clone(),
-                        enabled: insert.enabled,
-                        params: insert.params.clone(),
-                        dsp: InsertDspState::new(
-                            canonical_plugin_id(&insert.kind),
-                            &insert.params,
-                            output_sample_rate,
-                        ),
-                        vst3: if insert.kind.eq_ignore_ascii_case("native-plugin")
-                            && insert
-                                .params
-                                .get("format")
-                                .and_then(Value::as_str)
-                                .map(|format| format.eq_ignore_ascii_case("VST3"))
-                                .unwrap_or(false)
-                        {
-                            let processor =
-                                Vst3RuntimeProcessor::from_params(&insert.params, output_sample_rate);
-                            eprintln!(
-                                "[SphereAudio] native VST3 insert track='{}' insert='{}' ready={} path='{}'",
-                                t.id,
-                                insert.id,
-                                processor.as_ref().map(|p| p.is_ready()).unwrap_or(false),
-                                insert
-                                    .params
-                                    .get("path")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                            );
-                            processor
-                        } else {
-                            None
-                        },
-                    })
-                    .collect(),
+                inserts,
                 sends: t
                     .sends
                     .iter()
@@ -288,9 +351,51 @@ impl RuntimeProject {
                 meter_peak_r: 0.0,
                 meter_sum_sq_l: 0.0,
                 meter_sum_sq_r: 0.0,
-            })
-            .collect();
+                callback_insert_log_done: false,
+                callback_clip_route_log_done: false,
+                block_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+                block_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+            });
+        }
         let has_solo = tracks.iter().any(|t| t.solo);
+        for track in &tracks {
+            let track_clips = clips.iter().filter(|clip| clip.track_id == track.id).count();
+            eprintln!(
+                "[SphereAudio] RuntimeTrack track={} clips={} inserts={}",
+                track.id,
+                track_clips,
+                track.inserts.len()
+            );
+            if !track.inserts.is_empty() {
+                for insert in &track.inserts {
+                    let format = insert
+                        .params
+                        .get("format")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let path = insert
+                        .params
+                        .get("modulePath")
+                        .or_else(|| insert.params.get("path"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let class_id = insert
+                        .params
+                        .get("classId")
+                        .or_else(|| insert.params.get("class_id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    eprintln!(
+                        "[SphereAudio] RuntimeInsert id={} format={} path={} classId={} bypass={}",
+                        insert.id,
+                        format,
+                        path,
+                        class_id,
+                        !insert.enabled
+                    );
+                }
+            }
+        }
 
         Self {
             sample_rate: output_sample_rate,
@@ -416,6 +521,8 @@ impl RuntimeProject {
         if let Some(vst3) = insert.vst3.as_mut() {
             if let Ok(vst3_param_id) = param_id.parse::<u32>() {
                 vst3.set_param(vst3_param_id, value as f64);
+                insert.callback_process_log_done = false;
+                insert.silent_process_blocks = 0;
                 // Also persist in params map for snapshot/recall, then return —
                 // built-in DSP state rebuild is not applicable to VST3 inserts.
                 insert.params.insert(param_id.to_string(), Value::from(value as f64));

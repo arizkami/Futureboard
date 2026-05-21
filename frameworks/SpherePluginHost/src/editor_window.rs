@@ -1,4 +1,5 @@
 use std::ffi::CString;
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_ulonglong};
 
 use napi_derive::napi;
@@ -20,6 +21,14 @@ extern "C" {
     fn sphere_plugin_editor_close_window(handle: c_ulonglong);
     fn sphere_plugin_editor_focus_window(handle: c_ulonglong);
     fn sphere_plugin_editor_resize_window(handle: c_ulonglong, width: c_int, height: c_int);
+    fn sphere_plugin_editor_drain_param_events_json() -> SpherePluginHostString;
+    fn sphere_plugin_host_free_string(value: SpherePluginHostString);
+}
+
+#[repr(C)]
+struct SpherePluginHostString {
+    data: *const c_char,
+    len: u64,
 }
 
 #[napi(object)]
@@ -167,6 +176,29 @@ pub fn resize_plugin_editor_window(handle: f64, width: u32, height: u32) -> napi
         sphere_plugin_editor_resize_window(handle as c_ulonglong, width as c_int, height as c_int)
     };
     Ok(())
+}
+
+#[napi(object)]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginEditorParamEvent {
+    pub window_id: String,
+    pub param_id: f64,
+    pub value: f64,
+}
+
+#[napi]
+pub fn drain_plugin_editor_param_events() -> napi::Result<Vec<PluginEditorParamEvent>> {
+    let native = unsafe { sphere_plugin_editor_drain_param_events_json() };
+    if native.data.is_null() {
+        return Ok(Vec::new());
+    }
+    let json = unsafe { CStr::from_ptr(native.data) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { sphere_plugin_host_free_string(native) };
+    serde_json::from_str::<Vec<PluginEditorParamEvent>>(&json)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))
 }
 
 fn stable_id(input: &str) -> String {

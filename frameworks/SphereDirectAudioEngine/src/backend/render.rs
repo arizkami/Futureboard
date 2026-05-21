@@ -15,7 +15,7 @@ use crate::engine::{SharedState, PEAK_DECAY, TEST_TONE_AMPLITUDE};
 use crate::runtime::{RuntimePreviewMode, RuntimeProject};
 
 // Re-export helpers so wasapi_exclusive.rs can use them through render.
-pub use crate::engine::render_project_sample;
+pub use crate::engine::{render_project_block_interleaved, render_project_sample};
 
 // ── Per-stream oscillator + local playback state ──────────────────────────────
 
@@ -29,6 +29,7 @@ pub struct LocalAudioState {
     pub playing_local: bool,
     pub prev_peak_l: f32,
     pub prev_peak_r: f32,
+    pub render_path_logged: bool,
 }
 
 impl LocalAudioState {
@@ -41,6 +42,7 @@ impl LocalAudioState {
             playing_local: false,
             prev_peak_l: 0.0,
             prev_peak_r: 0.0,
+            render_path_logged: false,
         }
     }
 }
@@ -176,7 +178,34 @@ pub fn fill_output_f32(
     let mut frames = 0u64;
     runtime.begin_meter_block();
 
-    if channels >= 2 {
+    if channels >= 2 && local.playing_local {
+        frames = render_project_block_interleaved(runtime, base_sample, master_vol, data, channels);
+        if !local.render_path_logged {
+            local.render_path_logged = true;
+            eprintln!(
+                "[SphereAudio callback] renderPath=daux-block frames={} channels={} tracks={}",
+                frames,
+                channels,
+                runtime.tracks.len()
+            );
+        }
+        if gen_tone {
+            for frame in data.chunks_mut(channels) {
+                let tone_l = local.osc_l.next_sample() * TEST_TONE_AMPLITUDE * master_vol;
+                let tone_r = local.osc_r.next_sample() * TEST_TONE_AMPLITUDE * master_vol;
+                frame[0] = (frame[0] + tone_l).clamp(-1.0, 1.0);
+                frame[1] = (frame[1] + tone_r).clamp(-1.0, 1.0);
+            }
+        }
+        for frame in data.chunks(channels) {
+            let l = frame[0];
+            let r = frame[1];
+            peak_l = peak_l.max(l.abs());
+            peak_r = peak_r.max(r.abs());
+            sum_sq_l += l * l;
+            sum_sq_r += r * r;
+        }
+    } else if channels >= 2 {
         for frame in data.chunks_mut(channels) {
             let (tone_l, tone_r) = if gen_tone {
                 (

@@ -29,6 +29,7 @@ import { showToast } from "./ui/Toast";
 import { platform } from "../platform";
 import type { AudioPluginRegistryEntry } from "../platform/platform.types";
 import { C, semanticColors } from "../theme";
+import { closeNativeInsertEditor, openNativeInsertEditor } from "./plugins/nativePluginEditorLifecycle";
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -57,22 +58,38 @@ type InsertPickerPlugin =
     };
 
 function pluginDisplayCategory(plugin: AudioPluginRegistryEntry): string {
-  return plugin.subCategories?.trim() || plugin.category || plugin.rawCategory || "Uncategorized";
+  const tags = (plugin.subCategories ?? "")
+    .split("|")
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+  const has = (needle: string) => tags.some((tag) => tag.toLowerCase() === needle.toLowerCase());
+  if (has("Instrument")) return "Instrument";
+  if (has("EQ")) return "EQ";
+  if (has("Dynamics")) return "Dynamics";
+  if (has("Reverb")) return "Reverb";
+  if (has("Delay")) return "Delay";
+  if (/^audio module class$/i.test(plugin.category) || /^audio module class$/i.test(plugin.rawCategory ?? "")) {
+    return tags.find((tag) => !/^fx$/i.test(tag)) ?? "Effect";
+  }
+  return plugin.category || plugin.rawCategory || "Uncategorized";
 }
 
 function nativePluginToInsert(plugin: AudioPluginRegistryEntry): InsertDevice {
+  const insertId = crypto.randomUUID();
   return {
-    id: crypto.randomUUID(),
+    id: insertId,
     type: "native-plugin",
     name: plugin.name,
     enabled: true,
     order: 0,
     params: {
+      pluginInstanceId: insertId,
       nativePluginId: plugin.id,
       format: plugin.format,
       vendor: plugin.vendor,
       category: pluginDisplayCategory(plugin),
       path: plugin.path,
+      modulePath: plugin.path,
       presetPath: plugin.presetPath,
       classId: plugin.classId ?? "",
     },
@@ -241,6 +258,7 @@ function InsertsAddMenu({ accent, trackId }: { accent: string; trackId?: string 
         }
       : nativePluginToInsert(plugin.plugin);
     addInsertDevice(trackId, device);
+    if (plugin.source === "native") void openNativeInsertEditor(trackId, device);
   };
 
   return (
@@ -248,7 +266,7 @@ function InsertsAddMenu({ accent, trackId }: { accent: string; trackId?: string 
       <DropdownMenuTrigger asChild>
         <SectionAddButton accent={accent} title="Add insert" disabled={!trackId} />
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" sideOffset={4} className="w-[420px] p-1.5">
+      <DropdownMenuContent align="end" sideOffset={4} className="w-[720px] p-1.5">
         <div className="px-1 pb-1">
           <DropdownMenuLabel className="px-0 text-[11px]">Add Insert</DropdownMenuLabel>
           <input
@@ -279,7 +297,7 @@ function InsertsAddMenu({ accent, trackId }: { accent: string; trackId?: string 
               </button>
             ))}
             <div className="flex-1" />
-            {(["all", "effect", "instrument"] as const).map((kind) => (
+            {(["effect"] as const).map((kind) => (
               <button
                 key={kind}
                 type="button"
@@ -373,25 +391,16 @@ function SendsAddMenu({ accent, track, project }: { accent: string; track: DawTr
 }
 
 function InsertRow({
-  insert, accent, trackId,
-}: { insert: InsertDevice; accent: string; trackId: string }) {
+  insert, accent, trackId, insertIndex,
+}: { insert: InsertDevice; accent: string; trackId: string; insertIndex: number }) {
   const enabled = insert.enabled;
   const { toggleInsertDevice, removeInsertDevice } = useProjectStore();
   const openEditor = () => {
-    if (!platform.pluginHost.isSupported) return;
-    const pluginPath = typeof insert.params.path === "string" ? insert.params.path : undefined;
-    const classId = typeof insert.params.classId === "string" ? insert.params.classId : undefined;
-    const format = typeof insert.params.format === "string" ? insert.params.format : undefined;
-    void platform.pluginHost.openEditorWindow({
-      windowId: `plugin-editor:${trackId}:${insert.id}`,
-      title: insert.name || "Plugin Editor",
-      subtitle: `${format || insert.type} • ${trackId}`,
-      width: 820,
-      height: 560,
-      pluginPath,
-      classId,
-      format,
-    });
+    void openNativeInsertEditor(trackId, insert, insertIndex);
+  };
+  const removeInsert = () => {
+    void closeNativeInsertEditor(trackId, insert.id);
+    removeInsertDevice(trackId, insert.id);
   };
   return (
     <div
@@ -416,7 +425,7 @@ function InsertRow({
       </button>
       <button
         title="Remove device"
-        onClick={() => removeInsertDevice(trackId, insert.id)}
+        onClick={removeInsert}
         className="opacity-0 group-hover:opacity-100 transition-opacity text-white/30 hover:text-white/70"
       >
         <X size={8} />
@@ -578,7 +587,7 @@ function ChannelStrip({
   fixedWidth, level, onResizeDragStart,
   files, selected, onClick,
 }: StripProps & { selected?: boolean; onClick?: () => void }) {
-  const isMaster = !track;
+  const isMaster = track?.type === "master" || !track;
   const accent = color;
   const meterTrackId = isMaster ? "master" : (track?.id ?? "master");
   const meterMode =
@@ -660,8 +669,8 @@ function ChannelStrip({
           {inserts.length === 0 ? (
             <EmptySlotRow accent={accent} hint="Click + to add a device" />
           ) : (
-            track && inserts.map((ins) => (
-              <InsertRow key={ins.id} insert={ins} accent={accent} trackId={track.id} />
+            track && inserts.map((ins, idx) => (
+              <InsertRow key={ins.id} insert={ins} accent={accent} trackId={track.id} insertIndex={idx} />
             ))
           )}
         </div>
@@ -1009,8 +1018,9 @@ export function MixerPanel({
 
       {/* strips */}
       {(() => {
-        const mainTracks    = tracks.filter((t) => t.type !== "bus" && t.type !== "return" && t.type !== "group");
+        const mainTracks    = tracks.filter((t) => t.type !== "bus" && t.type !== "return" && t.type !== "group" && t.type !== "master");
         const routingTracks = tracks.filter((t) => t.type === "bus" || t.type === "return" || t.type === "group");
+        const masterTrack   = tracks.find((t) => t.type === "master");
 
         // Horizontal virtualization for mainTracks (fixed-width mode only)
         const STRIP_OVERSCAN = 3;
@@ -1096,6 +1106,7 @@ export function MixerPanel({
             <div className="flex shrink-0 border-l border-white/[0.07]">
               {routingTracks.map(stripFor)}
               <ChannelStrip
+                track={masterTrack}
                 label="Master"
                 project={project}
                 color={C.accent}

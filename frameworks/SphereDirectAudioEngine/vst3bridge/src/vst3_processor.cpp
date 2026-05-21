@@ -1,12 +1,23 @@
 #include "sphere_daux_vst3_processor.h"
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
+
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  define NOMINMAX
+#  include <windows.h>
+#  include <dwmapi.h>
+#  pragma comment(lib, "dwmapi.lib")
+#  include "pluginterfaces/gui/iplugview.h"
+#endif
 
 #include "pluginterfaces/base/ipluginbase.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
@@ -21,6 +32,54 @@
 namespace {
 
 constexpr const char* kVst3AudioModuleClass = "Audio Module Class";
+thread_local std::string g_last_error;
+std::atomic<unsigned long long> g_next_editor_handle{1};
+
+void set_last_error(std::string value) {
+  g_last_error = std::move(value);
+}
+
+#ifdef _WIN32
+constexpr const wchar_t* kDauxEditorWindowClass = L"FutureboardDauxVst3EditorWindow";
+constexpr const wchar_t* kDauxEditorChildClass = L"FutureboardDauxVst3EditorAttach";
+constexpr COLORREF kDauxTitlebarDark = RGB(14, 19, 25);
+
+// Posted to the HWND's own thread when destroy is requested cross-thread.
+constexpr UINT WM_DAUX_DESTROY = WM_APP + 50;
+
+std::wstring widen_utf8(const char* value) {
+  if (!value || !*value) return L"Plugin Editor";
+  const int needed = MultiByteToWideChar(CP_UTF8, 0, value, -1, nullptr, 0);
+  if (needed <= 0) return L"Plugin Editor";
+  std::wstring out(static_cast<size_t>(needed), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, value, -1, out.data(), needed);
+  if (!out.empty() && out.back() == L'\0') out.pop_back();
+  return out;
+}
+
+void set_daux_dark_titlebar(HWND hwnd) {
+  BOOL dark = TRUE;
+  DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark)); // DWMWA_USE_IMMERSIVE_DARK_MODE pre-20H1
+  DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark)); // DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1
+  DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &kDauxTitlebarDark, sizeof(kDauxTitlebarDark));
+}
+
+void register_editor_window_classes() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(WNDCLASSEXW);
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    // Use black brush — prevents the white flash that occurs between the child
+    // HWND being created and the IPlugView rendering its first frame.
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+    wc.lpszClassName = kDauxEditorChildClass;
+    RegisterClassExW(&wc);
+  });
+}
+#endif
 
 bool looks_like_zero_class_id(const std::string& value) {
   if (value.empty()) return true;
@@ -36,6 +95,18 @@ VST3::Optional<VST3::UID> first_audio_module_uid(const VST3::Hosting::PluginFact
     return VST3::Optional<VST3::UID>(info.ID());
   }
   return {};
+}
+
+void log_factory_classes(const VST3::Hosting::PluginFactory& factory) {
+  int index = 0;
+  for (const auto& info : factory.classInfos()) {
+    std::fprintf(stderr,
+                 "[DAUx VST3] factory class[%d] name='%s' category='%s' uid=%s\n",
+                 index++,
+                 info.name().c_str(),
+                 info.category().c_str(),
+                 info.ID().toString().c_str());
+  }
 }
 
 } // namespace
@@ -210,6 +281,18 @@ struct SphereDauxVst3Processor {
   SimpleParamChanges   param_changes_obj;  // reused per process call
   ComponentHandlerImpl component_handler;  // installed on IEditController
 
+#ifdef _WIN32
+  Steinberg::IPtr<Steinberg::IPlugView> editor_view;
+  HWND editor_hwnd{nullptr};
+  HWND editor_attach_hwnd{nullptr};
+  unsigned long long editor_handle{0};
+  std::string editor_window_id;
+  bool editor_attached{false};
+  // Guards window proc access; set to false before destroy so pending messages
+  // received after GWLP_USERDATA is zeroed still find a valid flag.
+  std::atomic<bool> processor_valid{true};
+#endif
+
   // ── Setup / shutdown ───────────────────────────────────────────────────────
 
   bool setup(double sample_rate) {
@@ -242,6 +325,30 @@ struct SphereDauxVst3Processor {
         Steinberg::Vst::ProcessContext::kPlaying;
     process_data.processContext = &process_context;
 
+    const auto input_bus_count =
+        component->getBusCount(Steinberg::Vst::kAudio, Steinberg::Vst::kInput);
+    const auto output_bus_count =
+        component->getBusCount(Steinberg::Vst::kAudio, Steinberg::Vst::kOutput);
+    std::fprintf(stderr, "[SphereVST3] busCount input=%d output=%d\n",
+                 (int)input_bus_count, (int)output_bus_count);
+
+    // Set stereo bus arrangements before bus activation. Some VST3 processors
+    // reject processing if the arrangement is changed after activation.
+    const auto arrangement_res =
+        processor->setBusArrangements(&input_arrangement, 1, &output_arrangement, 1);
+    if (arrangement_res != Steinberg::kResultOk) {
+      std::ostringstream err;
+      err << g_last_error
+          << "; setBusArrangements returned " << (int)arrangement_res
+          << " for requested stereo in/out; continuing with plugin default arrangement";
+      set_last_error(err.str());
+      std::fprintf(stderr, "[SphereVST3] setBusArrangements result=%d failed\n",
+                   (int)arrangement_res);
+    } else {
+      std::fprintf(stderr, "[SphereVST3] setBusArrangements result=%d ok stereo in/out\n",
+                   (int)arrangement_res);
+    }
+
     // Activate stereo buses
     const auto in_res  = component->activateBus(
         Steinberg::Vst::kAudio, Steinberg::Vst::kInput,  0, true);
@@ -252,36 +359,54 @@ struct SphereDauxVst3Processor {
     if (out_res != Steinberg::kResultOk)
       std::fprintf(stderr, "[DAUx VST3] activate output bus FAILED (result=%d)\n", (int)out_res);
 
-    processor->setBusArrangements(&input_arrangement, 1, &output_arrangement, 1);
-    std::fprintf(stderr, "[DAUx VST3] buses activated: stereo in/out\n");
+    std::fprintf(stderr, "[SphereVST3] activateBus inputResult=%d outputResult=%d stereo in/out\n",
+                 (int)in_res, (int)out_res);
 
     // setupProcessing
     Steinberg::Vst::ProcessSetup ps{};
     ps.processMode        = Steinberg::Vst::kRealtime;
     ps.symbolicSampleSize = Steinberg::Vst::kSample32;
-    ps.maxSamplesPerBlock = 1;
+    ps.maxSamplesPerBlock = 8192;
     ps.sampleRate         = sr;
     const auto setup_res = processor->setupProcessing(ps);
     if (setup_res != Steinberg::kResultOk) {
+      std::ostringstream err;
+      err << g_last_error << "; setupProcessing returned " << (int)setup_res
+          << " sr=" << sr << " maxBlock=8192 realtime sample32";
+      set_last_error(err.str());
       std::fprintf(stderr, "[DAUx VST3] setupProcessing FAILED (result=%d)\n", (int)setup_res);
       return false;
     }
-    std::fprintf(stderr, "[DAUx VST3] setupProcessing OK (sr=%.0f, maxBlock=1)\n", sr);
+    std::fprintf(stderr, "[SphereVST3] setupProcessing sr=%.0f block=8192 result=%d ok realtime sample32\n",
+                 sr, (int)setup_res);
 
-    // setActive(true)
+    // setActive(true) — accept kResultOk and kNotImplemented (some plugins
+    // simply don't need explicit activation; treating not-implemented as fatal
+    // would block legitimate plugins).
     const auto active_res = component->setActive(true);
-    if (active_res != Steinberg::kResultOk) {
+    if (active_res != Steinberg::kResultOk && active_res != Steinberg::kNotImplemented) {
+      std::ostringstream err;
+      err << g_last_error << "; setActive(true) returned " << (int)active_res;
+      set_last_error(err.str());
       std::fprintf(stderr, "[DAUx VST3] setActive(true) FAILED (result=%d)\n", (int)active_res);
       return false;
     }
+    std::fprintf(stderr, "[SphereVST3] setActive result=%d ok\n", (int)active_res);
 
-    // setProcessing(true)
+    // setProcessing(true) — accept kResultOk and kNotImplemented.
+    // Per VST3 spec, setProcessing is an optional notification; plugins like
+    // iZotope Ozone return kNotImplemented (0x80004001) and that's legitimate.
     const auto proc_res = processor->setProcessing(true);
-    if (proc_res != Steinberg::kResultOk) {
+    if (proc_res != Steinberg::kResultOk && proc_res != Steinberg::kNotImplemented) {
+      std::ostringstream err;
+      err << g_last_error << "; setProcessing(true) returned " << (int)proc_res;
+      set_last_error(err.str());
       std::fprintf(stderr, "[DAUx VST3] setProcessing(true) FAILED (result=%d)\n", (int)proc_res);
       return false;
     }
     processing = true;
+    std::fprintf(stderr, "[SphereVST3] setProcessing result=%d ok (notImplemented=%d)\n",
+                 (int)proc_res, proc_res == Steinberg::kNotImplemented ? 1 : 0);
 
     // Register IComponentHandler so plugin GUI edits are captured
     if (controller) {
@@ -299,6 +424,9 @@ struct SphereDauxVst3Processor {
   }
 
   void shutdown() {
+#ifdef _WIN32
+    close_editor_window();
+#endif
     if (processor && processing) processor->setProcessing(false);
     processing = false;
     if (component_connection && controller_connection) {
@@ -333,6 +461,14 @@ struct SphereDauxVst3Processor {
     if (pending_count < kMaxPending)
       pending_buf[pending_count++] = {id, value};
   }
+
+#ifdef _WIN32
+  void close_editor_window();
+  // Detach IPlugView + destroy child HWND; keep parent shell alive.
+  // Use this for user-close and programmatic-close so the parent HWND
+  // (and its stable editor_handle) survive for the next open.
+  void close_editor_view_only(const char* reason);
+#endif
 };
 
 // ── ComponentHandlerImpl::performEdit (needs full SphereDauxVst3Processor) ───
@@ -341,21 +477,203 @@ Steinberg::tresult PLUGIN_API ComponentHandlerImpl::performEdit(
     Steinberg::Vst::ParamID id,
     Steinberg::Vst::ParamValue value) {
   if (owner) owner->enqueue_param(id, value);
+  static std::atomic<int> logged{0};
+  const int n = logged.fetch_add(1);
+  if (n < 16 || n % 50 == 0) {
+    std::fprintf(stderr,
+                 "[SphereVST3] editor param -> processor param=%u value=%.6f count=%d\n",
+                 static_cast<unsigned int>(id),
+                 static_cast<double>(value),
+                 n + 1);
+  }
   return Steinberg::kResultOk;
 }
 
+#ifdef _WIN32
+void detach_editor_view(SphereDauxVst3Processor* processor) {
+  if (!processor) return;
+  if (processor->editor_view && processor->editor_attached) {
+    const auto removed_res = processor->editor_view->removed();
+    std::fprintf(stderr,
+                 "[SphereVST3] IPlugView::removed() result=%d handle=%llu\n",
+                 (int)removed_res, processor->editor_handle);
+  }
+  processor->editor_view = nullptr;
+  processor->editor_attached = false;
+}
+
+void resize_editor_view(SphereDauxVst3Processor* processor) {
+  if (!processor || !processor->editor_view || !processor->editor_attach_hwnd) return;
+  RECT rc{};
+  GetClientRect(processor->editor_attach_hwnd, &rc);
+  Steinberg::ViewRect view_rect{
+      static_cast<Steinberg::int32>(rc.left),
+      static_cast<Steinberg::int32>(rc.top),
+      static_cast<Steinberg::int32>(rc.right),
+      static_cast<Steinberg::int32>(rc.bottom),
+  };
+  processor->editor_view->onSize(&view_rect);
+}
+
+LRESULT CALLBACK daux_editor_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+  auto* processor =
+      reinterpret_cast<SphereDauxVst3Processor*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+  switch (msg) {
+    case WM_NCCREATE: {
+      auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+      processor = reinterpret_cast<SphereDauxVst3Processor*>(create->lpCreateParams);
+      SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(processor));
+      return TRUE;
+    }
+    case WM_SIZE:
+      if (processor && processor->editor_attach_hwnd) {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        MoveWindow(processor->editor_attach_hwnd, 0, 0, rc.right - rc.left, rc.bottom - rc.top, TRUE);
+        resize_editor_view(processor);
+      }
+      return 0;
+    case WM_SETFOCUS:
+      if (processor && processor->editor_attach_hwnd) SetFocus(processor->editor_attach_hwnd);
+      return 0;
+    case WM_CLOSE:
+      // User pressed the window's X button — hide the shell, but detach the
+      // view and destroy the child HWND so stale content cannot reappear.
+      // Processor and controller stay alive; only insert removal may destroy them.
+      if (processor) {
+        processor->close_editor_view_only("user-close");
+        ShowWindow(hwnd, SW_HIDE);
+        std::fprintf(stderr,
+                     "[SphereVST3] editor hidden (user close) handle=%llu windowId=%s\n",
+                     processor->editor_handle,
+                     processor->editor_window_id.c_str());
+        return 0;
+      }
+      break;
+    case WM_DAUX_DESTROY:
+      // Posted by close_editor_window() when called cross-thread; execute the
+      // DestroyWindow on this HWND's own thread.
+      DestroyWindow(hwnd);
+      return 0;
+    case WM_DESTROY:
+      // GWLP_USERDATA was already zeroed by close_editor_window() before this
+      // message was dispatched, so processor may be null here.  Do cleanup only
+      // if the pointer is still set (shouldn't normally happen but guard anyway).
+      if (processor) {
+        detach_editor_view(processor);
+        if (processor->editor_attach_hwnd && IsWindow(processor->editor_attach_hwnd)) {
+          DestroyWindow(processor->editor_attach_hwnd);
+        }
+        processor->editor_attach_hwnd = nullptr;
+        processor->editor_hwnd = nullptr;
+        processor->editor_handle = 0;
+        processor->editor_window_id.clear();
+      }
+      return 0;
+    default:
+      break;
+  }
+  return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+void register_editor_parent_class() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(WNDCLASSEXW);
+    wc.lpfnWndProc = daux_editor_window_proc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = kDauxEditorWindowClass;
+    RegisterClassExW(&wc);
+  });
+}
+
+void SphereDauxVst3Processor::close_editor_window() {
+  HWND hwnd = editor_hwnd;
+  HWND child = editor_attach_hwnd;
+  // Zero back-pointer FIRST so any pending messages dispatched after this
+  // cannot dereference the (potentially freed) SphereDauxVst3Processor.
+  if (hwnd && IsWindow(hwnd)) {
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+  }
+  detach_editor_view(this);
+  if (child && IsWindow(child)) {
+    DestroyWindow(child);
+  }
+  editor_attach_hwnd = nullptr;
+  editor_hwnd = nullptr;
+  editor_handle = 0;
+  editor_window_id.clear();
+  if (hwnd && IsWindow(hwnd)) {
+    // Use PostMessage so the destroy is executed on the HWND's owning thread
+    // (Electron main thread) rather than potentially a foreign thread.
+    // WM_DAUX_DESTROY handler calls DestroyWindow directly.
+    const DWORD hwnd_tid = GetWindowThreadProcessId(hwnd, nullptr);
+    if (hwnd_tid == GetCurrentThreadId()) {
+      DestroyWindow(hwnd);
+    } else {
+      PostMessageW(hwnd, WM_DAUX_DESTROY, 0, 0);
+    }
+  }
+}
+
+void SphereDauxVst3Processor::close_editor_view_only(const char* reason) {
+  // Properly detach the IPlugView (calls removed()) and destroy ONLY the child
+  // attach HWND.  The parent shell HWND remains alive so the same editor_handle
+  // identity is preserved for the next reopen call.
+  //
+  // This is the correct hide/close path:
+  //   detach view → destroy child HWND → hide parent HWND
+  //
+  // On next open() we always create a fresh child HWND.  Reusing the stale child
+  // HWND after removed() was the root cause of the white-window regression.
+  detach_editor_view(this);
+  if (editor_attach_hwnd && IsWindow(editor_attach_hwnd)) {
+    DestroyWindow(editor_attach_hwnd);
+  }
+  editor_attach_hwnd = nullptr;
+  std::fprintf(stderr,
+               "[SphereVST3] close_editor_view_only handle=%llu reason=%s "
+               "childHwndDestroyed=1\n",
+               editor_handle, reason ? reason : "unknown");
+}
+#endif
+
 // ── C API ─────────────────────────────────────────────────────────────────────
+
+extern "C" int sphere_daux_vst3_bridge_probe(void) {
+  std::fprintf(stderr, "[DAUx VST3] bridge probe ok\n");
+  std::fflush(stderr);
+  return 0xDA03;
+}
+
+extern "C" const char* sphere_daux_vst3_last_error(void) {
+  return g_last_error.c_str();
+}
 
 extern "C" SphereDauxVst3Processor* sphere_daux_vst3_create(
     const char* plugin_path,
     const char* class_id,
     double      sample_rate) {
-  if (!plugin_path || !*plugin_path) return nullptr;
+  set_last_error("");
+  if (!plugin_path || !*plugin_path) {
+    set_last_error("empty plugin_path");
+    return nullptr;
+  }
+
+  std::fprintf(stderr, "[DAUx VST3] create entered: path=%s classId=%s\n",
+               plugin_path, class_id ? class_id : "");
+  std::fflush(stderr);
 
   auto instance = std::make_unique<SphereDauxVst3Processor>();
+  std::fprintf(stderr, "[DAUx VST3] instance created: path=%s classId=%s\n",
+               plugin_path, class_id ? class_id : "");
   std::string error;
   instance->module = VST3::Hosting::Module::create(plugin_path, error);
   if (!instance->module) {
+    set_last_error("module load failed: " + error);
     std::fprintf(stderr, "[DAUx VST3] module load FAILED: %s\n", error.c_str());
     return nullptr;
   }
@@ -363,28 +681,58 @@ extern "C" SphereDauxVst3Processor* sphere_daux_vst3_create(
 
   const auto factory = instance->module->getFactory();
   factory.setHostContext(&instance->host_context);
+  log_factory_classes(factory);
+  {
+    std::ostringstream classes;
+    int index = 0;
+    for (const auto& info : factory.classInfos()) {
+      if (index > 0) classes << " | ";
+      classes << "[" << index << "] name='" << info.name() << "' category='"
+              << info.category() << "' uid=" << info.ID().toString();
+      ++index;
+    }
+    if (index == 0) set_last_error("factory has no classes");
+    else set_last_error("factory classes: " + classes.str());
+  }
 
   const std::string requested = class_id ? class_id : "";
   VST3::Optional<VST3::UID> uid;
   if (!looks_like_zero_class_id(requested))
     uid = VST3::UID::fromString(requested);
-  if (!uid) uid = first_audio_module_uid(factory);
   if (!uid) {
+    std::fprintf(stderr,
+                 "[DAUx VST3] classId missing/zero/invalid; trying first Audio Module Class fallback\n");
+    uid = first_audio_module_uid(factory);
+  }
+  if (!uid) {
+    set_last_error(g_last_error + "; no Audio Module Class found");
     std::fprintf(stderr, "[DAUx VST3] no Audio Module Class found in factory\n");
     return nullptr;
   }
 
   instance->component = factory.createInstance<Steinberg::Vst::IComponent>(*uid);
   if (!instance->component) {
-    std::fprintf(stderr, "[DAUx VST3] create IComponent FAILED\n");
-    return nullptr;
+    std::fprintf(stderr,
+                 "[DAUx VST3] create IComponent FAILED for classId=%s; trying first Audio Module Class fallback\n",
+                 requested.c_str());
+    uid = first_audio_module_uid(factory);
+    if (uid) instance->component = factory.createInstance<Steinberg::Vst::IComponent>(*uid);
+    if (!instance->component) {
+      set_last_error(g_last_error + "; create IComponent failed for requested classId='" + requested + "' and fallback");
+      std::fprintf(stderr, "[DAUx VST3] create IComponent FAILED after fallback\n");
+      return nullptr;
+    }
   }
+  std::fprintf(stderr, "[DAUx VST3] component created classId=%s\n", uid->toString().c_str());
   if (auto pb = Steinberg::FUnknownPtr<Steinberg::IPluginBase>(instance->component)) {
     if (pb->initialize(&instance->host_context) != Steinberg::kResultOk) {
+      set_last_error(g_last_error + "; component initialize failed");
       std::fprintf(stderr, "[DAUx VST3] component initialize FAILED\n");
       return nullptr;
     }
+    std::fprintf(stderr, "[SphereVST3] component initialized result=0 ok\n");
   } else {
+    set_last_error(g_last_error + "; component does not implement IPluginBase");
     std::fprintf(stderr, "[DAUx VST3] component does not implement IPluginBase\n");
     return nullptr;
   }
@@ -393,9 +741,11 @@ extern "C" SphereDauxVst3Processor* sphere_daux_vst3_create(
           Steinberg::Vst::IAudioProcessor::iid,
           reinterpret_cast<void**>(&instance->processor)) != Steinberg::kResultTrue ||
       !instance->processor) {
+    set_last_error(g_last_error + "; component does not implement IAudioProcessor");
     std::fprintf(stderr, "[DAUx VST3] component does not implement IAudioProcessor\n");
     return nullptr;
   }
+  std::fprintf(stderr, "[SphereVST3] processor found\n");
 
   // Obtain IEditController (either from the component itself or a separate class)
   Steinberg::Vst::IEditController* raw_ctrl = nullptr;
@@ -404,6 +754,7 @@ extern "C" SphereDauxVst3Processor* sphere_daux_vst3_create(
           reinterpret_cast<void**>(&raw_ctrl)) == Steinberg::kResultTrue) {
     instance->controller = Steinberg::IPtr<Steinberg::Vst::IEditController>::adopt(raw_ctrl);
     instance->controller_is_component = true;
+    std::fprintf(stderr, "[SphereVST3] controller initialized result=0 ok component-owned\n");
   } else {
     Steinberg::TUID ctrl_cid{};
     if (instance->component->getControllerClassId(ctrl_cid) == Steinberg::kResultTrue) {
@@ -414,6 +765,8 @@ extern "C" SphereDauxVst3Processor* sphere_daux_vst3_create(
           if (pb->initialize(&instance->host_context) != Steinberg::kResultOk) {
             std::fprintf(stderr, "[DAUx VST3] controller initialize FAILED\n");
             instance->controller = nullptr;
+          } else {
+            std::fprintf(stderr, "[SphereVST3] controller initialized result=0 ok\n");
           }
         }
       }
@@ -434,16 +787,32 @@ extern "C" SphereDauxVst3Processor* sphere_daux_vst3_create(
   }
 
   if (!instance->setup(sample_rate)) {
+    set_last_error(g_last_error + "; setup failed");
     instance->shutdown();
     return nullptr;
   }
 
-  std::fprintf(stderr, "[DAUx VST3] processor ready: %s\n", plugin_path);
+  set_last_error("");
+  std::fprintf(stderr, "[DAUx VST3] processor ready: %s handle=0x%p\n",
+               plugin_path, static_cast<void*>(instance.get()));
   return instance.release();
 }
 
 extern "C" void sphere_daux_vst3_destroy(SphereDauxVst3Processor* processor) {
   if (!processor) return;
+  std::fprintf(stderr,
+               "[SphereVST3] destroying processor handle=0x%p\n",
+               static_cast<void*>(processor));
+#ifdef _WIN32
+  // Mark invalid BEFORE zeroing GWLP_USERDATA so the window proc can check
+  // this flag even if it races between the zero and a pending message.
+  processor->processor_valid.store(false, std::memory_order_seq_cst);
+  // Zero the back-pointer so any still-pending WM_TIMER/WM_PAINT cannot
+  // dereference the struct after it is freed.
+  if (processor->editor_hwnd && IsWindow(processor->editor_hwnd)) {
+    SetWindowLongPtrW(processor->editor_hwnd, GWLP_USERDATA, 0);
+  }
+#endif
   processor->shutdown();
   delete processor;
 }
@@ -484,16 +853,6 @@ extern "C" int sphere_daux_vst3_process_stereo_sample(
 
   const auto result = processor->processor->process(processor->process_data);
 
-  // First-process debug log (fires once, outside the hot path thereafter)
-  if (!processor->first_process_done) {
-    processor->first_process_done = true;
-    std::fprintf(stderr, "[DAUx VST3] first process call: %s\n",
-                 result == Steinberg::kResultOk ? "OK" : "FAILED");
-  }
-
-  if (result != Steinberg::kResultOk) return 0;
-
-  processor->process_count += 1;
   processor->last_input_peak = std::max(
       std::abs(static_cast<double>(in_l)),
       std::abs(static_cast<double>(in_r)));
@@ -504,8 +863,106 @@ extern "C" int sphere_daux_vst3_process_stereo_sample(
       std::abs(static_cast<double>(processor->output_l - in_l)),
       std::abs(static_cast<double>(processor->output_r - in_r)));
 
+  // First-process debug log (fires once, outside the hot path thereafter)
+  if (!processor->first_process_done) {
+    processor->first_process_done = true;
+    std::fprintf(stderr,
+                 "[SphereVST3] first process %s inputPeakL=%.6f outputPeakL=%.6f diffPeak=%.6f\n",
+                 result == Steinberg::kResultOk ? "ok" : "failed",
+                 processor->last_input_peak,
+                 processor->last_output_peak,
+                 processor->last_difference_peak);
+  }
+
+  if (result != Steinberg::kResultOk) return 0;
+
+  processor->process_count += 1;
+
   *out_l = processor->output_l;
   *out_r = processor->output_r;
+  return 1;
+}
+
+extern "C" int sphere_daux_vst3_process_stereo_block(
+    SphereDauxVst3Processor* processor,
+    const float* in_l,
+    const float* in_r,
+    float* out_l,
+    float* out_r,
+    int frames) {
+  if (!processor || !processor->processor || !in_l || !in_r || !out_l || !out_r || frames <= 0) {
+    return 0;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(processor->pending_mutex);
+    if (processor->pending_count > 0) {
+      processor->param_changes_obj.reset();
+      for (int i = 0; i < processor->pending_count; ++i) {
+        Steinberg::int32 idx = 0;
+        auto* q = processor->param_changes_obj.addParameterData(
+            processor->pending_buf[i].id, idx);
+        if (q) {
+          Steinberg::int32 dummy = 0;
+          q->addPoint(0, processor->pending_buf[i].value, dummy);
+        }
+      }
+      processor->pending_count = 0;
+      processor->process_data.inputParameterChanges = &processor->param_changes_obj;
+    } else {
+      processor->process_data.inputParameterChanges = nullptr;
+    }
+  }
+
+  float* input_channels[2] = {
+      const_cast<float*>(in_l),
+      const_cast<float*>(in_r),
+  };
+  float* output_channels[2] = {out_l, out_r};
+  processor->input_bus.numChannels = 2;
+  processor->input_bus.channelBuffers32 = input_channels;
+  processor->output_bus.numChannels = 2;
+  processor->output_bus.channelBuffers32 = output_channels;
+  processor->process_data.numSamples = frames;
+  processor->process_data.inputs = &processor->input_bus;
+  processor->process_data.outputs = &processor->output_bus;
+
+  const auto result = processor->processor->process(processor->process_data);
+
+  double input_peak_l = 0.0;
+  double input_peak_r = 0.0;
+  double output_peak_l = 0.0;
+  double output_peak_r = 0.0;
+  double diff_peak = 0.0;
+  for (int i = 0; i < frames; ++i) {
+    input_peak_l = std::max(input_peak_l, std::abs(static_cast<double>(in_l[i])));
+    input_peak_r = std::max(input_peak_r, std::abs(static_cast<double>(in_r[i])));
+    output_peak_l = std::max(output_peak_l, std::abs(static_cast<double>(out_l[i])));
+    output_peak_r = std::max(output_peak_r, std::abs(static_cast<double>(out_r[i])));
+    diff_peak = std::max(diff_peak, std::abs(static_cast<double>(out_l[i] - in_l[i])));
+    diff_peak = std::max(diff_peak, std::abs(static_cast<double>(out_r[i] - in_r[i])));
+  }
+  processor->last_input_peak = std::max(input_peak_l, input_peak_r);
+  processor->last_output_peak = std::max(output_peak_l, output_peak_r);
+  processor->last_difference_peak = diff_peak;
+
+  if (!processor->first_process_done) {
+    processor->first_process_done = true;
+    std::fprintf(stderr,
+                 "[SphereVST3] first process %s frames=%d inputPeakL=%.6f outputPeakL=%.6f diffPeak=%.6f\n",
+                 result == Steinberg::kResultOk ? "ok" : "failed",
+                 frames,
+                 input_peak_l,
+                 output_peak_l,
+                 processor->last_difference_peak);
+  }
+
+  processor->process_data.numSamples = 1;
+  processor->input_bus.channelBuffers32 = processor->input_channels;
+  processor->output_bus.channelBuffers32 = processor->output_channels;
+
+  if (result != Steinberg::kResultOk) return 0;
+  processor->process_count += 1;
   return 1;
 }
 
@@ -519,6 +976,248 @@ extern "C" void sphere_daux_vst3_set_param(
   processor->enqueue_param(
       static_cast<Steinberg::Vst::ParamID>(param_id),
       static_cast<Steinberg::Vst::ParamValue>(value));
+}
+
+extern "C" unsigned long long sphere_daux_vst3_open_editor(
+    SphereDauxVst3Processor* processor,
+    const char*              window_id,
+    const char*              title,
+    int                      width,
+    int                      height) {
+  if (!processor || !processor->controller) return 0;
+#ifndef _WIN32
+  (void)window_id;
+  (void)title;
+  (void)width;
+  (void)height;
+  set_last_error("DAUx VST3 editor is currently implemented only on Windows");
+  return 0;
+#else
+  if (processor->editor_hwnd && IsWindow(processor->editor_hwnd)) {
+    // Parent shell still alive (was hidden after user-close or programmatic-close).
+    // Always create a FRESH child HWND + fresh IPlugView — never reuse the stale
+    // child HWND.  After IPlugView::removed() the child HWND has no vendor content;
+    // re-attaching to it yields a white/blank window (the root cause).
+    std::fprintf(stderr,
+                 "[SphereVST3] editor reopen: creating fresh child HWND + IPlugView "
+                 "handle=%llu windowId=%s\n",
+                 processor->editor_handle,
+                 processor->editor_window_id.c_str());
+
+    // Measure the current client area of the parent shell to match size.
+    RECT rc{};
+    GetClientRect(processor->editor_hwnd, &rc);
+    const int w = (rc.right - rc.left > 0) ? (rc.right - rc.left) : (width > 0 ? width : 820);
+    const int h = (rc.bottom - rc.top > 0) ? (rc.bottom - rc.top) : (height > 0 ? height : 560);
+
+    // Create fresh child attach HWND.
+    HWND child = CreateWindowExW(
+        0,
+        kDauxEditorChildClass,
+        L"",
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+        0, 0, w, h,
+        processor->editor_hwnd,
+        nullptr,
+        GetModuleHandleW(nullptr),
+        nullptr);
+    if (!child) {
+      std::fprintf(stderr,
+                   "[SphereVST3] editor reopen: CreateWindowExW child FAILED handle=%llu\n",
+                   processor->editor_handle);
+      return 0;
+    }
+    std::fprintf(stderr,
+                 "[SphereVST3] editor reopen: fresh child HWND=0x%p handle=%llu\n",
+                 static_cast<void*>(child), processor->editor_handle);
+    processor->editor_attach_hwnd = child;
+
+    // Create fresh IPlugView.
+    processor->editor_view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
+        processor->controller->createView(Steinberg::Vst::ViewType::kEditor));
+    std::fprintf(stderr,
+                 "[SphereVST3] editor reopen: createView %s handle=%llu\n",
+                 processor->editor_view ? "ok" : "FAILED",
+                 processor->editor_handle);
+    if (!processor->editor_view) {
+      DestroyWindow(child);
+      processor->editor_attach_hwnd = nullptr;
+      return 0;
+    }
+    if (processor->editor_view->isPlatformTypeSupported(Steinberg::kPlatformTypeHWND) !=
+        Steinberg::kResultTrue) {
+      processor->editor_view = nullptr;
+      DestroyWindow(child);
+      processor->editor_attach_hwnd = nullptr;
+      std::fprintf(stderr,
+                   "[SphereVST3] editor reopen: HWND not supported handle=%llu\n",
+                   processor->editor_handle);
+      return 0;
+    }
+
+    // Attach to fresh child HWND.
+    const auto attach_res = processor->editor_view->attached(
+        reinterpret_cast<void*>(child), Steinberg::kPlatformTypeHWND);
+    std::fprintf(stderr,
+                 "[SphereVST3] editor reopen: IPlugView::attached() result=%d handle=%llu\n",
+                 (int)attach_res, processor->editor_handle);
+    if (attach_res != Steinberg::kResultTrue && attach_res != Steinberg::kResultOk) {
+      processor->editor_view = nullptr;
+      DestroyWindow(child);
+      processor->editor_attach_hwnd = nullptr;
+      return 0;
+    }
+    processor->editor_attached = true;
+
+    // Update window title (latency/CPU may change between opens).
+    if (title && *title) {
+      SetWindowTextW(processor->editor_hwnd, widen_utf8(title).c_str());
+      std::fprintf(stderr,
+                   "[SphereVST3] editor reopen: title='%s' handle=%llu\n",
+                   title, processor->editor_handle);
+    }
+
+    resize_editor_view(processor);
+    ShowWindow(processor->editor_hwnd, SW_SHOWNORMAL);
+    UpdateWindow(processor->editor_hwnd);
+    SetForegroundWindow(processor->editor_hwnd);
+    SetWindowPos(processor->editor_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    std::fprintf(stderr,
+                 "[SphereVST3] editor reopen: complete handle=%llu "
+                 "mainHWND=0x%p attachHWND=0x%p\n",
+                 processor->editor_handle,
+                 static_cast<void*>(processor->editor_hwnd),
+                 static_cast<void*>(child));
+    return processor->editor_handle;
+  }
+
+  register_editor_window_classes();
+  register_editor_parent_class();
+
+  processor->editor_view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
+      processor->controller->createView(Steinberg::Vst::ViewType::kEditor));
+  if (!processor->editor_view) {
+    set_last_error("controller did not create editor view");
+    return 0;
+  }
+  if (processor->editor_view->isPlatformTypeSupported(Steinberg::kPlatformTypeHWND) !=
+      Steinberg::kResultTrue) {
+    processor->editor_view = nullptr;
+    set_last_error("editor view does not support HWND");
+    return 0;
+  }
+
+  Steinberg::ViewRect preferred{};
+  int editor_width = width > 0 ? width : 820;
+  int editor_height = height > 0 ? height : 560;
+  if (processor->editor_view->getSize(&preferred) == Steinberg::kResultTrue) {
+    const int preferred_width = preferred.right - preferred.left;
+    const int preferred_height = preferred.bottom - preferred.top;
+    if (preferred_width > 0) editor_width = preferred_width;
+    if (preferred_height > 0) editor_height = preferred_height;
+  }
+
+  RECT rect{0, 0, editor_width, editor_height};
+  AdjustWindowRectEx(&rect, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_TOPMOST);
+  const auto wide_title = widen_utf8(title && *title ? title : "Plugin Editor");
+  HWND hwnd = CreateWindowExW(
+      WS_EX_TOPMOST,
+      kDauxEditorWindowClass,
+      wide_title.c_str(),
+      WS_OVERLAPPEDWINDOW,
+      CW_USEDEFAULT,
+      CW_USEDEFAULT,
+      rect.right - rect.left,
+      rect.bottom - rect.top,
+      nullptr,
+      nullptr,
+      GetModuleHandleW(nullptr),
+      processor);
+  if (!hwnd) {
+    processor->editor_view = nullptr;
+    set_last_error("CreateWindowExW failed for DAUx VST3 editor");
+    return 0;
+  }
+  set_daux_dark_titlebar(hwnd);
+  // Ensure always-on-top after creation (belt-and-suspenders alongside WS_EX_TOPMOST).
+  SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+  HWND child = CreateWindowExW(
+      0,
+      kDauxEditorChildClass,
+      L"",
+      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+      0,
+      0,
+      editor_width,
+      editor_height,
+      hwnd,
+      nullptr,
+      GetModuleHandleW(nullptr),
+      nullptr);
+  if (!child) {
+    DestroyWindow(hwnd);
+    processor->editor_view = nullptr;
+    set_last_error("CreateWindowExW failed for DAUx VST3 attach HWND");
+    return 0;
+  }
+
+  processor->editor_hwnd = hwnd;
+  processor->editor_attach_hwnd = child;
+  processor->editor_handle = g_next_editor_handle.fetch_add(1);
+  processor->editor_window_id = window_id ? window_id : "";
+
+  const auto attach_result =
+      processor->editor_view->attached(reinterpret_cast<void*>(child), Steinberg::kPlatformTypeHWND);
+  if (attach_result != Steinberg::kResultTrue && attach_result != Steinberg::kResultOk) {
+    processor->close_editor_window();
+    set_last_error("IPlugView::attached(HWND) failed for DAUx VST3 editor");
+    return 0;
+  }
+
+  processor->editor_attached = true;
+  resize_editor_view(processor);
+  ShowWindow(hwnd, SW_SHOWNORMAL);
+  UpdateWindow(hwnd);
+  SetForegroundWindow(hwnd);
+  std::fprintf(stderr,
+               "[SphereVST3] editor opened same-instance handle=%llu windowId=%s mainHWND=0x%p attachHWND=0x%p\n",
+               processor->editor_handle,
+               processor->editor_window_id.c_str(),
+               static_cast<void*>(hwnd),
+               static_cast<void*>(child));
+  return processor->editor_handle;
+#endif
+}
+
+extern "C" void sphere_daux_vst3_close_editor(SphereDauxVst3Processor* processor) {
+  if (!processor) return;
+#ifdef _WIN32
+  // Detach IPlugView, destroy child HWND, hide parent shell.
+  // Processor and controller are kept alive — only insert removal may destroy them.
+  if (processor->editor_hwnd && IsWindow(processor->editor_hwnd)) {
+    processor->close_editor_view_only("programmatic-close");
+    ShowWindow(processor->editor_hwnd, SW_HIDE);
+    std::fprintf(stderr,
+                 "[SphereVST3] editor closed (programmatic) handle=%llu windowId=%s\n",
+                 processor->editor_handle,
+                 processor->editor_window_id.c_str());
+  }
+#endif
+}
+
+extern "C" int sphere_daux_vst3_focus_editor(SphereDauxVst3Processor* processor) {
+  if (!processor) return 0;
+#ifdef _WIN32
+  if (processor->editor_hwnd && IsWindow(processor->editor_hwnd)) {
+    ShowWindow(processor->editor_hwnd, SW_SHOWNORMAL);
+    SetForegroundWindow(processor->editor_hwnd);
+    if (processor->editor_attach_hwnd) SetFocus(processor->editor_attach_hwnd);
+    return 1;
+  }
+#endif
+  return 0;
 }
 
 extern "C" unsigned long long sphere_daux_vst3_process_count(
@@ -536,4 +1235,18 @@ extern "C" double sphere_daux_vst3_last_output_peak(SphereDauxVst3Processor* pro
 
 extern "C" double sphere_daux_vst3_last_difference_peak(SphereDauxVst3Processor* processor) {
   return processor ? processor->last_difference_peak : 0.0;
+}
+
+extern "C" int sphere_daux_vst3_is_valid(SphereDauxVst3Processor* processor) {
+#ifdef _WIN32
+  return (processor && processor->processor_valid.load(std::memory_order_acquire)) ? 1 : 0;
+#else
+  return processor ? 1 : 0;
+#endif
+}
+
+extern "C" int sphere_daux_vst3_get_latency_samples(SphereDauxVst3Processor* processor) {
+  if (!processor || !processor->processor) return 0;
+  const auto latency = processor->processor->getLatencySamples();
+  return static_cast<int>(latency);
 }

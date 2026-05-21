@@ -168,6 +168,9 @@ interface NativeEngine {
   loadProject(snapshotJson: string): void;
   updateTrackParam(trackId: string, paramId: string, value: number): void;
   updateInsertParam(trackId: string, insertId: string, paramId: string, value: number): void;
+  openInsertEditor(trackId: string, insertId: string, windowId: string, title: string, width: number, height: number): bigint | number;
+  closeInsertEditor(trackId: string, insertId: string): void;
+  focusInsertEditor(trackId: string, insertId: string): boolean;
   updateClip(clipId: string, patchJson: string): void;
   getMeters(): NativeMeterSnapshot;
   getDebugInfo(): NativeDebugInfo;
@@ -508,6 +511,28 @@ export class SphereAudioNative {
   updateInsertParam(trackId: string, insertId: string, paramId: string, value: unknown): void {
     if (!this._engine) throw new Error("[SphereAudio] Engine not available");
     this._engine.updateInsertParam(trackId, insertId, paramId, Number(value));
+  }
+
+  openInsertEditor(
+    trackId: string,
+    insertId: string,
+    windowId: string,
+    title: string,
+    width: number,
+    height: number,
+  ): number | null {
+    if (!this._engine) throw new Error("[SphereAudio] Engine not available");
+    const handle = this._engine.openInsertEditor(trackId, insertId, windowId, title, width, height);
+    const numeric = typeof handle === "bigint" ? Number(handle) : Number(handle);
+    return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+  }
+
+  closeInsertEditor(trackId: string, insertId: string): void {
+    this._engine?.closeInsertEditor(trackId, insertId);
+  }
+
+  focusInsertEditor(trackId: string, insertId: string): boolean {
+    return this._engine?.focusInsertEditor(trackId, insertId) ?? false;
   }
 
   updateClip(clipId: string, patch: unknown): void {

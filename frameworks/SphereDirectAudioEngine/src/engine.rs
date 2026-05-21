@@ -316,6 +316,7 @@ impl EngineInner {
                         snapshot,
                         candidate.config.sample_rate.0,
                         &mut audio_cache,
+                        None,
                     )
                 })
                 .unwrap_or_else(|| {
@@ -524,12 +525,96 @@ impl EngineInner {
         param_id: &str,
         value: f64,
     ) -> Result<(), SphereAudioError> {
+        eprintln!(
+            "[SphereAudio] queue insert param track={} insert={} param={} value={:.6}",
+            track_id, insert_id, param_id, value
+        );
         self.send_command(EngineCommand::SetInsertParam {
             track_id: track_id.into(),
             insert_id: insert_id.into(),
             param_id: param_id.into(),
             value: value as f32,
         })
+    }
+
+    pub fn open_insert_editor(
+        &self,
+        track_id: &str,
+        insert_id: &str,
+        window_id: &str,
+        title: &str,
+        width: i32,
+        height: i32,
+    ) -> Result<u64, SphereAudioError> {
+        let mut runtime = self.runtime.lock();
+        let Some(track) = runtime.tracks.iter_mut().find(|track| track.id == track_id) else {
+            return Err(SphereAudioError::NativeError(format!(
+                "track not found for insert editor: {track_id}"
+            )));
+        };
+        let Some(insert) = track.inserts.iter_mut().find(|insert| insert.id == insert_id) else {
+            return Err(SphereAudioError::NativeError(format!(
+                "insert not found for editor: track={track_id} insert={insert_id}"
+            )));
+        };
+        let Some(vst3) = insert.vst3.as_mut() else {
+            return Err(SphereAudioError::NativeError(format!(
+                "insert has no ready VST3 processor: track={track_id} insert={insert_id}"
+            )));
+        };
+        let handle = vst3.open_editor(window_id, title, width, height).ok_or_else(|| {
+            SphereAudioError::NativeError(format!(
+                "failed to open VST3 editor: track={track_id} insert={insert_id}"
+            ))
+        })?;
+        eprintln!(
+            "[SphereAudio] opened insert editor track={} insert={} handle={} processorHandle=0x{:x}",
+            track_id,
+            insert_id,
+            handle,
+            vst3.handle_value()
+        );
+        Ok(handle)
+    }
+
+    pub fn close_insert_editor(
+        &self,
+        track_id: &str,
+        insert_id: &str,
+    ) -> Result<(), SphereAudioError> {
+        let mut runtime = self.runtime.lock();
+        if let Some(vst3) = runtime
+            .tracks
+            .iter_mut()
+            .find(|track| track.id == track_id)
+            .and_then(|track| track.inserts.iter_mut().find(|insert| insert.id == insert_id))
+            .and_then(|insert| insert.vst3.as_mut())
+        {
+            vst3.close_editor();
+            eprintln!(
+                "[SphereAudio] closed insert editor track={} insert={}",
+                track_id, insert_id
+            );
+        }
+        Ok(())
+    }
+
+    pub fn focus_insert_editor(
+        &self,
+        track_id: &str,
+        insert_id: &str,
+    ) -> Result<bool, SphereAudioError> {
+        let mut runtime = self.runtime.lock();
+        if let Some(vst3) = runtime
+            .tracks
+            .iter_mut()
+            .find(|track| track.id == track_id)
+            .and_then(|track| track.inserts.iter_mut().find(|insert| insert.id == insert_id))
+            .and_then(|insert| insert.vst3.as_mut())
+        {
+            return Ok(vst3.focus_editor());
+        }
+        Ok(false)
     }
 
     // ── Project snapshot ───────────────────────────────────────────────────
@@ -563,9 +648,32 @@ impl EngineInner {
             );
         }
 
+        // Extract existing VST3 processors from the current runtime so they can
+        // be reused in the new build if the same insert ID + plugin path + class_id
+        // + sample_rate still match.  This prevents spurious processor destruction
+        // (and editor HWND invalidation) when just reloading the project.
+        let mut existing_vst3: HashMap<String, crate::vst3_processor::Vst3RuntimeProcessor> = {
+            let mut current = self.runtime.lock();
+            let mut map = HashMap::new();
+            for track in &mut current.tracks {
+                for insert in &mut track.inserts {
+                    if let Some(vst3) = insert.vst3.take() {
+                        vst3.set_destroy_reason("replaced-by-load-project");
+                        map.insert(insert.id.clone(), vst3);
+                    }
+                }
+            }
+            map
+        };
+
         let runtime = {
             let mut audio_cache = self.audio_cache.lock();
-            let project = RuntimeProject::build(&snapshot, output_sample_rate, &mut audio_cache);
+            let project = RuntimeProject::build(
+                &snapshot,
+                output_sample_rate,
+                &mut audio_cache,
+                Some(&mut existing_vst3),
+            );
 
             // Evict cache entries no longer referenced by any clip in the new snapshot.
             // This keeps memory bounded when clips are removed between project loads.
@@ -579,6 +687,9 @@ impl EngineInner {
 
             project
         };
+        // Processors left in existing_vst3 had no matching insert in the new
+        // snapshot — they are dropped here with reason="replaced-by-load-project".
+        drop(existing_vst3);
 
         eprintln!(
             "[SphereAudio] RuntimeProject built: {} runtime clips from {} snapshot clips (sr={})",
@@ -933,7 +1044,9 @@ impl EngineInner {
             .as_ref()
             .map(|snapshot| {
                 let mut audio_cache = self.audio_cache.lock();
-                RuntimeProject::build(snapshot, sr, &mut audio_cache)
+                // Pass None for existing_vst3: opening a new device may change
+                // the sample rate, so processors cannot be safely reused here.
+                RuntimeProject::build(snapshot, sr, &mut audio_cache, None)
             })
             .unwrap_or_else(|| {
                 let mut runtime = self.runtime.lock().clone();
@@ -1026,6 +1139,7 @@ pub fn render_project_sample(
 ) -> (f32, f32) {
     let mut out_l = 0.0f32;
     let mut out_r = 0.0f32;
+    let master_index = runtime.tracks.iter().position(|t| t.track_type == "master");
 
     for clip_index in 0..runtime.clips.len() {
         let clip = &runtime.clips[clip_index];
@@ -1048,6 +1162,9 @@ pub fn render_project_sample(
         let Some(track_index) = runtime.tracks.iter().position(|t| t.id == clip_track_id) else {
             continue;
         };
+        if Some(track_index) == master_index {
+            continue;
+        }
         let has_solo = runtime.has_solo;
         if runtime.tracks[track_index].muted || (has_solo && !runtime.tracks[track_index].solo) {
             continue;
@@ -1123,10 +1240,209 @@ pub fn render_project_sample(
         }
     }
 
+    // ── Master bus: apply master track inserts on the summed output ──
+    if let Some(m_idx) = master_index {
+        let muted = runtime.tracks[m_idx].muted
+            || (runtime.has_solo && !runtime.tracks[m_idx].solo);
+        if !muted {
+            let master = &mut runtime.tracks[m_idx];
+            for insert in &mut master.inserts {
+                let (l, r) = apply_insert(out_l, out_r, insert);
+                out_l = l;
+                out_r = r;
+            }
+            let (l, r) = apply_preview_mode(out_l, out_r, master.preview_mode);
+            out_l = l;
+            out_r = r;
+            runtime.accumulate_track_meter(m_idx, out_l, out_r);
+        }
+    }
+
     (
         (out_l * master_volume).clamp(-1.0, 1.0),
         (out_r * master_volume).clamp(-1.0, 1.0),
     )
+}
+
+pub fn render_project_block_interleaved(
+    runtime: &mut RuntimeProject,
+    base_sample: u64,
+    master_volume: f32,
+    output: &mut [f32],
+    channels: usize,
+) -> u64 {
+    if channels < 2 {
+        return 0;
+    }
+    let frames = output.len() / channels;
+    if frames == 0 {
+        return 0;
+    }
+    for frame in output.chunks_mut(channels) {
+        frame[0] = 0.0;
+        frame[1] = 0.0;
+        for extra in frame.iter_mut().skip(2) {
+            *extra = 0.0;
+        }
+    }
+
+    for track in &mut runtime.tracks {
+        if track.block_l.len() < frames {
+            track.block_l.resize(frames, 0.0);
+            track.block_r.resize(frames, 0.0);
+        }
+        track.block_l[..frames].fill(0.0);
+        track.block_r[..frames].fill(0.0);
+    }
+
+    let master_index = runtime.tracks.iter().position(|t| t.track_type == "master");
+
+    for clip_index in 0..runtime.clips.len() {
+        let clip = &runtime.clips[clip_index];
+        let Some(track_index) = runtime.tracks.iter().position(|t| t.id == clip.track_id) else {
+            continue;
+        };
+        if runtime.tracks[track_index].muted
+            || (runtime.has_solo && !runtime.tracks[track_index].solo)
+        {
+            continue;
+        }
+
+        let clip_start = clip.start_sample;
+        let clip_end = clip.start_sample.saturating_add(clip.duration_samples);
+        let block_start = base_sample;
+        let block_end = base_sample.saturating_add(frames as u64);
+        if block_end <= clip_start || block_start >= clip_end {
+            continue;
+        }
+
+        let render_start = clip_start.saturating_sub(block_start) as usize;
+        let render_end = (clip_end.min(block_end) - block_start) as usize;
+        let source = Arc::clone(&clip.source);
+        for frame_idx in render_start..render_end {
+            let project_sample = base_sample + frame_idx as u64;
+            let rel = project_sample - clip_start;
+            let source_pos_seconds = clip.offset_seconds
+                + (rel as f64 / runtime.sample_rate.max(1) as f64) * clip.speed_ratio as f64;
+            let source_pos = source_pos_seconds * source.sample_rate as f64;
+            let (mut l, mut r) = sample_source_stereo(&source, source_pos);
+            l *= clip.gain;
+            r *= clip.gain;
+            runtime.tracks[track_index].block_l[frame_idx] += l;
+            runtime.tracks[track_index].block_r[frame_idx] += r;
+        }
+    }
+
+    for track_index in 0..runtime.tracks.len() {
+        if Some(track_index) == master_index {
+            continue;
+        }
+        if runtime.tracks[track_index].muted
+            || (runtime.has_solo && !runtime.tracks[track_index].solo)
+        {
+            continue;
+        }
+        if !runtime.tracks[track_index].inserts.is_empty()
+            && !runtime.tracks[track_index].callback_clip_route_log_done
+        {
+            runtime.tracks[track_index].callback_clip_route_log_done = true;
+            let track_id = runtime.tracks[track_index].id.clone();
+            let block_start = base_sample;
+            let block_end = base_sample.saturating_add(frames as u64);
+            let input_peak_l = runtime.tracks[track_index].block_l[..frames]
+                .iter()
+                .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+            let input_peak_r = runtime.tracks[track_index].block_r[..frames]
+                .iter()
+                .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+            let mut clip_count = 0usize;
+            let mut overlapping = 0usize;
+            let mut first_clip = String::from("none");
+            for clip in runtime.clips.iter().filter(|clip| clip.track_id == track_id) {
+                let clip_start = clip.start_sample;
+                let clip_end = clip.start_sample.saturating_add(clip.duration_samples);
+                let overlaps = block_end > clip_start && block_start < clip_end;
+                if clip_count == 0 {
+                    first_clip = format!(
+                        "{} range={}..{} offset={:.3}s gain={:.3} speed={:.3} overlaps={}",
+                        clip.id, clip_start, clip_end, clip.offset_seconds, clip.gain, clip.speed_ratio, overlaps
+                    );
+                }
+                clip_count += 1;
+                if overlaps {
+                    overlapping += 1;
+                }
+            }
+            eprintln!(
+                "[SphereAudio callback] clipRoute track={} block={}..{} clips={} overlapping={} preInsertPeakL={:.6} preInsertPeakR={:.6} firstClip={}",
+                track_id,
+                block_start,
+                block_end,
+                clip_count,
+                overlapping,
+                input_peak_l,
+                input_peak_r,
+                first_clip
+            );
+        }
+        let track = &mut runtime.tracks[track_index];
+        apply_track_chain_block(track, frames);
+        let (pan_l, pan_r) = pan_gains(track.pan);
+        for frame_idx in 0..frames {
+            let (l, r) = apply_preview_mode(
+                track.block_l[frame_idx] * track.volume * pan_l,
+                track.block_r[frame_idx] * track.volume * pan_r,
+                track.preview_mode,
+            );
+            track.meter_peak_l = track.meter_peak_l.max(l.abs());
+            track.meter_peak_r = track.meter_peak_r.max(r.abs());
+            track.meter_sum_sq_l += l * l;
+            track.meter_sum_sq_r += r * r;
+            let out = &mut output[frame_idx * channels..frame_idx * channels + channels];
+            out[0] += l;
+            out[1] += r;
+        }
+    }
+
+    // ── Master bus: apply master track inserts on the summed output ──
+    if let Some(m_idx) = master_index {
+        let muted = runtime.tracks[m_idx].muted
+            || (runtime.has_solo && !runtime.tracks[m_idx].solo);
+        if !muted {
+            let master = &mut runtime.tracks[m_idx];
+            // Copy summed output into master scratch buffer.
+            for i in 0..frames {
+                let frame = &output[i * channels..i * channels + channels];
+                master.block_l[i] = frame[0];
+                master.block_r[i] = frame[1];
+            }
+            apply_track_chain_block(master, frames);
+            // Write back, accumulate master meter, apply preview mode.
+            for i in 0..frames {
+                let (l, r) = apply_preview_mode(
+                    master.block_l[i],
+                    master.block_r[i],
+                    master.preview_mode,
+                );
+                master.meter_peak_l = master.meter_peak_l.max(l.abs());
+                master.meter_peak_r = master.meter_peak_r.max(r.abs());
+                master.meter_sum_sq_l += l * l;
+                master.meter_sum_sq_r += r * r;
+                let out = &mut output[i * channels..i * channels + channels];
+                out[0] = l;
+                out[1] = r;
+            }
+        }
+    }
+
+    // Final master volume + clamp.
+    for i in 0..frames {
+        let out = &mut output[i * channels..i * channels + channels];
+        out[0] = (out[0] * master_volume).clamp(-1.0, 1.0);
+        out[1] = (out[1] * master_volume).clamp(-1.0, 1.0);
+    }
+
+    frames as u64
 }
 
 #[inline]
@@ -1136,6 +1452,14 @@ pub fn is_master_output(output: &str) -> bool {
 
 #[inline]
 pub fn apply_track_chain(mut l: f32, mut r: f32, track: &mut RuntimeTrack) -> (f32, f32) {
+    if !track.inserts.is_empty() && !track.callback_insert_log_done {
+        track.callback_insert_log_done = true;
+        eprintln!(
+            "[SphereAudio callback] track={} inserts={}",
+            track.id,
+            track.inserts.len()
+        );
+    }
     for insert in &mut track.inserts {
         let processed = apply_insert(l, r, insert);
         l = processed.0;
@@ -1143,6 +1467,21 @@ pub fn apply_track_chain(mut l: f32, mut r: f32, track: &mut RuntimeTrack) -> (f
     }
     let (pan_l, pan_r) = pan_gains(track.pan);
     (l * track.volume * pan_l, r * track.volume * pan_r)
+}
+
+pub fn apply_track_chain_block(track: &mut RuntimeTrack, frames: usize) {
+    if !track.inserts.is_empty() && !track.callback_insert_log_done {
+        track.callback_insert_log_done = true;
+        eprintln!(
+            "[SphereAudio callback] track={} inserts={} blockFrames={}",
+            track.id,
+            track.inserts.len(),
+            frames
+        );
+    }
+    for insert in &mut track.inserts {
+        apply_insert_block(&mut track.block_l[..frames], &mut track.block_r[..frames], insert);
+    }
 }
 
 #[inline]
@@ -1163,11 +1502,57 @@ pub fn apply_preview_mode(l: f32, r: f32, mode: RuntimePreviewMode) -> (f32, f32
 #[inline]
 pub fn apply_insert(l: f32, r: f32, insert: &mut RuntimeInsert) -> (f32, f32) {
     if insert.kind.eq_ignore_ascii_case("native-plugin") {
+        let format = insert
+            .params
+            .get("format")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
         if !insert.enabled {
+            if !insert.callback_process_log_done {
+                insert.callback_process_log_done = true;
+                eprintln!(
+                    "[SphereAudio callback] insert={} format={} bypass=true beforePeakL={:.6} beforePeakR={:.6} afterPeakL={:.6} afterPeakR={:.6}",
+                    insert.id,
+                    format,
+                    l.abs(),
+                    r.abs(),
+                    l.abs(),
+                    r.abs()
+                );
+            }
             return (l, r);
         }
         if let Some(vst3) = insert.vst3.as_mut() {
-            return vst3.process_stereo_sample(l, r).unwrap_or((l, r));
+            let handle = vst3.handle_value();
+            let processed = vst3.process_stereo_sample(l, r);
+            let (out_l, out_r) = processed.unwrap_or((l, r));
+            if !insert.callback_process_log_done {
+                insert.callback_process_log_done = true;
+                eprintln!(
+                    "[SphereAudio callback] insert={} format={} processorHandle=0x{:x} bypass=false processOk={} beforePeakL={:.6} beforePeakR={:.6} afterPeakL={:.6} afterPeakR={:.6}",
+                    insert.id,
+                    format,
+                    handle,
+                    processed.is_some(),
+                    l.abs(),
+                    r.abs(),
+                    out_l.abs(),
+                    out_r.abs()
+                );
+            }
+            return (out_l, out_r);
+        }
+        if !insert.callback_process_log_done {
+            insert.callback_process_log_done = true;
+            eprintln!(
+                "[SphereAudio callback] insert={} format={} processorHandle=0x0 bypass=false processOk=false beforePeakL={:.6} beforePeakR={:.6} afterPeakL={:.6} afterPeakR={:.6}",
+                insert.id,
+                format,
+                l.abs(),
+                r.abs(),
+                l.abs(),
+                r.abs()
+            );
         }
         return (l, r);
     }
@@ -1181,6 +1566,126 @@ pub fn apply_insert(l: f32, r: f32, insert: &mut RuntimeInsert) -> (f32, f32) {
         l,
         r,
     )
+}
+
+pub fn apply_insert_block(block_l: &mut [f32], block_r: &mut [f32], insert: &mut RuntimeInsert) {
+    if block_l.is_empty() || block_r.is_empty() {
+        return;
+    }
+    if !insert.kind.eq_ignore_ascii_case("native-plugin") {
+        for i in 0..block_l.len().min(block_r.len()) {
+            let (l, r) = apply_insert(block_l[i], block_r[i], insert);
+            block_l[i] = l;
+            block_r[i] = r;
+        }
+        return;
+    }
+
+    let format = insert
+        .params
+        .get("format")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let before_peak_l = block_l.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    let before_peak_r = block_r.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+
+    if !insert.enabled {
+        if !insert.callback_process_log_done {
+            insert.callback_process_log_done = true;
+            eprintln!(
+                "[SphereAudio callback] insert={} format={} bypass=true blockFrames={} beforePeakL={:.6} beforePeakR={:.6} afterPeakL={:.6} afterPeakR={:.6}",
+                insert.id,
+                format,
+                block_l.len().min(block_r.len()),
+                before_peak_l,
+                before_peak_r,
+                before_peak_l,
+                before_peak_r
+            );
+        }
+        return;
+    }
+
+    let Some(vst3) = insert.vst3.as_mut() else {
+        if !insert.callback_process_log_done {
+            insert.callback_process_log_done = true;
+            eprintln!(
+                "[SphereAudio callback] insert={} format={} processorHandle=0x0 bypass=false processOk=false blockFrames={} beforePeakL={:.6} beforePeakR={:.6} afterPeakL={:.6} afterPeakR={:.6}",
+                insert.id,
+                format,
+                block_l.len().min(block_r.len()),
+                before_peak_l,
+                before_peak_r,
+                before_peak_l,
+                before_peak_r
+            );
+        }
+        return;
+    };
+
+    // Guard: if the underlying C++ processor was destroyed (e.g., Arc dropped
+    // on another thread racing with this callback), bypass and log once.
+    if !vst3.is_processor_valid() {
+        if !insert.callback_process_log_done {
+            insert.callback_process_log_done = true;
+            eprintln!(
+                "[SphereAudio callback] insert={} format={} processorHandle=0x{:x} INVALID/DESTROYED bypass=true — insert bypassed to prevent use-after-free",
+                insert.id, format, vst3.handle_value()
+            );
+        }
+        return;
+    }
+
+    let frames = block_l.len().min(block_r.len());
+    if insert.scratch_l.len() < frames {
+        insert.scratch_l.resize(frames, 0.0);
+        insert.scratch_r.resize(frames, 0.0);
+    }
+    insert.scratch_l[..frames].fill(0.0);
+    insert.scratch_r[..frames].fill(0.0);
+
+    let handle = vst3.handle_value();
+    let process_ok = vst3.process_stereo_block(
+        &block_l[..frames],
+        &block_r[..frames],
+        &mut insert.scratch_l[..frames],
+        &mut insert.scratch_r[..frames],
+    );
+    if process_ok {
+        block_l[..frames].copy_from_slice(&insert.scratch_l[..frames]);
+        block_r[..frames].copy_from_slice(&insert.scratch_r[..frames]);
+    }
+
+    if before_peak_l <= 0.000001 && before_peak_r <= 0.000001 {
+        insert.silent_process_blocks = insert.silent_process_blocks.saturating_add(1);
+    }
+
+    if !insert.callback_process_log_done
+        && (before_peak_l > 0.000001
+            || before_peak_r > 0.000001
+            || insert.silent_process_blocks >= 200)
+    {
+        insert.callback_process_log_done = true;
+        let after_peak_l = block_l[..frames]
+            .iter()
+            .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        let after_peak_r = block_r[..frames]
+            .iter()
+            .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        eprintln!(
+            "[SphereAudio callback] insert={} format={} processorHandle=0x{:x} bypass=false processOk={} blockFrames={} silentBlocks={} beforePeakL={:.6} beforePeakR={:.6} afterPeakL={:.6} afterPeakR={:.6}",
+            insert.id,
+            format,
+            handle,
+            process_ok,
+            frames,
+            insert.silent_process_blocks,
+            before_peak_l,
+            before_peak_r,
+            after_peak_l,
+            after_peak_r
+        );
+    }
 }
 
 #[inline]
@@ -1292,6 +1797,8 @@ where
 
     // Local playback state.
     let mut playing_local = false;
+    let mut render_path_logged = false;
+    let mut block_scratch: Vec<f32> = Vec::new();
 
     // Meter state with peak hold.
     let mut prev_peak_l = 0.0f32;
@@ -1400,7 +1907,51 @@ where
                 let base_sample = shared.position_samples.load(Ordering::Relaxed);
                 runtime.begin_meter_block();
 
-                if ch >= 2 {
+                if ch >= 2 && playing_local {
+                    let frames_needed = data.len() / ch;
+                    let scratch_len = frames_needed * ch;
+                    if block_scratch.len() < scratch_len {
+                        block_scratch.resize(scratch_len, 0.0);
+                    }
+                    let scratch = &mut block_scratch[..scratch_len];
+                    frames = render_project_block_interleaved(
+                        &mut runtime,
+                        base_sample,
+                        master_vol,
+                        scratch,
+                        ch,
+                    );
+                    if !render_path_logged {
+                        render_path_logged = true;
+                        eprintln!(
+                            "[SphereAudio callback] renderPath=legacy-block frames={} channels={} tracks={}",
+                            frames,
+                            ch,
+                            runtime.tracks.len()
+                        );
+                    }
+                    if gen_tone {
+                        for frame in scratch.chunks_mut(ch) {
+                            let tone_l = osc_l.next_sample() * TEST_TONE_AMPLITUDE * master_vol;
+                            let tone_r = osc_r.next_sample() * TEST_TONE_AMPLITUDE * master_vol;
+                            frame[0] = (frame[0] + tone_l).clamp(-1.0, 1.0);
+                            frame[1] = (frame[1] + tone_r).clamp(-1.0, 1.0);
+                        }
+                    }
+                    for (out_frame, frame) in data.chunks_mut(ch).zip(scratch.chunks(ch)) {
+                        let l = frame[0].clamp(-1.0, 1.0);
+                        let r = frame[1].clamp(-1.0, 1.0);
+                        out_frame[0] = T::from_sample(l);
+                        out_frame[1] = T::from_sample(r);
+                        for extra in out_frame.iter_mut().skip(2) {
+                            *extra = T::from_sample(0.0);
+                        }
+                        peak_l = peak_l.max(l.abs());
+                        peak_r = peak_r.max(r.abs());
+                        sum_sq_l += l * l;
+                        sum_sq_r += r * r;
+                    }
+                } else if ch >= 2 {
                     for frame in data.chunks_mut(ch) {
                         let (tone_l, tone_r) = if gen_tone {
                             (

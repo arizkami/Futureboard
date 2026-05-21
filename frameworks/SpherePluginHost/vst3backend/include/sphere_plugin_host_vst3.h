@@ -29,6 +29,7 @@ SPHERE_PLUGIN_HOST_API int sphere_plugin_editor_attach_vst3_view(
 SPHERE_PLUGIN_HOST_API void sphere_plugin_editor_close_window(unsigned long long handle);
 SPHERE_PLUGIN_HOST_API void sphere_plugin_editor_focus_window(unsigned long long handle);
 SPHERE_PLUGIN_HOST_API void sphere_plugin_editor_resize_window(unsigned long long handle, int width, int height);
+SPHERE_PLUGIN_HOST_API SpherePluginHostString sphere_plugin_editor_drain_param_events_json();
 SPHERE_PLUGIN_HOST_API void sphere_plugin_host_free_string(SpherePluginHostString value);
 
 }

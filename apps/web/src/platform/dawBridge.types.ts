@@ -421,6 +421,16 @@ export interface DawBridgeSphereAudio {
   getTransportState():                                                       Promise<{ playing: boolean; positionSeconds: number }>;
   updateTrackParam(trackId: string, paramId: string, value: unknown):        Promise<void>;
   updateInsertParam(trackId: string, insertId: string, paramId: string, value: unknown): Promise<void>;
+  openInsertEditor(options: {
+    trackId: string;
+    insertId: string;
+    windowId: string;
+    title: string;
+    width?: number;
+    height?: number;
+  }):                                                                        Promise<number | null>;
+  closeInsertEditor(trackId: string, insertId: string):                      Promise<void>;
+  focusInsertEditor(trackId: string, insertId: string):                      Promise<boolean>;
   loadProject(snapshot: unknown):                                            Promise<void>;
   updateClip(clipId: string, patch: unknown):                                Promise<void>;
   getMeters():                                                               Promise<DawBridgeSphereMeterSnapshot>;

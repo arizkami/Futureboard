@@ -364,6 +364,47 @@ export function registerSphereAudioHandlers(_appDir: string): void {
     },
   );
 
+  ipcMain.handle(
+    IpcChannels.SphereAudioOpenInsertEditor,
+    (
+      _event,
+      options: {
+        trackId?: string;
+        insertId?: string;
+        windowId?: string;
+        title?: string;
+        width?: number;
+        height?: number;
+      },
+    ) => {
+      const trackId = typeof options?.trackId === "string" ? options.trackId : "";
+      const insertId = typeof options?.insertId === "string" ? options.insertId : "";
+      if (!trackId || !insertId) return null;
+      return svc.openInsertEditor(
+        trackId,
+        insertId,
+        typeof options.windowId === "string" ? options.windowId : `plugin-editor:${trackId}:${insertId}`,
+        typeof options.title === "string" ? options.title : "Plugin Editor",
+        typeof options.width === "number" ? options.width : 820,
+        typeof options.height === "number" ? options.height : 560,
+      );
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.SphereAudioCloseInsertEditor,
+    (_event, trackId: string, insertId: string) => {
+      svc.closeInsertEditor(trackId, insertId);
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.SphereAudioFocusInsertEditor,
+    (_event, trackId: string, insertId: string) => {
+      return svc.focusInsertEditor(trackId, insertId);
+    },
+  );
+
   // ── Project snapshot ───────────────────────────────────────────────────────
 
   ipcMain.handle(
