@@ -36,4 +36,13 @@ SPHERE_DAUX_VST3_API double sphere_daux_vst3_last_output_peak(
 SPHERE_DAUX_VST3_API double sphere_daux_vst3_last_difference_peak(
     SphereDauxVst3Processor* processor);
 
+/// Enqueue a normalized parameter change (0..1) for the given VST3 ParamID.
+/// The change is delivered to IAudioProcessor via inputParameterChanges on the
+/// next sphere_daux_vst3_process_stereo_sample call.
+/// Thread-safe: may be called from the audio thread or the UI thread.
+SPHERE_DAUX_VST3_API void sphere_daux_vst3_set_param(
+    SphereDauxVst3Processor* processor,
+    unsigned int param_id,
+    double value);
+
 }

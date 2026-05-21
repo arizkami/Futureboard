@@ -26,6 +26,13 @@ extern "C" {
     fn sphere_daux_vst3_last_input_peak(processor: *mut SphereDauxVst3Processor) -> c_double;
     fn sphere_daux_vst3_last_output_peak(processor: *mut SphereDauxVst3Processor) -> c_double;
     fn sphere_daux_vst3_last_difference_peak(processor: *mut SphereDauxVst3Processor) -> c_double;
+    /// Enqueue a normalized (0..1) VST3 parameter change.
+    /// Delivered to IAudioProcessor via inputParameterChanges on the next process call.
+    fn sphere_daux_vst3_set_param(
+        processor: *mut SphereDauxVst3Processor,
+        param_id: u32,
+        value: c_double,
+    );
 }
 
 #[derive(Debug)]
@@ -133,6 +140,22 @@ impl Vst3RuntimeProcessor {
         } else {
             unsafe { sphere_daux_vst3_last_difference_peak(self.raw) as f64 }
         }
+    }
+
+    /// Enqueue a normalized (0..1) parameter change for the given VST3 ParamID.
+    ///
+    /// The change is delivered to `IAudioProcessor` via `inputParameterChanges`
+    /// on the next `process_stereo_sample` call.  Safe to call from the audio
+    /// thread (inside command-drain) or from any other thread.
+    ///
+    /// `param_id` — the integer `Steinberg::Vst::ParamID` as exposed by the plugin.
+    /// `value`    — normalized value in `[0.0, 1.0]`.
+    #[inline]
+    pub fn set_param(&mut self, param_id: u32, value: f64) {
+        if self.raw.is_null() {
+            return;
+        }
+        unsafe { sphere_daux_vst3_set_param(self.raw, param_id, value as c_double) }
     }
 }
 

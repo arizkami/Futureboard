@@ -403,10 +403,27 @@ impl RuntimeProject {
         let Some(insert) = track.inserts.iter_mut().find(|i| i.id == insert_id) else {
             return;
         };
+
+        // "enabled" toggles bypass for all insert types.
         if param_id == "enabled" {
             insert.enabled = value >= 0.5;
             return;
         }
+
+        // For native VST3 inserts: forward numeric param IDs to the C++ processor.
+        // The web UI sends VST3 ParamIDs as decimal strings ("12345"), and values
+        // are normalized (0..1) as required by IParameterChanges.
+        if let Some(vst3) = insert.vst3.as_mut() {
+            if let Ok(vst3_param_id) = param_id.parse::<u32>() {
+                vst3.set_param(vst3_param_id, value as f64);
+                // Also persist in params map for snapshot/recall, then return —
+                // built-in DSP state rebuild is not applicable to VST3 inserts.
+                insert.params.insert(param_id.to_string(), Value::from(value as f64));
+                return;
+            }
+        }
+
+        // Built-in plugin insert: update params map and rebuild DSP state if needed.
         insert
             .params
             .insert(param_id.to_string(), Value::from(value as f64));
