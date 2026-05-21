@@ -29,18 +29,16 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
     eMultimedia, eRender, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
-    MMDeviceEnumerator, AUDCLNT_SHAREMODE_EXCLUSIVE,
-    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_NOPERSIST, DEVICE_STATE_ACTIVE,
+    MMDeviceEnumerator, AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+    AUDCLNT_STREAMFLAGS_NOPERSIST, DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
-use windows::Win32::System::Threading::{
-    CreateEventW, SetEvent, WaitForMultipleObjects,
-};
+use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
 
-use crate::backend::DauxDeviceConfig;
 use crate::backend::render::{drain_commands, fill_output_f32, LocalAudioState};
+use crate::backend::DauxDeviceConfig;
 use crate::command::EngineCommand;
 use crate::engine::SharedState;
 use crate::error::SphereAudioError;
@@ -56,25 +54,26 @@ extern "system" {
 
 // ── WASAPI HRESULT error codes ────────────────────────────────────────────────
 
-const E_AUDCLNT_DEVICE_IN_USE: i32           = 0x88890004u32 as i32;
-const E_AUDCLNT_UNSUPPORTED_FORMAT: i32      = 0x88890008u32 as i32;
+const E_AUDCLNT_DEVICE_IN_USE: i32 = 0x88890004u32 as i32;
+const E_AUDCLNT_UNSUPPORTED_FORMAT: i32 = 0x88890008u32 as i32;
 const E_AUDCLNT_EXCLUSIVE_MODE_NOT_ALLOWED: i32 = 0x8889000Eu32 as i32;
-const E_AUDCLNT_DEVICE_INVALIDATED: i32      = 0x88890014u32 as i32;
+const E_AUDCLNT_DEVICE_INVALIDATED: i32 = 0x88890014u32 as i32;
 const E_AUDCLNT_BUFFER_SIZE_NOT_ALIGNED: i32 = 0x88890019u32 as i32;
 
 /// Map a WASAPI HRESULT to a human-readable error string.
 fn classify_hresult(code: i32, context: &str) -> String {
     let detail = match code {
-        E_AUDCLNT_DEVICE_IN_USE =>
-            "Device is in use by another application (close other audio software)".to_string(),
-        E_AUDCLNT_UNSUPPORTED_FORMAT =>
-            "Unsupported audio format for exclusive mode".to_string(),
-        E_AUDCLNT_EXCLUSIVE_MODE_NOT_ALLOWED =>
-            "Exclusive mode is not allowed — enable it in Windows Sound > Advanced".to_string(),
-        E_AUDCLNT_DEVICE_INVALIDATED =>
-            "Audio device was disconnected or invalidated".to_string(),
-        E_AUDCLNT_BUFFER_SIZE_NOT_ALIGNED =>
-            "Buffer size is not aligned for this device. Try 256 or 512 samples.".to_string(),
+        E_AUDCLNT_DEVICE_IN_USE => {
+            "Device is in use by another application (close other audio software)".to_string()
+        }
+        E_AUDCLNT_UNSUPPORTED_FORMAT => "Unsupported audio format for exclusive mode".to_string(),
+        E_AUDCLNT_EXCLUSIVE_MODE_NOT_ALLOWED => {
+            "Exclusive mode is not allowed — enable it in Windows Sound > Advanced".to_string()
+        }
+        E_AUDCLNT_DEVICE_INVALIDATED => "Audio device was disconnected or invalidated".to_string(),
+        E_AUDCLNT_BUFFER_SIZE_NOT_ALIGNED => {
+            "Buffer size is not aligned for this device. Try 256 or 512 samples.".to_string()
+        }
         _ => format!("HRESULT 0x{:08X}", code as u32),
     };
     format!("WASAPI Exclusive {context}: {detail}")
@@ -104,11 +103,15 @@ unsafe impl Send for WasapiExclusiveHandle {}
 impl Drop for WasapiExclusiveHandle {
     fn drop(&mut self) {
         self.stop_flag.store(true, Ordering::Relaxed);
-        unsafe { let _ = SetEvent(self.stop_event); }
+        unsafe {
+            let _ = SetEvent(self.stop_event);
+        }
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-        unsafe { let _ = CloseHandle(self.stop_event); }
+        unsafe {
+            let _ = CloseHandle(self.stop_event);
+        }
     }
 }
 
@@ -122,7 +125,9 @@ pub fn open(
 ) -> Result<WasapiExclusiveHandle, SphereAudioError> {
     let output_device_id = config.output_device_id.clone();
     let requested_sr = config.sample_rate;
-    let buf_frames = config.buffer_size.unwrap_or(if config.safe_mode { 512 } else { 256 });
+    let buf_frames = config
+        .buffer_size
+        .unwrap_or(if config.safe_mode { 512 } else { 256 });
 
     let (tx, rx) = bounded::<EngineCommand>(512);
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -139,18 +144,25 @@ pub fn open(
 
     let t = thread::Builder::new()
         .name("daux-wasapi-excl".into())
-        .spawn(move || {
-            unsafe {
-                let stop_ev = HANDLE(stop_event_usize as *mut _);
-                wasapi_thread(
-                    output_device_id, requested_sr, buf_frames,
-                    rx, shared, initial_runtime, glitch2, stop2,
-                    stop_ev, info_tx,
-                );
-            }
+        .spawn(move || unsafe {
+            let stop_ev = HANDLE(stop_event_usize as *mut _);
+            wasapi_thread(
+                output_device_id,
+                requested_sr,
+                buf_frames,
+                rx,
+                shared,
+                initial_runtime,
+                glitch2,
+                stop2,
+                stop_ev,
+                info_tx,
+            );
         })
         .map_err(|e| {
-            unsafe { let _ = CloseHandle(stop_event); }
+            unsafe {
+                let _ = CloseHandle(stop_event);
+            }
             SphereAudioError::StreamOpenFailed(e.to_string())
         })?;
 
@@ -158,9 +170,7 @@ pub fn open(
         .recv_timeout(std::time::Duration::from_secs(8))
         .map_err(|e| {
             // Timeout or channel disconnect (thread panicked before sending).
-            SphereAudioError::StreamOpenFailed(
-                format!("WASAPI Exclusive thread init failed: {e}")
-            )
+            SphereAudioError::StreamOpenFailed(format!("WASAPI Exclusive thread init failed: {e}"))
         })
         .and_then(|r| r.map_err(SphereAudioError::StreamOpenFailed))?;
 
@@ -232,13 +242,21 @@ unsafe fn wasapi_thread(
 
     // ── Open exclusive stream with format negotiation ─────────────────────────
     match open_exclusive_stream(
-        &device, requested_sr, buf_frames,
-        &shared, &info_tx,
-        &glitch_counter, &stop_flag, stop_event,
-        &cmd_rx, initial_runtime, &device_name, mmcss_h,
+        &device,
+        requested_sr,
+        buf_frames,
+        &shared,
+        &info_tx,
+        &glitch_counter,
+        &stop_flag,
+        stop_event,
+        &cmd_rx,
+        initial_runtime,
+        &device_name,
+        mmcss_h,
     ) {
-        true => {}   // stream ran to completion
-        false => {}  // error already sent via info_tx
+        true => {}  // stream ran to completion
+        false => {} // error already sent via info_tx
     }
 
     cleanup_mmcss(mmcss_h);
@@ -288,8 +306,8 @@ unsafe fn open_exclusive_stream(
         return false;
     }
 
-    let native_sr   = (*mix_fmt).nSamplesPerSec.max(1);
-    let device_ch   = (*mix_fmt).nChannels as usize;
+    let native_sr = (*mix_fmt).nSamplesPerSec.max(1);
+    let device_ch = (*mix_fmt).nChannels as usize;
     let sample_rate = requested_sr.unwrap_or(native_sr);
 
     // ── Query device periods ───────────────────────────────────────────────────
@@ -314,9 +332,8 @@ unsafe fn open_exclusive_stream(
     // ── Initialize IAudioClient (exclusive event-driven) ──────────────────────
     let flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST;
 
-    let init_result = client.Initialize(
-        AUDCLNT_SHAREMODE_EXCLUSIVE, flags, hns, hns, mix_fmt, None
-    );
+    let init_result =
+        client.Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, flags, hns, hns, mix_fmt, None);
 
     // Handle BUFFER_SIZE_NOT_ALIGNED: re-create client with driver-aligned period.
     let client = match init_result {
@@ -330,7 +347,9 @@ unsafe fn open_exclusive_stream(
                     let _ = info_tx.send(Err(format!(
                         "WASAPI Exclusive: buffer not aligned; GetBufferSize failed: {e2}"
                     )));
-                    windows::Win32::System::Com::CoTaskMemFree(Some(mix_fmt as *const _ as *const _));
+                    windows::Win32::System::Com::CoTaskMemFree(Some(
+                        mix_fmt as *const _ as *const _,
+                    ));
                     return false;
                 }
             };
@@ -346,12 +365,19 @@ unsafe fn open_exclusive_stream(
                     let _ = info_tx.send(Err(format!(
                         "WASAPI Exclusive: Re-Activate for alignment retry failed: {e2}"
                     )));
-                    windows::Win32::System::Com::CoTaskMemFree(Some(mix_fmt as *const _ as *const _));
+                    windows::Win32::System::Com::CoTaskMemFree(Some(
+                        mix_fmt as *const _ as *const _,
+                    ));
                     return false;
                 }
             };
             if let Err(e2) = client2.Initialize(
-                AUDCLNT_SHAREMODE_EXCLUSIVE, flags, aligned_hns, aligned_hns, mix_fmt, None
+                AUDCLNT_SHAREMODE_EXCLUSIVE,
+                flags,
+                aligned_hns,
+                aligned_hns,
+                mix_fmt,
+                None,
             ) {
                 let msg = classify_hresult(e2.code().0, "Initialize (aligned retry)");
                 let _ = info_tx.send(Err(msg));
@@ -425,7 +451,9 @@ unsafe fn open_exclusive_stream(
 
     // ── Render loop ───────────────────────────────────────────────────────────
     loop {
-        if stop_flag.load(Ordering::Relaxed) { break; }
+        if stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
 
         let wait_handles = [buf_event, stop_event];
         let wait = WaitForMultipleObjects(&wait_handles, false, 2000);
@@ -438,23 +466,34 @@ unsafe fn open_exclusive_stream(
             }
             break;
         }
-        if stop_flag.load(Ordering::Relaxed) { break; }
+        if stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
 
         drain_commands(cmd_rx, &mut runtime, shared, &mut local, sample_rate);
 
         let padding = client.GetCurrentPadding().unwrap_or(actual_buf);
         let frames = actual_buf.saturating_sub(padding);
-        if frames == 0 { continue; }
+        if frames == 0 {
+            continue;
+        }
 
         let buf_ptr = match render.GetBuffer(frames) {
             Ok(p) => p,
-            Err(_) => { glitch_counter.fetch_add(1, Ordering::Relaxed); continue; }
+            Err(_) => {
+                glitch_counter.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
         };
 
         let total = frames as usize * device_ch;
-        if scratch.len() < total { scratch.resize(total, 0.0f32); }
+        if scratch.len() < total {
+            scratch.resize(total, 0.0f32);
+        }
         let s = &mut scratch[..total];
-        for x in s.iter_mut() { *x = 0.0; }
+        for x in s.iter_mut() {
+            *x = 0.0;
+        }
         fill_output_f32(s, device_ch, &mut runtime, shared, &mut local);
 
         let out: &mut [f32] = std::slice::from_raw_parts_mut(buf_ptr as *mut f32, total);
@@ -504,8 +543,8 @@ unsafe fn resolve_device(
 
 unsafe fn get_device_friendly_name(device: &IMMDevice) -> String {
     use windows::Win32::Devices::Properties::DEVPKEY_Device_FriendlyName;
-    use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, PROPERTYKEY};
     use windows::Win32::System::Com::STGM_READ;
+    use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, PROPERTYKEY};
 
     let store: IPropertyStore = match device.OpenPropertyStore(STGM_READ) {
         Ok(s) => s,
@@ -529,7 +568,9 @@ unsafe fn get_device_friendly_name(device: &IMMDevice) -> String {
         let ptr = (*raw).pwsz;
         if !ptr.is_null() {
             let mut len = 0usize;
-            while *ptr.add(len) != 0 { len += 1; }
+            while *ptr.add(len) != 0 {
+                len += 1;
+            }
             let slice = std::slice::from_raw_parts(ptr, len);
             let s = String::from_utf16_lossy(slice).to_string();
             windows::Win32::System::Com::CoTaskMemFree(Some(ptr as *const _));

@@ -11,3 +11,9 @@
 [submodule "external/vst3sdk"]
 	path = external/vst3sdk
 	url = https://github.com/steinbergmedia/vst3sdk
+[submodule "external/clap"]
+	path = external/clap
+	url = https://github.com/free-audio/clap
+[submodule "external/clap-helpers"]
+	path = external/clap-helpers
+	url = https://github.com/free-audio/clap-helpers

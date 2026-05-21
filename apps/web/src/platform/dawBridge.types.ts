@@ -179,7 +179,7 @@ export type DawBridgeAudioPluginRegistryEntry = {
   id: string;
   name: string;
   vendor: string;
-  format: "VST3" | (string & {});
+  format: "VST3" | "CLAP" | (string & {});
   category: string;
   kind: DawBridgeAudioPluginKind;
   path: string;

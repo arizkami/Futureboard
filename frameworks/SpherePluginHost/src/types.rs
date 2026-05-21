@@ -7,6 +7,8 @@ pub struct HostStatus {
     pub available: bool,
     pub backend: String,
     pub vst3_sdk: bool,
+    pub clap_sdk: bool,
+    pub clap_helpers: bool,
     pub message: String,
 }
 

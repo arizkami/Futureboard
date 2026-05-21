@@ -153,7 +153,8 @@ pub fn list_available_backends() -> Vec<BackendInfo> {
             name: "DAUx WASAPI Exclusive".into(),
             available: true,
             is_default: false,
-            description: "WASAPI Exclusive + MMCSS — lowest latency, requires device support".into(),
+            description: "WASAPI Exclusive + MMCSS — lowest latency, requires device support"
+                .into(),
         });
         list.push(BackendInfo {
             id: "mme".into(),

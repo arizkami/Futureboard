@@ -33,6 +33,8 @@ type NativePluginInfo = {
 type PluginHostAddon = {
   initPluginHost?: () => { available?: boolean; backend?: string; message?: string };
   scanVst3?: (paths: string[]) => NativePluginInfo[];
+  scanClap?: (paths: string[]) => NativePluginInfo[];
+  scanAudioPlugins?: (paths: string[]) => NativePluginInfo[];
   getBackendVersion?: () => string;
 };
 
@@ -102,8 +104,10 @@ function presetRootPath(): string {
 
 function presetSubfolders(): string[] {
   return [
-    path.join(presetRootPath(), "Effects"),
-    path.join(presetRootPath(), "Instruments"),
+    path.join(presetRootPath(), "VST3", "Effects"),
+    path.join(presetRootPath(), "VST3", "Instruments"),
+    path.join(presetRootPath(), "CLAP", "Effects"),
+    path.join(presetRootPath(), "CLAP", "Instruments"),
   ];
 }
 
@@ -149,25 +153,33 @@ function defaultScanPaths(): string[] {
     const programFilesX86 = process.env["ProgramFiles(x86)"];
     const localAppData = process.env.LOCALAPPDATA;
     paths.add(path.join(programFiles, "Common Files", "VST3"));
+    paths.add(path.join(programFiles, "Common Files", "CLAP"));
     paths.add(path.join(programFiles, "VSTPlugins"));
     paths.add(path.join(programFiles, "Steinberg", "VSTPlugins"));
     if (programFilesX86) paths.add(path.join(programFilesX86, "Common Files", "VST3"));
+    if (programFilesX86) paths.add(path.join(programFilesX86, "Common Files", "CLAP"));
     if (programFilesX86) paths.add(path.join(programFilesX86, "VSTPlugins"));
     if (programFilesX86) paths.add(path.join(programFilesX86, "Steinberg", "VSTPlugins"));
     if (localAppData) paths.add(path.join(localAppData, "Programs", "Common", "VST3"));
+    if (localAppData) paths.add(path.join(localAppData, "Programs", "Common", "CLAP"));
   } else if (process.platform === "darwin") {
     paths.add("/Library/Audio/Plug-Ins/VST3");
+    paths.add("/Library/Audio/Plug-Ins/CLAP");
     paths.add(path.join(app.getPath("home"), "Library", "Audio", "Plug-Ins", "VST3"));
+    paths.add(path.join(app.getPath("home"), "Library", "Audio", "Plug-Ins", "CLAP"));
   } else {
     paths.add("/usr/lib/vst3");
     paths.add("/usr/local/lib/vst3");
+    paths.add("/usr/lib/clap");
+    paths.add("/usr/local/lib/clap");
     paths.add(path.join(app.getPath("home"), ".vst3"));
+    paths.add(path.join(app.getPath("home"), ".clap"));
   }
-  return [...paths].filter((p) => fs.existsSync(p));
+  return [...paths];
 }
 
-function stableId(input: string): string {
-  return `vst3:${createHash("sha1").update(input).digest("hex").slice(0, 24)}`;
+function stableId(input: string, format = "plugin"): string {
+  return `${format.toLowerCase()}:${createHash("sha1").update(input).digest("hex").slice(0, 24)}`;
 }
 
 function safeFileName(value: string): string {
@@ -191,7 +203,7 @@ function rowFromDb(row: Record<string, unknown>): AudioPluginRegistryEntry {
     id: String(row.id),
     name: String(row.name),
     vendor: String(row.vendor),
-    format: String(row.format) as "VST3",
+    format: String(row.format) as "VST3" | "CLAP",
     category: String(row.category),
     kind: row.kind === "instrument" ? "instrument" : "effect",
     path: String(row.path),
@@ -209,15 +221,16 @@ function normalizeNativePlugin(plugin: NativePluginInfo, scannedAt: number): Aud
   const vendor = plugin.vendor?.trim() || "Unknown Vendor";
   const category = plugin.category?.trim() || "Uncategorized";
   const classId = plugin.classId ?? plugin.class_id ?? undefined;
+  const format = (plugin.format || "VST3").toUpperCase();
   const kind = classifyPlugin(category, name);
-  const id = plugin.id || stableId(`${plugin.path}:${classId ?? name}`);
-  const presetDir = path.join(presetRootPath(), kind === "instrument" ? "Instruments" : "Effects");
+  const id = plugin.id || stableId(`${plugin.path}:${classId ?? name}`, format);
+  const presetDir = path.join(presetRootPath(), format === "CLAP" ? "CLAP" : "VST3", kind === "instrument" ? "Instruments" : "Effects");
   const presetName = `${safeFileName(name)}.pst`;
   return {
     id,
     name,
     vendor,
-    format: (plugin.format || "VST3") as "VST3",
+    format: format as "VST3" | "CLAP",
     category,
     kind,
     path: plugin.path,
@@ -341,17 +354,18 @@ function delayImmediate(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-function isVst3Bundle(pluginPath: string): boolean {
-  return path.extname(pluginPath).toLowerCase() === ".vst3";
+function isSupportedPluginBundle(pluginPath: string): boolean {
+  const extension = path.extname(pluginPath).toLowerCase();
+  return extension === ".vst3" || extension === ".clap";
 }
 
-async function discoverVst3Bundles(root: string, onFolder?: (folderPath: string, discovered: number) => void): Promise<string[]> {
+async function discoverPluginBundles(root: string, onFolder?: (folderPath: string, discovered: number) => void): Promise<string[]> {
   const found: string[] = [];
   const queue = [root];
   while (queue.length > 0) {
     const current = queue.shift();
     if (!current) continue;
-    if (isVst3Bundle(current)) {
+    if (isSupportedPluginBundle(current)) {
       found.push(current);
       continue;
     }
@@ -365,7 +379,7 @@ async function discoverVst3Bundles(root: string, onFolder?: (folderPath: string,
 
     for (const entry of entries) {
       const child = path.join(current, entry.name);
-      if (isVst3Bundle(child) && (entry.isDirectory() || entry.isFile())) {
+      if (isSupportedPluginBundle(child) && (entry.isDirectory() || entry.isFile())) {
         found.push(child);
         continue;
       }
@@ -388,7 +402,7 @@ function scannerWorkerPath(): string {
 
 function scanBundleInWorker(bundlePath: string, timeoutMs = 45000): Promise<NativePluginInfo[]> {
   return new Promise((resolve, reject) => {
-    const requestId = stableId(`${bundlePath}:${Date.now()}`);
+    const requestId = stableId(`${bundlePath}:${Date.now()}`, "scan");
     let settled = false;
     let child: ChildProcess | null = null;
     const finish = (callback: () => void) => {
@@ -468,7 +482,7 @@ export class PluginHostNative {
       }
     }
     return {
-      available: Boolean(native?.scanVst3),
+      available: Boolean(native?.scanAudioPlugins ?? native?.scanVst3 ?? native?.scanClap),
       backend,
       message,
       dbPath: pluginDbPath(),
@@ -489,13 +503,14 @@ export class PluginHostNative {
   async scanVst3(paths?: string[], onProgress?: ScanProgressCallback): Promise<AudioPluginScanResult> {
     const status = this.getStatus();
     const native = loadAddon();
-    const scanPaths = (paths?.length ? paths : status.defaultScanPaths)
+    const requestedPaths = (paths?.length ? paths : status.defaultScanPaths)
       .map((p) => path.normalize(p))
-      .filter((p, index, arr) => arr.indexOf(p) === index && fs.existsSync(p));
+      .filter((p, index, arr) => arr.indexOf(p) === index);
+    const scanPaths = requestedPaths.filter((p) => fs.existsSync(p));
     const failed: AudioPluginScanResult["failed"] = [];
     const plugins: AudioPluginRegistryEntry[] = [];
-    onProgress?.({ type: "started", status, scannedPaths: scanPaths });
-    if (!native?.scanVst3) {
+    onProgress?.({ type: "started", status, scannedPaths: requestedPaths });
+    if (!(native?.scanAudioPlugins ?? native?.scanVst3 ?? native?.scanClap)) {
       const result = { status, plugins: this.listPlugins(), scannedPaths: scanPaths, generatedPresets: 0, failed };
       onProgress?.({ type: "complete", result });
       return result;
@@ -509,7 +524,7 @@ export class PluginHostNative {
     for (const root of scanPaths) {
       let bundles: string[];
       try {
-        bundles = await discoverVst3Bundles(root, (folderPath, discovered) => {
+        bundles = await discoverPluginBundles(root, (folderPath, discovered) => {
           onProgress?.({ type: "folder", path: folderPath, discovered });
         });
       } catch (error) {

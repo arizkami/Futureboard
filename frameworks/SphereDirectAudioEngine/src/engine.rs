@@ -19,26 +19,26 @@ use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, Sample, SampleFormat, SizedSample};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
+use sphere_audio_plugins::{canonical_plugin_id, process_stereo_sample};
 
 use crate::audio_file::AudioFileBuffer;
+#[cfg(target_os = "windows")]
+use crate::backend::wasapi_exclusive::{self, WasapiExclusiveHandle};
 use crate::backend::{
     cpal_backend::{self, CpalStreamHandle},
     list_available_backends, BackendKind, DauxDeviceConfig,
 };
-#[cfg(target_os = "windows")]
-use crate::backend::wasapi_exclusive::{self, WasapiExclusiveHandle};
 use crate::command::EngineCommand;
 use crate::device;
 use crate::dsp::{meter::smooth_peak, oscillator::SineOscillator};
 use crate::error::SphereAudioError;
 use crate::graph::{MasterState, TrackState};
-use crate::runtime::{RuntimeInsert, RuntimePreviewMode, RuntimeProject, RuntimeTrack};
 use crate::recording::{self, RecordingSession};
+use crate::runtime::{RuntimeInsert, RuntimePreviewMode, RuntimeProject, RuntimeTrack};
 use crate::types::{
     EngineProjectSnapshot, EngineStatus, JsAudioDeviceInfo, JsDauxBackendInfo, JsDauxConfig,
     JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsRecordingResult,
-    JsRecordingStatus, JsStartRecordingConfig, JsSphereAudioStatus,
-    JsTrackMeterSnapshot,
+    JsRecordingStatus, JsSphereAudioStatus, JsStartRecordingConfig, JsTrackMeterSnapshot,
 };
 
 // ── Version ───────────────────────────────────────────────────────────────────
@@ -541,7 +541,12 @@ impl EngineInner {
         let clips_with_path = snapshot
             .clips
             .iter()
-            .filter(|c| c.media_path.as_deref().map(|p| !p.is_empty()).unwrap_or(false))
+            .filter(|c| {
+                c.media_path
+                    .as_deref()
+                    .map(|p| !p.is_empty())
+                    .unwrap_or(false)
+            })
             .count();
         eprintln!(
             "[SphereAudio] load_project: id='{}' tracks={} snapshot_clips={} clips_with_path={}",
@@ -674,11 +679,9 @@ impl EngineInner {
 
     /// Stop the active recording, finalize WAV files, and return per-track results.
     pub fn stop_recording(&self) -> Result<Vec<JsRecordingResult>, SphereAudioError> {
-        let session = self
-            .recording
-            .lock()
-            .take()
-            .ok_or_else(|| SphereAudioError::NativeError("No active recording session".to_string()))?;
+        let session = self.recording.lock().take().ok_or_else(|| {
+            SphereAudioError::NativeError("No active recording session".to_string())
+        })?;
         recording::stop_recording(session)
     }
 
@@ -787,12 +790,12 @@ impl EngineInner {
         let previous_config = {
             let prev = self.daux_config.lock().clone();
             JsDauxConfig {
-                backend_id:       prev.backend.id().to_string(),
+                backend_id: prev.backend.id().to_string(),
                 output_device_id: prev.output_device_id.clone(),
-                sample_rate:      prev.sample_rate,
-                buffer_size:      prev.buffer_size,
-                mmcss_priority:   prev.mmcss_priority,
-                safe_mode:        prev.safe_mode,
+                sample_rate: prev.sample_rate,
+                buffer_size: prev.buffer_size,
+                mmcss_priority: prev.mmcss_priority,
+                safe_mode: prev.safe_mode,
             }
         };
         let had_previous_stream = self.active_stream.lock().is_some();
@@ -821,9 +824,7 @@ impl EngineInner {
                             Err(SphereAudioError::StreamOpenFailed(restore_msg))
                         }
                         Err(restore_err) => {
-                            eprintln!(
-                                "[DAUx] open_daux_safe: fallback also failed: {restore_err}"
-                            );
+                            eprintln!("[DAUx] open_daux_safe: fallback also failed: {restore_err}");
                             let combined = format!(
                                 "Exclusive failed: {err_msg}. Fallback also failed: {restore_err}"
                             );
@@ -1016,13 +1017,19 @@ pub fn render_project_sample(
         let output_track_id = runtime.tracks[track_index].output_track_id.clone();
         let sends = runtime.tracks[track_index].sends.clone();
         let (track_l, track_r) = apply_track_chain(l, r, &mut runtime.tracks[track_index]);
-        let (track_l, track_r) = apply_preview_mode(track_l, track_r, runtime.tracks[track_index].preview_mode);
+        let (track_l, track_r) =
+            apply_preview_mode(track_l, track_r, runtime.tracks[track_index].preview_mode);
         runtime.accumulate_track_meter(track_index, track_l, track_r);
 
-        if let Some(target_id) = output_track_id.as_deref().filter(|id| !is_master_output(id)) {
+        if let Some(target_id) = output_track_id
+            .as_deref()
+            .filter(|id| !is_master_output(id))
+        {
             if let Some(target_index) = runtime.tracks.iter().position(|t| t.id == target_id) {
-                let (bus_l, bus_r) = apply_track_chain(track_l, track_r, &mut runtime.tracks[target_index]);
-                let (bus_l, bus_r) = apply_preview_mode(bus_l, bus_r, runtime.tracks[target_index].preview_mode);
+                let (bus_l, bus_r) =
+                    apply_track_chain(track_l, track_r, &mut runtime.tracks[target_index]);
+                let (bus_l, bus_r) =
+                    apply_preview_mode(bus_l, bus_r, runtime.tracks[target_index].preview_mode);
                 runtime.accumulate_track_meter(target_index, bus_l, bus_r);
                 out_l += bus_l;
                 out_r += bus_r;
@@ -1055,7 +1062,11 @@ pub fn render_project_sample(
                 track_r * send.level,
                 &mut runtime.tracks[return_track_index],
             );
-            let (send_l, send_r) = apply_preview_mode(send_l, send_r, runtime.tracks[return_track_index].preview_mode);
+            let (send_l, send_r) = apply_preview_mode(
+                send_l,
+                send_r,
+                runtime.tracks[return_track_index].preview_mode,
+            );
             runtime.accumulate_track_meter(return_track_index, send_l, send_r);
             out_l += send_l;
             out_r += send_r;
@@ -1101,94 +1112,15 @@ pub fn apply_preview_mode(l: f32, r: f32, mode: RuntimePreviewMode) -> (f32, f32
 
 #[inline]
 pub fn apply_insert(l: f32, r: f32, insert: &mut RuntimeInsert) -> (f32, f32) {
-    if !insert.enabled || !param_bool(insert, "power", true) {
-        return (l, r);
-    }
-
-    let mut wet_l = l;
-    let mut wet_r = r;
-
-    if is_eq_insert(insert) {
-        for filter in &mut insert.dsp.eq_l {
-            wet_l = filter.process(wet_l);
-        }
-        for filter in &mut insert.dsp.eq_r {
-            wet_r = filter.process(wet_r);
-        }
-    }
-
-    let drive = (param_f32(insert, "drive", 0.0)
-        + param_f32(insert, "saturation", 0.0) * 0.5
-        + param_f32(insert, "color", 0.0) * 0.12)
-        .clamp(0.0, 100.0)
-        / 100.0;
-    if drive > 0.0 {
-        let amount = 1.0 + drive * 8.0;
-        wet_l = (wet_l * amount).tanh() / amount.tanh().max(0.001);
-        wet_r = (wet_r * amount).tanh() / amount.tanh().max(0.001);
-    }
-
-    let reduction = param_f32(insert, "peakReduction", 0.0).clamp(0.0, 100.0) / 100.0;
-    if reduction > 0.0 {
-        let threshold = 0.9 - reduction * 0.82;
-        wet_l = soft_knee_compress(wet_l, threshold, if insert.kind.contains("limit") { 10.0 } else { 3.0 });
-        wet_r = soft_knee_compress(wet_r, threshold, if insert.kind.contains("limit") { 10.0 } else { 3.0 });
-    }
-
-    let mut db = 0.0;
-    db += param_f32(insert, "outputDb", 0.0);
-    db += param_f32(insert, "gainDb", 0.0);
-    db += param_f32(insert, "outputTrimDb", 0.0);
-    db += param_f32(insert, "out", 0.0);
-    wet_l *= db_to_linear(db);
-    wet_r *= db_to_linear(db);
-
-    let mix = param_f32(insert, "mix", 100.0).clamp(0.0, 100.0) / 100.0;
-    (
-        (l * (1.0 - mix) + wet_l * mix).clamp(-1.5, 1.5),
-        (r * (1.0 - mix) + wet_r * mix).clamp(-1.5, 1.5),
+    let plugin_id = canonical_plugin_id(&insert.kind);
+    process_stereo_sample(
+        plugin_id,
+        insert.enabled,
+        &insert.params,
+        &mut insert.dsp,
+        l,
+        r,
     )
-}
-
-#[inline]
-pub fn is_eq_insert(insert: &RuntimeInsert) -> bool {
-    let kind = insert.kind.to_ascii_lowercase();
-    kind == "eq" || kind == "equz8" || kind.contains("eq")
-}
-
-#[inline]
-pub fn param_f32(insert: &RuntimeInsert, key: &str, fallback: f32) -> f32 {
-    insert
-        .params
-        .get(key)
-        .and_then(|v| v.as_f64())
-        .map(|v| v as f32)
-        .unwrap_or(fallback)
-}
-
-#[inline]
-pub fn param_bool(insert: &RuntimeInsert, key: &str, fallback: bool) -> bool {
-    insert
-        .params
-        .get(key)
-        .and_then(|v| v.as_bool().or_else(|| v.as_f64().map(|n| n >= 0.5)))
-        .unwrap_or(fallback)
-}
-
-#[inline]
-pub fn db_to_linear(db: f32) -> f32 {
-    10.0f32.powf(db / 20.0)
-}
-
-#[inline]
-pub fn soft_knee_compress(x: f32, threshold: f32, ratio: f32) -> f32 {
-    let sign = x.signum();
-    let a = x.abs();
-    if a <= threshold {
-        return x;
-    }
-    let over = a - threshold;
-    sign * (threshold + over / ratio.max(1.0))
 }
 
 #[inline]

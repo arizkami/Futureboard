@@ -37,8 +37,8 @@ use napi_derive::napi;
 use engine::EngineInner;
 use types::{
     EngineProjectSnapshot, JsAudioDeviceInfo, JsDauxBackendInfo, JsDauxConfig, JsDauxStatus,
-    JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsRecordingResult,
-    JsRecordingStatus, JsStartRecordingConfig, JsSphereAudioStatus, JsWavPeakResult,
+    JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot, JsRecordingResult, JsRecordingStatus,
+    JsSphereAudioStatus, JsStartRecordingConfig, JsWavPeakResult,
 };
 
 // ── N-API class ───────────────────────────────────────────────────────────────
@@ -82,6 +82,20 @@ impl SphereDirectAudioEngine {
     #[napi]
     pub fn get_status(&self) -> JsSphereAudioStatus {
         self.inner.get_status()
+    }
+
+    /// Return built-in SphereAudioPlugins descriptors as JSON.
+    ///
+    /// The renderer can use this to build extension-style plugin browsers while
+    /// DAUx uses the same IDs in the realtime insert chain.
+    #[napi]
+    pub fn get_builtin_audio_plugins_json(&self) -> napi::Result<String> {
+        serde_json::to_string(&sphere_audio_plugins::builtin_descriptors()).map_err(|error| {
+            napi::Error::new(
+                napi::Status::GenericFailure,
+                format!("Failed to serialize built-in audio plugin descriptors: {error}"),
+            )
+        })
     }
 
     // ── Device enumeration ───────────────────────────────────────────────────
@@ -359,7 +373,9 @@ impl SphereDirectAudioEngine {
         samples_per_peak: u32,
     ) -> napi::Result<JsWavPeakResult> {
         let result = audio_file::generate_wav_peaks_from_path(&file_path, samples_per_peak)
-            .map_err(|e| napi::Error::from_reason(format!("Waveform peak generation failed: {e}")))?;
+            .map_err(|e| {
+                napi::Error::from_reason(format!("Waveform peak generation failed: {e}"))
+            })?;
         Ok(JsWavPeakResult {
             file_id,
             sample_rate: result.sample_rate,

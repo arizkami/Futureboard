@@ -48,9 +48,13 @@ impl LocalAudioState {
 // ── f32 helper store/load ─────────────────────────────────────────────────────
 
 #[inline]
-pub fn f32_store(v: f32) -> u32 { v.to_bits() }
+pub fn f32_store(v: f32) -> u32 {
+    v.to_bits()
+}
 #[inline]
-pub fn f32_load(v: u32) -> f32 { f32::from_bits(v) }
+pub fn f32_load(v: u32) -> f32 {
+    f32::from_bits(v)
+}
 
 // ── Command drain ─────────────────────────────────────────────────────────────
 
@@ -107,7 +111,9 @@ pub fn drain_commands(
                 shared.position_samples.store(pos, Ordering::Relaxed);
             }
             EngineCommand::SetMasterVolume { value } => {
-                shared.master_volume.store(f32_store(value), Ordering::Relaxed);
+                shared
+                    .master_volume
+                    .store(f32_store(value), Ordering::Relaxed);
             }
             EngineCommand::SetTrackVolume { track_id, value } => {
                 runtime.update_track_volume(&track_id, value);
@@ -125,7 +131,12 @@ pub fn drain_commands(
             EngineCommand::SetTrackPreviewMode { track_id, value } => {
                 runtime.update_track_preview_mode(&track_id, RuntimePreviewMode::from_code(value));
             }
-            EngineCommand::SetInsertParam { track_id, insert_id, param_id, value } => {
+            EngineCommand::SetInsertParam {
+                track_id,
+                insert_id,
+                param_id,
+                value,
+            } => {
                 runtime.update_insert_param(&track_id, &insert_id, &param_id, value);
             }
         }
@@ -214,9 +225,20 @@ pub fn fill_output_f32(
     }
 
     // Update meters.
-    let rms_l = if frames > 0 { (sum_sq_l / frames as f32).sqrt() } else { 0.0 };
+    let rms_l = if frames > 0 {
+        (sum_sq_l / frames as f32).sqrt()
+    } else {
+        0.0
+    };
     let (pk_r, rms_r) = if channels >= 2 {
-        (peak_r, if frames > 0 { (sum_sq_r / frames as f32).sqrt() } else { 0.0 })
+        (
+            peak_r,
+            if frames > 0 {
+                (sum_sq_r / frames as f32).sqrt()
+            } else {
+                0.0
+            },
+        )
     } else {
         (peak_l, rms_l)
     };
@@ -225,8 +247,12 @@ pub fn fill_output_f32(
     local.prev_peak_l = smooth_peak(local.prev_peak_l, peak_l, PEAK_DECAY);
     local.prev_peak_r = smooth_peak(local.prev_peak_r, pk_r, PEAK_DECAY);
 
-    shared.peak_l.store(f32_store(local.prev_peak_l), Ordering::Relaxed);
-    shared.peak_r.store(f32_store(local.prev_peak_r), Ordering::Relaxed);
+    shared
+        .peak_l
+        .store(f32_store(local.prev_peak_l), Ordering::Relaxed);
+    shared
+        .peak_r
+        .store(f32_store(local.prev_peak_r), Ordering::Relaxed);
     shared.rms_l.store(f32_store(rms_l), Ordering::Relaxed);
     shared.rms_r.store(f32_store(rms_r), Ordering::Relaxed);
 

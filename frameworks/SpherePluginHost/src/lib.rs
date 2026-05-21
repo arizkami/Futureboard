@@ -5,18 +5,23 @@ mod scanner;
 mod types;
 
 use napi_derive::napi;
-use scanner::scan_vst3_paths;
+use scanner::{scan_audio_plugin_paths, scan_clap_paths, scan_vst3_paths};
 use types::{HostStatus, PluginInfo};
 
 #[napi]
 pub fn init_plugin_host() -> napi::Result<HostStatus> {
-    let vst3_sdk_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../external/vst3sdk/public.sdk");
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let vst3_sdk_path = manifest_dir.join("../../external/vst3sdk/public.sdk");
+    let clap_sdk_path = manifest_dir.join("../../external/clap/include/clap/clap.h");
+    let clap_helpers_path = manifest_dir.join("../../external/clap-helpers/include/clap/helpers");
     Ok(HostStatus {
         available: true,
-        backend: "vst3-sdk-native-scanner".to_string(),
+        backend: "vst3-clap-native-scanner".to_string(),
         vst3_sdk: vst3_sdk_path.exists(),
-        message: "SpherePluginHost initialized. VST3 factory metadata scanner is available.".to_string(),
+        clap_sdk: clap_sdk_path.exists(),
+        clap_helpers: clap_helpers_path.exists(),
+        message: "SpherePluginHost initialized. VST3 and CLAP metadata scanners are available."
+            .to_string(),
     })
 }
 
@@ -28,6 +33,16 @@ pub fn shutdown_plugin_host() -> napi::Result<()> {
 #[napi]
 pub fn scan_vst3(paths: Vec<String>) -> napi::Result<Vec<PluginInfo>> {
     scan_vst3_paths(&paths).map_err(napi::Error::from_reason)
+}
+
+#[napi]
+pub fn scan_clap(paths: Vec<String>) -> napi::Result<Vec<PluginInfo>> {
+    scan_clap_paths(&paths).map_err(napi::Error::from_reason)
+}
+
+#[napi]
+pub fn scan_audio_plugins(paths: Vec<String>) -> napi::Result<Vec<PluginInfo>> {
+    scan_audio_plugin_paths(&paths).map_err(napi::Error::from_reason)
 }
 
 #[napi]

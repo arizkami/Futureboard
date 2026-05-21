@@ -22,6 +22,8 @@ type NativePluginInfo = {
 
 type PluginHostAddon = {
   scanVst3?: (paths: string[]) => NativePluginInfo[];
+  scanClap?: (paths: string[]) => NativePluginInfo[];
+  scanAudioPlugins?: (paths: string[]) => NativePluginInfo[];
 };
 
 type RequestMessage = {
@@ -66,8 +68,9 @@ process.on("message", (message: RequestMessage) => {
   try {
     if (!message?.id || !message.path) throw new Error("Invalid scanner request");
     const addon = loadAddon();
-    if (!addon.scanVst3) throw new Error("PluginHost scanVst3 export is unavailable");
-    const plugins = addon.scanVst3([message.path]);
+    const scan = addon.scanAudioPlugins ?? addon.scanVst3 ?? addon.scanClap;
+    if (!scan) throw new Error("PluginHost scanAudioPlugins export is unavailable");
+    const plugins = scan([message.path]);
     process.send?.({ id: message.id, ok: true, plugins });
   } catch (error) {
     process.send?.({ id: message?.id, ok: false, error: String(error) });

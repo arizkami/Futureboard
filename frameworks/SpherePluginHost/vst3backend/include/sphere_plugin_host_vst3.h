@@ -14,6 +14,7 @@ struct SpherePluginHostString {
 };
 
 SPHERE_PLUGIN_HOST_API SpherePluginHostString sphere_vst3_scan_path_json(const char* path);
+SPHERE_PLUGIN_HOST_API SpherePluginHostString sphere_clap_scan_path_json(const char* path);
 SPHERE_PLUGIN_HOST_API void sphere_plugin_host_free_string(SpherePluginHostString value);
 
 }

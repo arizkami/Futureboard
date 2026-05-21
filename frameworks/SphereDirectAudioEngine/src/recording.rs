@@ -25,8 +25,8 @@ use std::sync::{
     Arc,
 };
 
-use crossbeam_channel::bounded;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use crossbeam_channel::bounded;
 
 use crate::error::SphereAudioError;
 use crate::types::{JsRecordingResult, JsStartRecordingConfig};
@@ -89,15 +89,15 @@ fn write_wav_placeholder(file: &mut std::fs::File, channels: u16, sample_rate: u
     let _ = file.write_all(&0u32.to_le_bytes()); // riff size — filled later
     let _ = file.write_all(b"WAVE");
     let _ = file.write_all(b"fmt ");
-    let _ = file.write_all(&16u32.to_le_bytes());        // fmt chunk length
-    let _ = file.write_all(&3u16.to_le_bytes());         // IEEE float PCM
+    let _ = file.write_all(&16u32.to_le_bytes()); // fmt chunk length
+    let _ = file.write_all(&3u16.to_le_bytes()); // IEEE float PCM
     let _ = file.write_all(&channels.to_le_bytes());
     let _ = file.write_all(&sample_rate.to_le_bytes());
     let _ = file.write_all(&byte_rate.to_le_bytes());
     let _ = file.write_all(&block_align.to_le_bytes());
-    let _ = file.write_all(&32u16.to_le_bytes());        // 32-bit float
+    let _ = file.write_all(&32u16.to_le_bytes()); // 32-bit float
     let _ = file.write_all(b"data");
-    let _ = file.write_all(&0u32.to_le_bytes());         // data size — filled later
+    let _ = file.write_all(&0u32.to_le_bytes()); // data size — filled later
 }
 
 /// Seek to the start of the file and patch in the correct RIFF / data sizes.
@@ -189,7 +189,11 @@ fn disk_writer_thread(
 
     // Drain audio blocks until the sender (input stream) disconnects.
     while let Ok(block) = audio_rx.recv() {
-        let frames = if input_ch > 0 { block.len() / input_ch } else { 0 };
+        let frames = if input_ch > 0 {
+            block.len() / input_ch
+        } else {
+            0
+        };
         if frames == 0 {
             continue;
         }
@@ -273,7 +277,9 @@ fn build_f32_input_stream(
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Open an input stream and begin recording armed tracks.
-pub fn start_recording(config: JsStartRecordingConfig) -> Result<RecordingSession, SphereAudioError> {
+pub fn start_recording(
+    config: JsStartRecordingConfig,
+) -> Result<RecordingSession, SphereAudioError> {
     if config.tracks.is_empty() {
         return Err(SphereAudioError::NativeError(
             "No armed tracks — nothing to record".to_string(),
@@ -300,9 +306,8 @@ pub fn start_recording(config: JsStartRecordingConfig) -> Result<RecordingSessio
     let media_dir = project_root.join("Media").join("Audio");
     let temp_dir = media_dir.join(".rec").join(&config.session_id);
 
-    std::fs::create_dir_all(&media_dir).map_err(|e| {
-        SphereAudioError::NativeError(format!("Cannot create Media/Audio: {e}"))
-    })?;
+    std::fs::create_dir_all(&media_dir)
+        .map_err(|e| SphereAudioError::NativeError(format!("Cannot create Media/Audio: {e}")))?;
     std::fs::create_dir_all(&temp_dir).map_err(|e| {
         SphereAudioError::NativeError(format!("Cannot create temp recording dir: {e}"))
     })?;
@@ -317,18 +322,13 @@ pub fn start_recording(config: JsStartRecordingConfig) -> Result<RecordingSessio
             .map(|f| f.to_string_lossy().into_owned())
             .unwrap_or_else(|| "recording.wav".to_string());
         let relative_path = format!("Media/Audio/{filename}");
-        let temp_path =
-            temp_dir.join(format!("{}.tmp.wav", sanitize_filename(&track.track_id)));
+        let temp_path = temp_dir.join(format!("{}.tmp.wav", sanitize_filename(&track.track_id)));
 
         let file = std::fs::File::create(&temp_path).map_err(|e| {
             SphereAudioError::NativeError(format!("Cannot create recording temp file: {e}"))
         })?;
 
-        let in_chs: Vec<usize> = track
-            .input_channels
-            .iter()
-            .map(|&c| c as usize)
-            .collect();
+        let in_chs: Vec<usize> = track.input_channels.iter().map(|&c| c as usize).collect();
         let out_channels = in_chs.len().max(1) as u16;
 
         track_writers.push(TrackWriterState {
@@ -353,7 +353,14 @@ pub fn start_recording(config: JsStartRecordingConfig) -> Result<RecordingSessio
     let (finalize_tx, finalize_rx) = std::sync::mpsc::channel();
     let start_beat = config.start_beat;
     std::thread::spawn(move || {
-        disk_writer_thread(audio_rx, track_writers, sample_rate, input_ch, start_beat, finalize_tx);
+        disk_writer_thread(
+            audio_rx,
+            track_writers,
+            sample_rate,
+            input_ch,
+            start_beat,
+            finalize_tx,
+        );
     });
 
     // AtomicBool: the input callback checks this before sending.
@@ -387,7 +394,9 @@ pub fn start_recording(config: JsStartRecordingConfig) -> Result<RecordingSessio
 }
 
 /// Stop recording, finalize WAV files, and return per-track results.
-pub fn stop_recording(session: RecordingSession) -> Result<Vec<JsRecordingResult>, SphereAudioError> {
+pub fn stop_recording(
+    session: RecordingSession,
+) -> Result<Vec<JsRecordingResult>, SphereAudioError> {
     // Tell the callback to stop sending.
     session.recording_active.store(false, Ordering::Relaxed);
 

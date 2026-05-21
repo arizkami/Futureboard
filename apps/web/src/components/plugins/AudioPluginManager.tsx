@@ -29,7 +29,7 @@ type PluginStatus = "available" | "blocked" | "missing";
 
 const FORMAT_STATE: Array<{ format: PluginFormat; enabled: boolean; detail: string }> = [
   { format: "VST3", enabled: true, detail: "Native scanner, .pst generation, SQLite cache" },
-  { format: "CLAP", enabled: false, detail: "UI placeholder" },
+  { format: "CLAP", enabled: true, detail: "Native scanner via external/clap, .pst generation, SQLite cache" },
   { format: "AU", enabled: false, detail: "macOS only" },
 ];
 
@@ -73,7 +73,7 @@ export function AudioPluginManager({ windowId, external = false }: Props) {
   const scan = async () => {
     if (!platform.pluginHost.isSupported || scanning) return;
     setScanning(true);
-    setStatusText("Scanning VST3 folders and generating .pst presets...");
+    setStatusText("Scanning VST3/CLAP folders and generating .pst presets...");
     setPlugins([]);
     setFailedCount(0);
     setGeneratedPresets(0);
@@ -103,7 +103,7 @@ export function AudioPluginManager({ windowId, external = false }: Props) {
         setFailedCount(0);
         setGeneratedPresets(0);
         setScanPaths(event.scannedPaths);
-        setStatusText("Scanning VST3 folders...");
+        setStatusText("Scanning VST3/CLAP folders...");
         return;
       }
       if (event.type === "folder") {
@@ -157,7 +157,7 @@ export function AudioPluginManager({ windowId, external = false }: Props) {
           <div className="min-w-0">
             <div className="truncate text-[12px] font-semibold">Audio Plug-in Manager</div>
             <div className="truncate text-[10px] text-daw-faint">
-              VST3 scanner cache, Mochi .pst presets, and Electron userData registry
+              VST3/CLAP scanner cache, Mochi .pst presets, and Electron userData registry
             </div>
           </div>
         </div>
@@ -182,7 +182,7 @@ export function AudioPluginManager({ windowId, external = false }: Props) {
         <aside className="flex min-h-0 flex-col border-r border-white/[0.06] bg-[#0b1016]">
           <SectionTitle>Scan Locations</SectionTitle>
           <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-2 pb-2">
-            {(scanPaths.length ? scanPaths : ["No VST3 scan folders detected"]).map((path) => (
+            {(scanPaths.length ? scanPaths : ["No VST3/CLAP scan folders detected"]).map((path) => (
               <div key={path} className="group rounded-md border border-white/[0.06] bg-white/[0.025] px-2 py-2">
                 <div className="flex items-center gap-2">
                   <Folder size={13} className="shrink-0 text-daw-accent/80" />
@@ -190,7 +190,7 @@ export function AudioPluginManager({ windowId, external = false }: Props) {
                     {path}
                   </span>
                 </div>
-                <div className="mt-1 truncate pl-5 text-[10px] text-daw-faint">VST3 scan source</div>
+                <div className="mt-1 truncate pl-5 text-[10px] text-daw-faint">VST3/CLAP scan source</div>
               </div>
             ))}
           </div>
@@ -232,7 +232,7 @@ export function AudioPluginManager({ windowId, external = false }: Props) {
               disabled={!isElectron || scanning}
               onClick={scan}
               className="flex h-7 items-center gap-1.5 rounded-md border border-daw-accent/25 bg-daw-accent/10 px-2 text-[11px] font-semibold text-daw-accent hover:bg-daw-accent/15 disabled:opacity-55"
-              title="Scan VST3 folders and generate Mochi .pst presets"
+              title="Scan VST3/CLAP folders and generate Mochi .pst presets"
             >
               {scanning ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
               Scan
@@ -283,7 +283,7 @@ export function AudioPluginManager({ windowId, external = false }: Props) {
               Scanner safety
             </div>
             <p className="mt-1 text-[10px] leading-snug text-daw-faint">
-              Scanner reads VST3 factory metadata and writes preset/cache files. It does not instantiate processors or route realtime audio yet.
+              Scanner reads VST3 factory and CLAP descriptor metadata, then writes preset/cache files. It does not instantiate processors or route realtime audio yet.
             </p>
           </div>
 

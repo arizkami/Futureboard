@@ -834,6 +834,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
+name = "sphere-audio-plugins"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "sphere-direct-audio-engine"
 version = "0.1.0"
 dependencies = [
@@ -845,6 +853,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "sphere-audio-plugins",
  "symphonia",
  "windows 0.58.0",
 ]

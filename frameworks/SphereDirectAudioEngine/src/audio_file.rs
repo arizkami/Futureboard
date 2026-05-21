@@ -24,10 +24,10 @@ use symphonia::core::probe::Hint;
 #[derive(Debug, Clone)]
 pub struct AudioFileBuffer {
     pub sample_rate: u32,
-    pub channels:    usize,
-    pub frames:      usize,
+    pub channels: usize,
+    pub frames: usize,
     /// Interleaved PCM samples, normalised to `−1.0 … 1.0`.
-    pub samples:     Vec<f32>,
+    pub samples: Vec<f32>,
 }
 
 /// Load an audio file from `path` into a decoded `AudioFileBuffer`.
@@ -176,7 +176,10 @@ fn load_via_symphonia(path: &Path) -> Result<AudioFileBuffer, String> {
         .format(
             &hint,
             mss,
-            &FormatOptions { enable_gapless: true, ..Default::default() },
+            &FormatOptions {
+                enable_gapless: true,
+                ..Default::default()
+            },
             &MetadataOptions::default(),
         )
         .map_err(|e| format!("Format probe failed: {e}"))?;
@@ -187,22 +190,16 @@ fn load_via_symphonia(path: &Path) -> Result<AudioFileBuffer, String> {
     let track = format
         .tracks()
         .iter()
-        .find(|t| {
-            t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL
-        })
+        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
         .ok_or_else(|| "No decodable audio track found".to_string())?
         .clone();
 
-    let track_id  = track.id;
+    let track_id = track.id;
     let sample_rate = track
         .codec_params
         .sample_rate
         .ok_or_else(|| "Track has no sample rate".to_string())?;
-    let channels = track
-        .codec_params
-        .channels
-        .map(|c| c.count())
-        .unwrap_or(2);
+    let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(2);
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
@@ -252,7 +249,11 @@ fn load_via_symphonia(path: &Path) -> Result<AudioFileBuffer, String> {
         }
     }
 
-    let frames = if channels > 0 { all_samples.len() / channels } else { 0 };
+    let frames = if channels > 0 {
+        all_samples.len() / channels
+    } else {
+        0
+    };
     Ok(AudioFileBuffer {
         sample_rate,
         channels,
@@ -281,10 +282,10 @@ fn load_wav(path: &Path) -> Result<AudioFileBuffer, String> {
     let mut data_range: Option<(usize, usize)> = None;
 
     while cursor + 8 <= bytes.len() {
-        let id  = &bytes[cursor..cursor + 4];
+        let id = &bytes[cursor..cursor + 4];
         let len = read_u32_le(&bytes, cursor + 4)? as usize;
         let body = cursor + 8;
-        let end  = body.saturating_add(len);
+        let end = body.saturating_add(len);
         if end > bytes.len() {
             return Err("truncated WAV chunk".to_string());
         }
@@ -295,9 +296,9 @@ fn load_wav(path: &Path) -> Result<AudioFileBuffer, String> {
                     return Err("invalid fmt chunk".to_string());
                 }
                 fmt = Some(WavFmt {
-                    audio_format:   read_u16_le(&bytes, body)?,
-                    channels:       read_u16_le(&bytes, body + 2)? as usize,
-                    sample_rate:    read_u32_le(&bytes, body + 4)?,
+                    audio_format: read_u16_le(&bytes, body)?,
+                    channels: read_u16_le(&bytes, body + 2)? as usize,
+                    sample_rate: read_u32_le(&bytes, body + 4)?,
                     bits_per_sample: read_u16_le(&bytes, body + 14)?,
                 });
             }
@@ -311,14 +312,13 @@ fn load_wav(path: &Path) -> Result<AudioFileBuffer, String> {
     }
 
     let fmt = fmt.ok_or_else(|| "missing fmt chunk".to_string())?;
-    let (data_start, data_len) =
-        data_range.ok_or_else(|| "missing data chunk".to_string())?;
+    let (data_start, data_len) = data_range.ok_or_else(|| "missing data chunk".to_string())?;
     if fmt.channels == 0 || fmt.sample_rate == 0 {
         return Err("invalid channel count or sample rate".to_string());
     }
 
     let bytes_per_sample = match fmt.bits_per_sample {
-        8  => 1usize,
+        8 => 1usize,
         16 => 2,
         24 => 3,
         32 => 4,
@@ -329,15 +329,15 @@ fn load_wav(path: &Path) -> Result<AudioFileBuffer, String> {
         return Err("empty WAV data".to_string());
     }
 
-    let frames       = data_len / bytes_per_frame;
+    let frames = data_len / bytes_per_frame;
     let sample_count = frames * fmt.channels;
-    let mut samples  = Vec::with_capacity(sample_count);
+    let mut samples = Vec::with_capacity(sample_count);
 
     let mut offset = data_start;
     for _ in 0..sample_count {
         let value = match (fmt.audio_format, fmt.bits_per_sample) {
             // PCM integer
-            (1, 8)  => (bytes[offset] as f32 - 128.0) / 128.0,
+            (1, 8) => (bytes[offset] as f32 - 128.0) / 128.0,
             (1, 16) => read_i16_le(&bytes, offset)? as f32 / 32_768.0,
             (1, 24) => read_i24_le(&bytes, offset)? as f32 / 8_388_608.0,
             (1, 32) => read_i32_le(&bytes, offset)? as f32 / 2_147_483_648.0,
@@ -356,7 +356,7 @@ fn load_wav(path: &Path) -> Result<AudioFileBuffer, String> {
 
     Ok(AudioFileBuffer {
         sample_rate: fmt.sample_rate,
-        channels:    fmt.channels,
+        channels: fmt.channels,
         frames,
         samples,
     })
@@ -434,9 +434,9 @@ fn read_wav_header(file: &mut File) -> Result<(WavFmt, u64, u64), String> {
 
 #[derive(Debug, Clone, Copy)]
 struct WavFmt {
-    audio_format:    u16,
-    channels:        usize,
-    sample_rate:     u32,
+    audio_format: u16,
+    channels: usize,
+    sample_rate: u32,
     bits_per_sample: u16,
 }
 
@@ -507,5 +507,7 @@ fn write_i16_peak_i32(
 }
 
 fn clamp_i16_as_i32(value: f32) -> i32 {
-    (value.clamp(-1.0, 1.0) * 32767.0).round().clamp(-32768.0, 32767.0) as i32
+    (value.clamp(-1.0, 1.0) * 32767.0)
+        .round()
+        .clamp(-32768.0, 32767.0) as i32
 }

@@ -9,15 +9,15 @@
 //! On Windows the audio thread gets MMCSS "Pro Audio" priority if
 //! `config.mmcss_priority` is true.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-use cpal::{BufferSize, FromSample, Sample, SampleFormat, SizedSample};
 use cpal::traits::{DeviceTrait, StreamTrait};
+use cpal::{BufferSize, FromSample, Sample, SampleFormat, SizedSample};
 use crossbeam_channel::{bounded, Receiver, Sender};
 
-use crate::backend::DauxDeviceConfig;
 use crate::backend::render::{drain_commands, fill_output_f32, LocalAudioState};
+use crate::backend::DauxDeviceConfig;
 use crate::command::EngineCommand;
 use crate::engine::SharedState;
 use crate::error::SphereAudioError;
@@ -72,7 +72,8 @@ pub fn open(
     let backend_name = cpal::default_host().id().name().to_string();
 
     // Build stream config candidates.
-    let default_supported = dev.default_output_config()
+    let default_supported = dev
+        .default_output_config()
         .map_err(|e| SphereAudioError::StreamOpenFailed(e.to_string()))?;
     let sample_format = default_supported.sample_format();
     let default_cfg = default_supported.config();
@@ -104,7 +105,9 @@ pub fn open(
     let mut last_error = None;
 
     for (label, stream_config) in &candidates {
-        shared.sample_rate.store(stream_config.sample_rate.0, Ordering::Relaxed);
+        shared
+            .sample_rate
+            .store(stream_config.sample_rate.0, Ordering::Relaxed);
 
         let (tx, rx) = bounded::<EngineCommand>(512);
 
@@ -169,16 +172,16 @@ fn build_typed_stream(
         };
     }
     match sample_format {
-        SampleFormat::I8   => build_for!(i8),
-        SampleFormat::I16  => build_for!(i16),
-        SampleFormat::I32  => build_for!(i32),
-        SampleFormat::I64  => build_for!(i64),
-        SampleFormat::U8   => build_for!(u8),
-        SampleFormat::U16  => build_for!(u16),
-        SampleFormat::U32  => build_for!(u32),
-        SampleFormat::U64  => build_for!(u64),
-        SampleFormat::F32  => build_for!(f32),
-        SampleFormat::F64  => build_for!(f64),
+        SampleFormat::I8 => build_for!(i8),
+        SampleFormat::I16 => build_for!(i16),
+        SampleFormat::I32 => build_for!(i32),
+        SampleFormat::I64 => build_for!(i64),
+        SampleFormat::U8 => build_for!(u8),
+        SampleFormat::U16 => build_for!(u16),
+        SampleFormat::U32 => build_for!(u32),
+        SampleFormat::U64 => build_for!(u64),
+        SampleFormat::F32 => build_for!(f32),
+        SampleFormat::F64 => build_for!(f64),
         fmt => Err(format!("unsupported sample format: {fmt}")),
     }
 }
@@ -218,7 +221,13 @@ where
                 let _ = mmcss_priority; // suppress unused warning
 
                 // ── Drain command queue ───────────────────────────────────────
-                drain_commands(&cmd_rx, &mut runtime, &shared, &mut local, output_sample_rate);
+                drain_commands(
+                    &cmd_rx,
+                    &mut runtime,
+                    &shared,
+                    &mut local,
+                    output_sample_rate,
+                );
 
                 // ── Fill via shared f32 kernel ────────────────────────────────
                 let frames_needed = data.len() / ch.max(1);
@@ -227,7 +236,9 @@ where
                     f32_scratch.resize(f32_len, 0.0f32);
                 }
                 let scratch = &mut f32_scratch[..f32_len];
-                for s in scratch.iter_mut() { *s = 0.0; }
+                for s in scratch.iter_mut() {
+                    *s = 0.0;
+                }
 
                 fill_output_f32(scratch, ch, &mut runtime, &shared, &mut local);
 
@@ -257,10 +268,7 @@ fn set_mmcss_pro_audio() -> bool {
     // Use raw extern declaration to avoid windows crate feature-flag issues.
     #[link(name = "avrt")]
     extern "system" {
-        fn AvSetMmThreadCharacteristicsW(
-            task_name: *const u16,
-            task_index: *mut u32,
-        ) -> isize;
+        fn AvSetMmThreadCharacteristicsW(task_name: *const u16, task_index: *mut u32) -> isize;
     }
 
     let task: Vec<u16> = "Pro Audio\0".encode_utf16().collect();
