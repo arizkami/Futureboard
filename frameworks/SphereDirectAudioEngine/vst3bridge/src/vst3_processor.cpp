@@ -11,13 +11,15 @@
 #include <sstream>
 #include <string>
 
+// IPlugView is needed on all platforms for the editor bridge functions.
+#include "pluginterfaces/gui/iplugview.h"
+
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
 #  define NOMINMAX
 #  include <windows.h>
 #  include <dwmapi.h>
 #  pragma comment(lib, "dwmapi.lib")
-#  include "pluginterfaces/gui/iplugview.h"
 #endif
 
 #include "pluginterfaces/base/ipluginbase.h"
