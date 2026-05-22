@@ -37,6 +37,7 @@
 // ── Forward declarations ──────────────────────────────────────────────────────
 
 void close_editor_linux(SphereDauxVst3Processor* proc);
+int  focus_editor_linux(SphereDauxVst3Processor* proc);
 
 // ── GTK main-loop thread ──────────────────────────────────────────────────────
 
@@ -127,8 +128,8 @@ static gboolean idle_open_editor(gpointer user_data) {
 
     // Dark background via CSS provider
     GtkCssProvider* css = gtk_css_provider_new();
-    gtk_css_provider_load_from_data(css,
-        "window { background-color: #0b0f14; }", -1);
+    gtk_css_provider_load_from_string(css,
+        "window { background-color: #0b0f14; }");
     gtk_style_context_add_provider_for_display(
         gtk_widget_get_display(window),
         GTK_STYLE_PROVIDER(css),
