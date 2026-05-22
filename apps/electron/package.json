@@ -1,6 +1,6 @@
 {
   "name": "futureboard-studio",
-  "version": "2026.05.21",
+  "version": "2026.05.23",
   "author": {
     "name": "Arizkami",
     "email": "arizkami@futureboard.studio"
@@ -50,17 +50,27 @@
       {
         "from": "icons",
         "to": "icons",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "assets",
         "to": "assets",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "resources",
         "to": ".",
-        "filter": ["*.node", "*.dll", "*.dylib", "*.so", "*.exe"]
+        "filter": [
+          "*.node",
+          "*.dll",
+          "*.dylib",
+          "*.so",
+          "*.exe"
+        ]
       }
     ],
     "fileAssociations": [
@@ -76,7 +86,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "icons/icon.ico",
@@ -95,7 +107,10 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ],
       "category": "public.app-category.music",
@@ -109,11 +124,15 @@
       "target": [
         {
           "target": "AppImage",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "deb",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "executableName": "futureboard-studio",
