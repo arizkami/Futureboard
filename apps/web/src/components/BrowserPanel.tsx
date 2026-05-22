@@ -868,6 +868,7 @@ export function BrowserPanel({
   const extraFolders = useSettingsStore((s) => s.extraFolders);
 
   const [query, setQuery] = useState("");
+  const [activeTab, setActiveTab] = useState(() => platform.kind === "electron" ? "library" : "imports");
   const [nativeRoots, setNativeRoots] = useState<BrowserRootEntry[]>([]);
   const [nativePath, setNativePath] = useState<NativeBrowserPath | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -992,8 +993,9 @@ export function BrowserPanel({
 
   // ── Root buckets ─────────────────────────────────────────────────────────────
 
+  const hasFactoryRoot = nativeRoots.some((r) => r.kind === "factory");
   const factoryRoots = nativeRoots.filter(
-    (r) => r.kind === "factory" || r.kind === "factory-folder",
+    (r) => r.kind === "factory" || (!hasFactoryRoot && r.kind === "factory-folder"),
   );
   const extraRoots = nativeRoots.filter((r) => r.id.startsWith("extra:"));
   const driveRoots = nativeRoots.filter((r) => r.kind === "drive");
@@ -1100,6 +1102,20 @@ export function BrowserPanel({
 
   // ── Render ───────────────────────────────────────────────────────────────────
 
+  const electronTabs = [
+    { id: "library",  label: "Library",  Icon: Disc3 },
+    { id: "project",  label: "Project",  Icon: FolderOpen },
+    { id: "computer", label: "Computer", Icon: HardDrive },
+  ] as const;
+
+  const webTabs = [
+    { id: "imports", label: "Files",    Icon: FileAudio2 },
+    { id: "samples", label: "Samples",  Icon: FlaskConical },
+    { id: "loops",   label: "Loops",    Icon: Layers },
+  ] as const;
+
+  const tabs = isElectron ? electronTabs : webTabs;
+
   return (
     <aside
       className="relative flex shrink-0 flex-col overflow-hidden border-r bg-daw-panel"
@@ -1164,9 +1180,41 @@ export function BrowserPanel({
         </div>
       </div>
 
+      {/* ── Tab bar ─────────────────────────────────────────────────────────── */}
+      <div
+        className="flex shrink-0 border-b"
+        style={{ borderColor: "rgba(58,69,84,0.5)", background: "rgba(10,13,18,0.35)" }}
+      >
+        {tabs.map(({ id, label, Icon }) => {
+          const active = activeTab === id;
+          return (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setActiveTab(id)}
+              className="flex flex-1 flex-col items-center justify-center gap-[3px] transition-colors"
+              style={{
+                height: 32,
+                color: active ? "#5FCED0" : "rgba(95,108,124,0.6)",
+                background: active ? "rgba(95,206,208,0.05)" : "transparent",
+                borderBottom: `1.5px solid ${active ? "#5FCED0" : "transparent"}`,
+              }}
+            >
+              <Icon size={9} style={{ color: active ? "#5FCED0" : "rgba(95,108,124,0.5)" }} />
+              <span
+                className="text-[8px]"
+                style={{ fontWeight: active ? 600 : 400, letterSpacing: "0.04em" }}
+              >
+                {label}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
       {/* ── Search ─────────────────────────────────────────────────────────── */}
       <div
-        className="border-b px-2"
+        className="shrink-0 border-b px-2"
         style={{
           borderColor: "rgba(58,69,84,0.5)",
           paddingTop: 5,
@@ -1177,7 +1225,6 @@ export function BrowserPanel({
         <label
           className="flex h-[22px] items-center gap-1.5 rounded px-2 transition-colors focus-within:ring-1"
           style={{
-            borderColor: "rgba(58,69,84,0.6)",
             background: "rgba(10,13,18,0.7)",
             border: "1px solid rgba(58,69,84,0.55)",
             outlineColor: "#5FCED0",
@@ -1207,7 +1254,7 @@ export function BrowserPanel({
       {/* ── Scroll area ────────────────────────────────────────────────────── */}
       <div className="min-h-0 flex-1 overflow-y-auto">
 
-        {/* ── ELECTRON: native tree ───────────────────────────────────────── */}
+        {/* ── ELECTRON ─────────────────────────────────────────────────────── */}
         {isElectron && (
           <>
             {nativeError && (
@@ -1218,99 +1265,92 @@ export function BrowserPanel({
               </div>
             )}
 
-            {/* Library — Futureboard Studio / factory roots */}
-            {factoryRoots.length > 0 && (
+            {/* Library tab — factory roots + extra folders */}
+            {activeTab === "library" && (
               <>
-                <Section label="Library" icon={Disc3}>
-                  <div role="tree">
-                    {factoryRoots.map((root) => (
-                      <NativeTreeNode
-                        key={root.id}
-                        entry={root}
-                        depth={0}
-                        {...treeProps}
-                      />
-                    ))}
-                  </div>
-                </Section>
-                <SectionDivider />
+                {factoryRoots.length > 0 ? (
+                  <Section label="Library" icon={Disc3}>
+                    <div role="tree">
+                      {factoryRoots.map((root) => (
+                        <NativeTreeNode key={root.id} entry={root} depth={0} {...treeProps} />
+                      ))}
+                    </div>
+                  </Section>
+                ) : !nativeError && (
+                  <EmptyRow label="Loading…" />
+                )}
+
+                {extraRoots.length > 0 && (
+                  <>
+                    <SectionDivider />
+                    <Section label="Extra Folders" icon={FolderSearch}>
+                      <div role="tree">
+                        {extraRoots.map((root) => (
+                          <NativeTreeNode key={root.id} entry={root} depth={0} {...treeProps} />
+                        ))}
+                      </div>
+                    </Section>
+                  </>
+                )}
               </>
             )}
 
-            {/* Extra folders — user-pinned browser roots from Preferences */}
-            {extraRoots.length > 0 && (
+            {/* Project tab — project folders + imported assets */}
+            {activeTab === "project" && (
               <>
-                <Section label="Extra Folders" icon={FolderSearch}>
-                  <div role="tree">
-                    {extraRoots.map((root) => (
-                      <NativeTreeNode
-                        key={root.id}
-                        entry={root}
-                        depth={0}
-                        {...treeProps}
-                      />
-                    ))}
-                  </div>
-                </Section>
-                <SectionDivider />
+                {projectRoot && projectEntries.length > 0 ? (
+                  <Section label="Project Files" icon={FolderOpen}>
+                    <div
+                      className="flex items-center gap-1.5 border-b px-3 py-1"
+                      style={{ borderColor: "rgba(58,69,84,0.35)" }}
+                    >
+                      <FolderOpen size={9} style={{ color: "rgba(95,206,208,0.5)" }} />
+                      <span
+                        className="min-w-0 flex-1 truncate text-[9px]"
+                        style={{ color: "rgba(95,206,208,0.55)" }}
+                        title={projectRoot}
+                      >
+                        {projectRoot.split(/[\\/]/).pop() ?? projectRoot}
+                      </span>
+                    </div>
+                    <div role="tree">
+                      {projectEntries.map((entry) => (
+                        <NativeTreeNode key={entry.path} entry={entry} depth={0} {...treeProps} />
+                      ))}
+                    </div>
+                  </Section>
+                ) : (
+                  <EmptyRow label="No project open" />
+                )}
+
+                {hasAssets && (
+                  <>
+                    <SectionDivider />
+                    <Section label="Imports" icon={FileAudio2}>
+                      {filteredAssets.length > 0 ? (
+                        filteredAssets.map((a) => <AssetRow key={a.id} asset={a} />)
+                      ) : (
+                        <EmptyRow label={query ? `No results for "${query}"` : "No imported files"} />
+                      )}
+                    </Section>
+                  </>
+                )}
               </>
             )}
 
-            {/* Computer — drive roots */}
-            {driveRoots.length > 0 && (
+            {/* Computer tab — drive roots */}
+            {activeTab === "computer" && (
               <>
-                <Section label="Computer" icon={HardDrive} defaultOpen={false}>
+                {driveRoots.length > 0 ? (
                   <div role="tree">
                     {driveRoots.map((root) => (
-                      <NativeTreeNode
-                        key={root.id}
-                        entry={root}
-                        depth={0}
-                        {...treeProps}
-                      />
+                      <NativeTreeNode key={root.id} entry={root} depth={0} {...treeProps} />
                     ))}
                   </div>
-                </Section>
-                <SectionDivider />
+                ) : (
+                  <EmptyRow label="No drives found" />
+                )}
               </>
-            )}
-
-            {/* Project — folder-project sub-folders */}
-            {projectRoot && projectEntries.length > 0 && (
-              <>
-                <Section label="Project" icon={FolderOpen}>
-                  {/* Project root breadcrumb */}
-                  <div
-                    className="flex items-center gap-1.5 border-b px-3 py-1"
-                    style={{ borderColor: "rgba(58,69,84,0.35)" }}
-                  >
-                    <FolderOpen size={9} style={{ color: "rgba(95,206,208,0.5)" }} />
-                    <span
-                      className="min-w-0 flex-1 truncate text-[9px]"
-                      style={{ color: "rgba(95,206,208,0.55)" }}
-                      title={projectRoot}
-                    >
-                      {projectRoot.split(/[\\/]/).pop() ?? projectRoot}
-                    </span>
-                  </div>
-                  <div role="tree">
-                    {projectEntries.map((entry) => (
-                      <NativeTreeNode
-                        key={entry.path}
-                        entry={entry}
-                        depth={0}
-                        {...treeProps}
-                      />
-                    ))}
-                  </div>
-                </Section>
-                <SectionDivider />
-              </>
-            )}
-
-            {/* No roots yet */}
-            {factoryRoots.length === 0 && extraRoots.length === 0 && driveRoots.length === 0 && !nativeError && (
-              <EmptyRow label="Loading…" />
             )}
 
             {/* Status bar */}
@@ -1332,101 +1372,93 @@ export function BrowserPanel({
           </>
         )}
 
-        {/* ── WEB: imports + placeholders ─────────────────────────────────── */}
+        {/* ── WEB ──────────────────────────────────────────────────────────── */}
         {!isElectron && (
           <>
-            {/* Imports */}
-            <Section label="Imports" icon={FileAudio2} defaultOpen>
-              {hasAssets ? (
-                filteredAssets.length > 0 ? (
-                  filteredAssets.map((a) => <AssetRow key={a.id} asset={a} />)
-                ) : assets.length === 0 ? (
+            {/* Files/Imports tab */}
+            {activeTab === "imports" && (
+              <Section label="Imports" icon={FileAudio2} defaultOpen>
+                {hasAssets ? (
+                  filteredAssets.length > 0 ? (
+                    filteredAssets.map((a) => <AssetRow key={a.id} asset={a} />)
+                  ) : assets.length === 0 ? (
+                    <EmptyImportsPlaceholder onImport={onImport} />
+                  ) : (
+                    <EmptyRow label={`No results for "${query}"`} />
+                  )
+                ) : filteredLegacyFiles.length > 0 ? (
+                  filteredLegacyFiles.map((f) => <FileRow key={f.id} file={f} />)
+                ) : files.length === 0 ? (
                   <EmptyImportsPlaceholder onImport={onImport} />
                 ) : (
                   <EmptyRow label={`No results for "${query}"`} />
-                )
-              ) : filteredLegacyFiles.length > 0 ? (
-                filteredLegacyFiles.map((f) => <FileRow key={f.id} file={f} />)
-              ) : files.length === 0 ? (
-                <EmptyImportsPlaceholder onImport={onImport} />
-              ) : (
-                <EmptyRow label={`No results for "${query}"`} />
-              )}
+                )}
 
-              {/* Session files divider in folder mode */}
-              {hasAssets && filteredLegacyFiles.length > 0 && (
-                <>
-                  <div
-                    className="flex h-6 items-center gap-2 px-3"
-                    style={{ borderBottom: "1px solid rgba(58,69,84,0.4)" }}
-                  >
-                    <div className="h-px flex-1" style={{ background: "rgba(58,69,84,0.5)" }} />
-                    <span
-                      className="text-[9px] font-medium"
-                      style={{ color: "rgba(107,120,136,0.55)" }}
+                {hasAssets && filteredLegacyFiles.length > 0 && (
+                  <>
+                    <div
+                      className="flex h-6 items-center gap-2 px-3"
+                      style={{ borderBottom: "1px solid rgba(58,69,84,0.4)" }}
                     >
-                      Session files
-                    </span>
-                    <div className="h-px flex-1" style={{ background: "rgba(58,69,84,0.5)" }} />
-                  </div>
-                  {filteredLegacyFiles.map((f) => <FileRow key={f.id} file={f} />)}
-                </>
-              )}
-            </Section>
+                      <div className="h-px flex-1" style={{ background: "rgba(58,69,84,0.5)" }} />
+                      <span className="text-[9px] font-medium" style={{ color: "rgba(107,120,136,0.55)" }}>
+                        Session files
+                      </span>
+                      <div className="h-px flex-1" style={{ background: "rgba(58,69,84,0.5)" }} />
+                    </div>
+                    {filteredLegacyFiles.map((f) => <FileRow key={f.id} file={f} />)}
+                  </>
+                )}
+              </Section>
+            )}
 
-            <SectionDivider />
+            {/* Samples tab */}
+            {activeTab === "samples" && (
+              <Section label="Samples" icon={FlaskConical} defaultOpen>
+                <div
+                  className="mx-2 my-2 flex items-center justify-center rounded px-3 py-3"
+                  style={{ border: "1px dashed rgba(58,69,84,0.45)", background: "rgba(255,255,255,0.008)" }}
+                >
+                  <span className="text-[9px]" style={{ color: "rgba(95,108,124,0.45)" }}>
+                    Sample library — coming soon
+                  </span>
+                </div>
+                {["Kick — Hard 01.wav", "Snare — Crackle.wav", "Hi-Hat — Open 16th.wav", "Bass — 808 Sub C.wav"].map(
+                  (name) => (
+                    <div key={name} className="flex items-center gap-1.5 border-b px-3 opacity-20"
+                      style={{ height: 26, borderColor: "rgba(58,69,84,0.3)" }}>
+                      <FileAudio2 size={9} style={{ color: "rgba(107,120,136,0.7)" }} />
+                      <span className="min-w-0 flex-1 truncate text-[10.5px]" style={{ color: "rgba(154,167,184,0.8)" }}>{name}</span>
+                      <FormatBadge name={name} />
+                    </div>
+                  ),
+                )}
+              </Section>
+            )}
 
-            {/* Samples placeholder */}
-            <Section label="Samples" icon={FlaskConical} defaultOpen={false}>
-              <div className="mx-2 my-2 flex items-center justify-center rounded px-3 py-3"
-                style={{ border: "1px dashed rgba(58,69,84,0.45)", background: "rgba(255,255,255,0.008)" }}>
-                <span className="text-[9px]" style={{ color: "rgba(95,108,124,0.45)" }}>
-                  Sample library — coming soon
-                </span>
-              </div>
-              {["Kick — Hard 01.wav", "Snare — Crackle.wav", "Hi-Hat — Open 16th.wav", "Bass — 808 Sub C.wav"].map(
-                (name) => (
-                  <div
-                    key={name}
-                    className="flex items-center gap-1.5 border-b px-3 opacity-20"
-                    style={{ height: 26, borderColor: "rgba(58,69,84,0.3)" }}
-                  >
-                    <FileAudio2 size={9} style={{ color: "rgba(107,120,136,0.7)" }} />
-                    <span className="min-w-0 flex-1 truncate text-[10.5px]" style={{ color: "rgba(154,167,184,0.8)" }}>
-                      {name}
-                    </span>
-                    <FormatBadge name={name} />
-                  </div>
-                ),
-              )}
-            </Section>
-
-            <SectionDivider />
-
-            {/* Loops placeholder */}
-            <Section label="Loops" icon={Layers} defaultOpen={false}>
-              <div className="mx-2 my-2 flex items-center justify-center rounded px-3 py-3"
-                style={{ border: "1px dashed rgba(58,69,84,0.45)", background: "rgba(255,255,255,0.008)" }}>
-                <span className="text-[9px]" style={{ color: "rgba(95,108,124,0.45)" }}>
-                  Loop library — coming soon
-                </span>
-              </div>
-              {["Drum Loop — 120bpm.wav", "Guitar Riff — Am.wav", "Bass Loop — Funk.wav"].map(
-                (name) => (
-                  <div
-                    key={name}
-                    className="flex items-center gap-1.5 border-b px-3 opacity-20"
-                    style={{ height: 26, borderColor: "rgba(58,69,84,0.3)" }}
-                  >
-                    <FileAudio2 size={9} style={{ color: "rgba(107,120,136,0.7)" }} />
-                    <span className="min-w-0 flex-1 truncate text-[10.5px]" style={{ color: "rgba(154,167,184,0.8)" }}>
-                      {name}
-                    </span>
-                    <FormatBadge name={name} />
-                  </div>
-                ),
-              )}
-            </Section>
+            {/* Loops tab */}
+            {activeTab === "loops" && (
+              <Section label="Loops" icon={Layers} defaultOpen>
+                <div
+                  className="mx-2 my-2 flex items-center justify-center rounded px-3 py-3"
+                  style={{ border: "1px dashed rgba(58,69,84,0.45)", background: "rgba(255,255,255,0.008)" }}
+                >
+                  <span className="text-[9px]" style={{ color: "rgba(95,108,124,0.45)" }}>
+                    Loop library — coming soon
+                  </span>
+                </div>
+                {["Drum Loop — 120bpm.wav", "Guitar Riff — Am.wav", "Bass Loop — Funk.wav"].map(
+                  (name) => (
+                    <div key={name} className="flex items-center gap-1.5 border-b px-3 opacity-20"
+                      style={{ height: 26, borderColor: "rgba(58,69,84,0.3)" }}>
+                      <FileAudio2 size={9} style={{ color: "rgba(107,120,136,0.7)" }} />
+                      <span className="min-w-0 flex-1 truncate text-[10.5px]" style={{ color: "rgba(154,167,184,0.8)" }}>{name}</span>
+                      <FormatBadge name={name} />
+                    </div>
+                  ),
+                )}
+              </Section>
+            )}
           </>
         )}
       </div>

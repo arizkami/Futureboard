@@ -7,6 +7,7 @@ export type AppWindowContentType =
   | "unsavedChanges"
   | "preferences"
   | "pluginManager"
+  | "addTrack"
   | "plugin"
   | "mixer"
   | "editor"

@@ -25,7 +25,7 @@ import { midiDeviceService } from "./engine/MidiDeviceService";
 import { ToastContainer } from "./components/ui/Toast";
 import { PerfMonitor } from "./components/PerfMonitor";
 import type { DawProject, InsertDevice } from "./types/daw";
-import { closeNativeInsertEditor, openNativeInsertEditor } from "./components/plugins/nativePluginEditorLifecycle";
+import { closeNativeInsertEditor, isNativeVst3Insert, openNativeInsertEditor } from "./components/plugins/nativePluginEditorLifecycle";
 import { useSettingsStore } from "./store/settingsStore";
 import { useBackgroundTaskStore } from "./store/backgroundTaskStore";
 import { useDragWorkflowStore } from "./store/dragWorkflowStore";
@@ -75,7 +75,13 @@ function eachInsert(project: DawProject, visit: (trackId: string, insert: Insert
   }
 }
 
-function syncInsertDeltasToEngine(project: DawProject, previous: DawProject): void {
+type PendingEditorOpen = {
+  trackId: string;
+  insert: InsertDevice;
+};
+
+function syncInsertDeltasToEngine(project: DawProject, previous: DawProject): PendingEditorOpen[] {
+  const pendingEditorOpens: PendingEditorOpen[] = [];
   const previousByKey = new Map<string, { trackId: string; insert: InsertDevice }>();
   eachInsert(previous, (trackId, insert) => {
     previousByKey.set(`${trackId}:${insert.id}`, { trackId, insert });
@@ -86,7 +92,7 @@ function syncInsertDeltasToEngine(project: DawProject, previous: DawProject): vo
     const prev = previousByKey.get(key)?.insert;
     if (!prev) {
       activeAudioEngine.addInsertDevice(trackId, insert);
-      void openNativeInsertEditor(trackId, insert);
+      if (isNativeVst3Insert(insert)) pendingEditorOpens.push({ trackId, insert });
       return;
     }
 
@@ -112,6 +118,8 @@ function syncInsertDeltasToEngine(project: DawProject, previous: DawProject): vo
       void closeNativeInsertEditor(trackId, insert.id);
     }
   }
+
+  return pendingEditorOpens;
 }
 
 function getStartupRecentProjectPath(): string | null {
@@ -268,6 +276,18 @@ export default function App() {
     });
   }, []);
 
+  // Reload project when an external Electron window (e.g. Add Track) writes to localStorage.
+  // The storage event only fires in OTHER windows, so this correctly picks up cross-window saves.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "mochi-daw-project" && e.newValue) {
+        loadLocal();
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [loadLocal]);
+
   // Load the active audio backend whenever a different project is loaded.
   useEffect(() => {
     activeAudioEngine.loadProject(project).catch(console.error);
@@ -311,7 +331,12 @@ export default function App() {
 
     return useProjectStore.subscribe((state, prev) => {
       if (state.project !== prev.project) {
-        syncInsertDeltasToEngine(state.project, prev.project);
+        const pendingEditorOpens = syncInsertDeltasToEngine(state.project, prev.project);
+        const openPendingEditors = () => {
+          for (const { trackId, insert } of pendingEditorOpens) {
+            void openNativeInsertEditor(trackId, insert);
+          }
+        };
 
         if (audioImportQueue.isImporting) {
           ensureSyncTask("Waiting for import burst");
@@ -319,6 +344,7 @@ export default function App() {
           syncTimer = setTimeout(() => {
             syncTimer = null;
             runSync(useProjectStore.getState().project);
+            openPendingEditors();
           }, IMPORT_LIMITS.nativeSyncDebounceMs);
         } else {
           if (syncTimer) {
@@ -326,6 +352,7 @@ export default function App() {
             syncTimer = null;
           }
           runSync(state.project);
+          openPendingEditors();
         }
       }
     });

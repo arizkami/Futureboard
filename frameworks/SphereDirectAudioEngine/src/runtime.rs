@@ -358,6 +358,12 @@ impl RuntimeProject {
             });
         }
         let has_solo = tracks.iter().any(|t| t.solo);
+        let master_insert_count = tracks
+            .iter()
+            .find(|track| track.track_type == "master")
+            .map(|track| track.inserts.len())
+            .unwrap_or(0);
+        eprintln!("[SphereAudio] RuntimeMaster inserts={master_insert_count}");
         for track in &tracks {
             let track_clips = clips.iter().filter(|clip| clip.track_id == track.id).count();
             eprintln!(

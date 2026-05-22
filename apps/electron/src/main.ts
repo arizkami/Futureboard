@@ -1105,6 +1105,8 @@ function externalRouteForContent(contentType: string): string {
       return "/settings";
     case "pluginManager":
       return "/plugin-manager";
+    case "addTrack":
+      return "/addtrack";
     default:
       return "/";
   }

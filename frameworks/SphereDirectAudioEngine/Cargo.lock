@@ -852,6 +852,7 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "parking_lot",
+ "pkg-config",
  "serde",
  "serde_json",
  "sphere-audio-plugins",

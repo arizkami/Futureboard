@@ -661,9 +661,15 @@ export const APP_MENUS: AppMenuGroup[] = [
         id: "project.sep.tracks",
       },
       {
+        id: "project.add_track",
+        label: "Add Track...",
+        accelerator: "Ctrl+T",
+        icon: "plus-circle",
+        action: "track:show-add-dialog",
+      },
+      {
         id: "project.add_audio_track",
         label: "Add Audio Track",
-        accelerator: "Ctrl+T",
         icon: "mic",
         action: "track:add-audio",
       },

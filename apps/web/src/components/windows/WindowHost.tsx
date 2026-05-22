@@ -6,6 +6,7 @@ import { ProjectWizard } from "../project/ProjectWizard";
 import { UnsavedChangesDialog } from "./UnsavedChangesDialog";
 import { SettingsDialog } from "../settings/SettingsDialog";
 import { AudioPluginManager } from "../plugins/AudioPluginManager";
+import { AddTrackDialog } from "../AddTrackDialog";
 
 export function WindowHost() {
   const { windows, closeWindow, focusWindow, updateWindowBounds } = useWindowStore();
@@ -66,6 +67,8 @@ function WindowContent({ contentType, id, payload }: ContentProps) {
       );
     case "pluginManager":
       return <AudioPluginManager windowId={id} />;
+    case "addTrack":
+      return <AddTrackDialog onClose={() => useWindowStore.getState().closeWindow(id)} external />;
     default:
       return (
         <div className="flex items-center justify-center h-full text-[11px] text-daw-text-muted">

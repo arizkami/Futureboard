@@ -17,7 +17,6 @@ import {
   Square,
   Timer,
 } from "lucide-react";
-import { MenuDawIcon } from "../icons/dawIcons";
 import {
   Fragment,
   useCallback,
@@ -74,7 +73,7 @@ const FULL_MENU_MIN_WIDTH = 1600; // ≥1600px: all menu buttons visible, no ⋯
 const OVERFLOW_ONLY_WIDTH = 1400; // <1400px: hamburger-only (all menus in ⋯)
 
 const MENU_WIDTH_EST = 260;  // px — used for right-edge clamping
-const MENU_HEIGHT_EST = 500; // px — used for bottom-edge clamping
+// const MENU_HEIGHT_EST = 500; // px — used for bottom-edge clamping
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 type MenuLayoutMode = "full" | "partial" | "overflow";
@@ -114,7 +113,11 @@ function calcSubmenuStyle(anchorRect: DOMRect, depth: number): React.CSSProperti
       ? Math.max(4, anchorRect.left - MENU_WIDTH_EST - 4)
       : preferredLeft;
 
-  const top = Math.max(4, Math.min(anchorRect.top, vpH - MENU_HEIGHT_EST - 4));
+  // Align top with the trigger row. Only push up enough to keep at least
+  // 80px of the menu visible — the panel's own max-h + overflow-y-auto
+  // handles the case where content is taller than the remaining space.
+  const MIN_VISIBLE = 80;
+  const top = Math.max(4, Math.min(anchorRect.top, vpH - MIN_VISIBLE - 4));
 
   return { position: "fixed", top, left, zIndex: 9999 + depth };
 }
@@ -220,10 +223,6 @@ function ReportBugBtn() {
   );
 }
 
-function MenuIcon({ icon }: { icon?: string }) {
-  return <MenuDawIcon icon={icon} size={12} />;
-}
-
 // ─── Recursive MenuPanel ────────────────────────────────────────────────────
 /**
  * Generic recursive menu panel.
@@ -257,10 +256,10 @@ function MenuPanel({
   onAction: (item: CommandMenuItem) => void;
 }) {
   return (
-    <div className="min-w-[15rem] text-xs rounded-md border border-daw-border bg-daw-surface p-1 shadow-[0_12px_36px_rgba(0,0,0,0.52)]">
+    <div className="min-w-[13rem] max-h-[70vh] overflow-y-auto text-xs rounded-md border border-daw-border bg-daw-surface p-1 shadow-[0_12px_36px_rgba(0,0,0,0.52)]">
       {items.map((item) => {
         if (item.type === "separator") {
-          return <div key={item.id} className="my-1 h-px bg-daw-border" />;
+          return <div key={item.id} className="my-0.5 h-px bg-daw-border" />;
         }
 
         const state = getItemState(item);
@@ -278,7 +277,6 @@ function MenuPanel({
                 disabled={!enabled}
                 onPointerEnter={(e) => {
                   if (!enabled) {
-                    // Close anything open at this depth
                     onPathChange(openPath.slice(0, depth), layers.slice(0, depth));
                     return;
                   }
@@ -289,13 +287,13 @@ function MenuPanel({
                   );
                 }}
                 className={[
-                  "grid h-7 w-full grid-cols-[1.25rem_minmax(0,1fr)_0.75rem] items-center gap-2 rounded px-2 text-left text-[11px] text-daw-text transition-colors hover:bg-daw-surface-high disabled:cursor-not-allowed disabled:opacity-35",
+                  "flex h-6 w-full items-center gap-1.5 rounded px-2 text-left text-[11px] text-daw-text transition-colors hover:bg-daw-surface-high disabled:cursor-not-allowed disabled:opacity-35",
                   isOpen ? "bg-daw-surface-high" : "",
                 ].join(" ")}
               >
-                <MenuIcon icon={item.icon} />
+                <span className="w-3 shrink-0" />
                 <span className="min-w-0 flex-1 truncate">{item.label}</span>
-                <ChevronRight size={12} className="text-daw-faint" />
+                <ChevronRight size={11} className="shrink-0 text-daw-faint" />
               </button>
 
               {/* Child panel rendered into document.body to avoid any overflow clipping */}
@@ -330,7 +328,6 @@ function MenuPanel({
             type="button"
             disabled={!enabled}
             onPointerEnter={() => {
-              // Close any submenu open at this depth
               if (openPath[depth] !== undefined) {
                 onPathChange(openPath.slice(0, depth), layers.slice(0, depth));
               }
@@ -339,18 +336,16 @@ function MenuPanel({
               if (enabled) onAction(item);
             }}
             className={[
-              "grid h-7 w-full grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-2 rounded px-2 text-left text-[11px] transition-colors hover:bg-daw-surface-high disabled:cursor-not-allowed disabled:opacity-35",
+              "flex h-6 w-full items-center gap-1.5 rounded px-2 text-left text-[11px] transition-colors hover:bg-daw-surface-high disabled:cursor-not-allowed disabled:opacity-35",
               item.danger ? "text-daw-red" : "text-daw-text",
             ].join(" ")}
           >
-            <span className="flex w-5 shrink-0 items-center justify-center text-daw-faint">
-              {checked ? <Check size={12} className="text-daw-accent" /> : <MenuIcon icon={item.icon} />}
+            <span className="flex w-3 shrink-0 items-center justify-center">
+              {checked && <Check size={10} className="text-daw-accent" />}
             </span>
             <span className="min-w-0 flex-1 truncate">{item.label}</span>
-            {item.accelerator ? (
-              <span className="pl-5 text-right text-[10px] text-daw-faint">{item.accelerator}</span>
-            ) : (
-              <span />
+            {item.accelerator && (
+              <span className="shrink-0 pl-4 text-right text-[10px] text-daw-faint">{item.accelerator}</span>
             )}
           </button>
         );

@@ -11,7 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "./ui/menu";
 import { forwardRef, useMemo, useRef, useState, useEffect, type ButtonHTMLAttributes } from "react";
-import { useProjectStore } from "../store/projectStore";
+import { useProjectStore, type InsertTarget } from "../store/projectStore";
 import { useUIStore } from "../store/uiStore";
 import { useHistoryStore } from "../store/historyStore";
 import { SetTrackVolumeCommand, SetTrackPanCommand, SetTrackMuteCommand, SetTrackSoloCommand, SetTrackPreviewModeCommand } from "../commands";
@@ -42,7 +42,7 @@ type InsertPickerPlugin =
       category: string;
       format: "Built-in";
       kind: "effect" | "instrument";
-      status: string;
+      channel: "Mono" | "Stereo";
       plugin: BuiltInPlugin;
     }
   | {
@@ -53,7 +53,7 @@ type InsertPickerPlugin =
       category: string;
       format: AudioPluginRegistryEntry["format"];
       kind: AudioPluginRegistryEntry["kind"];
-      status: string;
+      channel: "Mono" | "Stereo";
       plugin: AudioPluginRegistryEntry;
     };
 
@@ -194,8 +194,8 @@ const SectionAddButton = forwardRef<HTMLButtonElement, SectionAddButtonProps>(
   }
 );
 
-function InsertsAddMenu({ accent, trackId }: { accent: string; trackId?: string }) {
-  const { addInsertDevice } = useProjectStore();
+function InsertsAddMenu({ accent, target }: { accent: string; target?: InsertTarget }) {
+  const { addInsertToTarget } = useProjectStore();
   const [query, setQuery] = useState("");
   const [formatFilter, setFormatFilter] = useState<"all" | "Built-in" | "VST3" | "CLAP">("all");
   const [kindFilter, setKindFilter] = useState<"all" | "effect" | "instrument">("all");
@@ -219,7 +219,7 @@ function InsertsAddMenu({ accent, trackId }: { accent: string; trackId?: string 
       category: plugin.type,
       format: "Built-in",
       kind: "effect",
-      status: "Ready",
+      channel: "Stereo",
       plugin,
     }));
     const native = nativePlugins.map<InsertPickerPlugin>((plugin) => ({
@@ -230,7 +230,7 @@ function InsertsAddMenu({ accent, trackId }: { accent: string; trackId?: string 
       category: pluginDisplayCategory(plugin),
       format: plugin.format,
       kind: plugin.kind,
-      status: plugin.sdkMetadataLoaded ? "Ready" : "Indexed",
+      channel: "Stereo",
       plugin,
     }));
     return [...builtIns, ...native];
@@ -241,12 +241,12 @@ function InsertsAddMenu({ accent, trackId }: { accent: string; trackId?: string 
     return pickerPlugins
       .filter((plugin) => formatFilter === "all" || plugin.format === formatFilter)
       .filter((plugin) => kindFilter === "all" || plugin.kind === kindFilter)
-      .filter((plugin) => !q || `${plugin.name} ${plugin.vendor} ${plugin.category} ${plugin.format} ${plugin.status}`.toLowerCase().includes(q))
+      .filter((plugin) => !q || `${plugin.name} ${plugin.vendor} ${plugin.category} ${plugin.format} ${plugin.channel}`.toLowerCase().includes(q))
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [formatFilter, kindFilter, pickerPlugins, query]);
 
   const add = (plugin: InsertPickerPlugin) => {
-    if (!trackId) return;
+    if (!target) return;
     const device: InsertDevice = plugin.source === "builtin"
       ? {
           id: crypto.randomUUID(),
@@ -257,17 +257,27 @@ function InsertsAddMenu({ accent, trackId }: { accent: string; trackId?: string 
           params: plugin.plugin.defaultParams(),
         }
       : nativePluginToInsert(plugin.plugin);
-    addInsertDevice(trackId, device);
-    if (plugin.source === "native") void openNativeInsertEditor(trackId, device);
+    addInsertToTarget(target, device);
   };
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <SectionAddButton accent={accent} title="Add insert" disabled={!trackId} />
+        <SectionAddButton accent={accent} title="Add insert" disabled={!target} />
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" sideOffset={4} className="w-[720px] p-1.5">
-        <div className="px-1 pb-1">
+      <DropdownMenuContent
+        align="end"
+        sideOffset={6}
+        collisionPadding={12}
+        className="flex flex-col overflow-hidden p-1.5"
+        style={{
+          width: "520px",
+          minWidth: "min(460px, calc(100vw - 24px))",
+          maxWidth: "min(720px, calc(100vw - 24px))",
+          maxHeight: "min(520px, calc(100vh - 24px))",
+        }}
+      >
+        <div className="shrink-0 px-1 pb-1">
           <DropdownMenuLabel className="px-0 text-[11px]">Add Insert</DropdownMenuLabel>
           <input
             value={query}
@@ -315,7 +325,7 @@ function InsertsAddMenu({ accent, trackId }: { accent: string; trackId?: string 
           </div>
         </div>
         <DropdownMenuSeparator />
-        <div className="max-h-[280px] overflow-y-auto py-0.5">
+        <div className="min-h-0 max-h-[380px] flex-1 overflow-y-auto py-0.5">
           {visiblePlugins.length === 0 ? (
             <div className="px-2 py-3 text-center text-[11px]" style={{ color: semanticColors.text.faint }}>
               No plug-ins match the current filter.
@@ -325,16 +335,22 @@ function InsertsAddMenu({ accent, trackId }: { accent: string; trackId?: string 
               key={`${plugin.source}:${plugin.id}`}
               type="button"
               onClick={() => add(plugin)}
-              className="grid h-[30px] w-full grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1fr)_46px_54px] items-center gap-2 rounded px-2 text-left text-[11px] transition-colors"
+              className="flex min-h-[40px] w-full items-center gap-2 rounded px-2 py-1 text-left text-[11px] transition-colors"
               style={{ color: semanticColors.text.secondary }}
               onMouseEnter={(e) => { e.currentTarget.style.background = semanticColors.surface.hover; }}
               onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
             >
-              <span className="truncate font-medium" style={{ color: semanticColors.text.primary }} title={plugin.name}>{plugin.name}</span>
-              <span className="truncate" title={plugin.vendor}>{plugin.vendor}</span>
-              <span className="truncate" title={plugin.category}>{plugin.category}</span>
-              <span className="truncate text-[10px]" style={{ color: semanticColors.accent.primary }}>{plugin.format}</span>
-              <span className="truncate text-[10px]" style={{ color: plugin.status === "Ready" ? semanticColors.status.success : semanticColors.text.faint }}>{plugin.status}</span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-medium leading-4" style={{ color: semanticColors.text.primary }} title={plugin.name}>
+                  {plugin.name}
+                </span>
+                <span className="mt-0.5 block truncate text-[10px] leading-3" style={{ color: semanticColors.text.faint }} title={`${plugin.category}, ${plugin.vendor}`}>
+                  {plugin.category}, {plugin.vendor}
+                </span>
+              </span>
+              <span className="shrink-0 text-right text-[10px] font-semibold leading-4" style={{ color: semanticColors.text.muted }}>
+                {plugin.channel} <span style={{ color: semanticColors.accent.primary }}>{plugin.format}</span>
+              </span>
             </button>
           ))}
         </div>
@@ -391,16 +407,16 @@ function SendsAddMenu({ accent, track, project }: { accent: string; track: DawTr
 }
 
 function InsertRow({
-  insert, accent, trackId, insertIndex,
-}: { insert: InsertDevice; accent: string; trackId: string; insertIndex: number }) {
+  insert, accent, target, trackId, insertIndex,
+}: { insert: InsertDevice; accent: string; target: InsertTarget; trackId: string; insertIndex: number }) {
   const enabled = insert.enabled;
-  const { toggleInsertDevice, removeInsertDevice } = useProjectStore();
+  const { toggleInsertDevice, removeInsertFromTarget } = useProjectStore();
   const openEditor = () => {
     void openNativeInsertEditor(trackId, insert, insertIndex);
   };
   const removeInsert = () => {
     void closeNativeInsertEditor(trackId, insert.id);
-    removeInsertDevice(trackId, insert.id);
+    removeInsertFromTarget(target, insert.id);
   };
   return (
     <div
@@ -594,6 +610,11 @@ function ChannelStrip({
     isMaster ? "stereo" : track ? effectiveTrackMeterMode(track, files) : "stereo";
   const inserts: InsertDevice[] = track?.inserts ?? [];
   const sends: TrackSend[] = track?.sends ?? [];
+  const insertTarget: InsertTarget | undefined = isMaster
+    ? { type: "master" }
+    : track
+      ? { type: "track", trackId: track.id }
+      : undefined;
   const previewActive = previewMode !== "stereo";
   const canMonitor = track?.type === "audio" || track?.type === "midi" || track?.type === "instrument";
 
@@ -665,12 +686,12 @@ function ChannelStrip({
       {/* ── INSERTS (full only) ── */}
       {showFull && (
         <div className="shrink-0 border-b border-white/[0.045]">
-          <SectionHeader label="Inserts" accent={accent} menu={<InsertsAddMenu accent={accent} trackId={track?.id} />} />
+          <SectionHeader label="Inserts" accent={accent} menu={<InsertsAddMenu accent={accent} target={insertTarget} />} />
           {inserts.length === 0 ? (
             <EmptySlotRow accent={accent} hint="Click + to add a device" />
           ) : (
             track && inserts.map((ins, idx) => (
-              <InsertRow key={ins.id} insert={ins} accent={accent} trackId={track.id} insertIndex={idx} />
+              <InsertRow key={ins.id} insert={ins} accent={accent} target={insertTarget!} trackId={track.id} insertIndex={idx} />
             ))
           )}
         </div>

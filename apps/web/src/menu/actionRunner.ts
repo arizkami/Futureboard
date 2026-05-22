@@ -23,7 +23,7 @@ import {
   rememberSavedProject,
   saveCurrentProjectAndRemember,
 } from "../utils/projectLifecycle";
-import { openPluginManagerWindow, openProjectWizardWindow, openSettingsWindow } from "../utils/dialogWindows";
+import { openAddTrackWindow, openPluginManagerWindow, openProjectWizardWindow, openSettingsWindow } from "../utils/dialogWindows";
 import {
   AddTrackCommand,
   DeleteTrackCommand,
@@ -351,6 +351,10 @@ export function runAction(actionId: string) {
     case "track:flatten":
     case "track:route-to":
     case "track:settings":
+      break;
+
+    case "track:show-add-dialog":
+      void openAddTrackWindow();
       break;
 
     case "track:add-audio": {

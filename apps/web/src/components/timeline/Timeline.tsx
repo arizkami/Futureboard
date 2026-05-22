@@ -1,7 +1,7 @@
 import { ZoomIn, ZoomOut } from "lucide-react";
 import { TimelineGrid } from "./TimelineGrid";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { AddTrackDialog } from "../AddTrackDialog";
+import { useCallback, useEffect, useRef } from "react";
+import { openAddTrackWindow } from "../../utils/dialogWindows";
 import { TimelineRuler } from "./TimelineRuler";
 import { TrackList } from "./TrackList";
 import { Playhead } from "./Playhead";
@@ -34,7 +34,6 @@ type DragGeometry = {
 };
 
 export function Timeline() {
-  const [addTrackOpen, setAddTrackOpen] = useState(false);
   const fileDragDepth = useRef(0);
   const dragGeometry = useRef<DragGeometry | null>(null);
   const dragRaf = useRef<number | null>(null);
@@ -501,7 +500,7 @@ export function Timeline() {
 
       <TimelineRuler
         width={timelineWidth}
-        onAddTrack={() => setAddTrackOpen(true)}
+        onAddTrack={() => void openAddTrackWindow()}
         snapToGrid={snapToGrid}
         onToggleSnapToGrid={toggleSnapToGrid}
       />
@@ -555,7 +554,6 @@ export function Timeline() {
           sits correctly in the ruler area. */}
       <Playhead />
 
-      {addTrackOpen && <AddTrackDialog onClose={() => setAddTrackOpen(false)} />}
 
       {/* zoom controls */}
       <div

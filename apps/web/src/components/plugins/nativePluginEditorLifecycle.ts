@@ -4,6 +4,10 @@ import { useProjectStore } from "../../store/projectStore";
 const editorHandles = new Map<string, number>();
 const pendingEditorOpens = new Map<string, Promise<void>>();
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function editorKey(trackId: string, insertId: string): string {
   return `${trackId}:${insertId}`;
 }
@@ -57,15 +61,24 @@ export async function openNativeInsertEditor(
   console.log(`[PluginEditorLifecycle] open insertId=${insert.id} title="${windowTitle}"`);
 
   const openTask = (async () => {
-    const handle = await window.dawElectron?.sphereAudio?.openInsertEditor({
-      trackId,
-      insertId: insert.id,
-      windowId: pluginEditorWindowId(trackId, insert.id),
-      title: windowTitle,
-      width: 820,
-      height: 560,
-    }) ?? null;
-    if (handle) editorHandles.set(key, handle);
+    let handle: number | null = null;
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      if (attempt > 0) await wait(160);
+      handle = await window.dawElectron?.sphereAudio?.openInsertEditor({
+        trackId,
+        insertId: insert.id,
+        windowId: pluginEditorWindowId(trackId, insert.id),
+        title: windowTitle,
+        width: 820,
+        height: 560,
+      }) ?? null;
+      if (handle) break;
+    }
+    if (handle) {
+      editorHandles.set(key, handle);
+    } else {
+      console.warn(`[PluginEditorLifecycle] open returned no handle for ${key}`);
+    }
   })();
   pendingEditorOpens.set(key, openTask);
   try {
@@ -80,9 +93,7 @@ export async function openNativeInsertEditor(
 export async function closeNativeInsertEditor(trackId: string, insertId: string): Promise<void> {
   const key = editorKey(trackId, insertId);
   await pendingEditorOpens.get(key)?.catch(() => undefined);
-  const handle = editorHandles.get(key);
   editorHandles.delete(key);
-  if (!handle) return;
   try {
     await window.dawElectron?.sphereAudio?.closeInsertEditor(trackId, insertId);
   } catch (error) {

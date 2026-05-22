@@ -7,6 +7,7 @@ import { ExternalMixerWindow } from "./routes/ExternalMixerWindow";
 import { ExternalProjectWizardWindow } from "./routes/ExternalProjectWizardWindow";
 import { ExternalSettingsWindow } from "./routes/ExternalSettingsWindow";
 import { ExternalPluginManagerWindow } from "./routes/ExternalPluginManagerWindow";
+import { ExternalAddTrackWindow } from "./routes/ExternalAddTrackWindow";
 // Supports weights 100-900
 import "@fontsource-variable/inter/opsz.css";
 
@@ -18,6 +19,7 @@ createRoot(document.getElementById("root")!).render(
         <Route path="/projectwizard" element={<ExternalProjectWizardWindow />} />
         <Route path="/settings" element={<ExternalSettingsWindow />} />
         <Route path="/plugin-manager" element={<ExternalPluginManagerWindow />} />
+        <Route path="/addtrack" element={<ExternalAddTrackWindow />} />
         <Route path="/" element={<App />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

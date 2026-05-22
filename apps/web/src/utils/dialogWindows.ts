@@ -87,6 +87,20 @@ export function openSettingsWindow(initialTab: SettingsTab = "general"): Promise
   });
 }
 
+export function openAddTrackWindow(): Promise<string | null> {
+  return openExternalCapableDialog({
+    contentType: "addTrack",
+    title: "New Track",
+    width: 560,
+    height: 660,
+    minWidth: 540,
+    minHeight: 580,
+    resizable: false,
+    maximizable: false,
+    closable: true,
+  });
+}
+
 export function openPluginManagerWindow(): Promise<string | null> {
   return openExternalCapableDialog({
     contentType: "pluginManager",

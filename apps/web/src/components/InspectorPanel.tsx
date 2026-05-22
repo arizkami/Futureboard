@@ -1144,27 +1144,28 @@ function DimRow({ label, value, title }: { label: string; value: string; title?:
 function SectionLabel({ label, count }: { label: string; count?: number }) {
   return (
     <div
-      className="flex items-center gap-2 px-3"
+      className="flex items-center gap-2 px-2"
       style={{
-        height: 24,
-        background: "rgba(255,255,255,0.014)",
-        borderTop: "1px solid rgba(58,69,84,0.38)",
-        borderBottom: "1px solid rgba(58,69,84,0.38)",
+        height: 22,
+        background: "rgba(255,255,255,0.012)",
+        borderTop: "1px solid rgba(58,69,84,0.35)",
+        borderBottom: "1px solid rgba(58,69,84,0.35)",
       }}
     >
+      <div className="h-2.5 w-px shrink-0 rounded-full" style={{ background: "rgba(95,206,208,0.3)" }} />
       <span
-        className="text-[8.5px] font-bold uppercase"
-        style={{ color: "rgba(107,120,136,0.6)", letterSpacing: "0.1em" }}
+        className="text-[8px] font-bold uppercase"
+        style={{ color: "rgba(95,108,124,0.7)", letterSpacing: "0.12em" }}
       >
         {label}
       </span>
       {count !== undefined && (
         <span
-          className="rounded px-1 text-[8px] tabular-nums"
+          className="rounded px-1 text-[7.5px] tabular-nums"
           style={{
-            color: "rgba(107,120,136,0.45)",
-            background: "rgba(255,255,255,0.04)",
-            border: "1px solid rgba(58,69,84,0.4)",
+            color: "rgba(107,120,136,0.4)",
+            background: "rgba(255,255,255,0.035)",
+            border: "1px solid rgba(58,69,84,0.35)",
           }}
         >
           {count}
@@ -1497,13 +1498,19 @@ function FaderRow({
   display: string;
   onChange: (v: number) => void;
 }) {
+  const pct = Math.max(0, Math.min(1, (value - min) / (max - min)));
   return (
     <div
-      className="flex items-center gap-2 border-b border-daw-border px-3"
+      className="relative flex items-center gap-2 border-b border-daw-border px-3"
       style={{ height: 28 }}
     >
+      {/* Proportional fill */}
+      <div
+        className="pointer-events-none absolute inset-y-0 left-0"
+        style={{ width: `${pct * 100}%`, background: color, opacity: 0.055 }}
+      />
       <span
-        className="w-7 shrink-0 text-[8.5px] font-bold uppercase"
+        className="relative w-7 shrink-0 text-[8.5px] font-bold uppercase"
         style={{ color: "rgba(107,120,136,0.6)", letterSpacing: "0.09em" }}
       >
         {label}
@@ -1515,11 +1522,11 @@ function FaderRow({
         step={0.001}
         value={value}
         onChange={(e) => onChange(parseFloat(e.target.value))}
-        className="flex-1 cursor-ew-resize appearance-none"
+        className="relative flex-1 cursor-ew-resize appearance-none"
         style={{ accentColor: color, height: "2px" }}
       />
       <span
-        className="w-10 shrink-0 text-right text-[9px] tabular-nums"
+        className="relative w-10 shrink-0 text-right text-[9px] tabular-nums"
         style={{ color: "rgba(180,192,204,0.65)", fontVariantNumeric: "tabular-nums" }}
       >
         {display}

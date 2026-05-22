@@ -22,8 +22,18 @@ import type {
   WaveformStatus,
 } from "../types/daw";
 import { normalizeProject, normalizeTrack } from "../utils/normalize";
+import { getTrackColor } from "../theme";
 
 const STORAGE_KEY = "mochi-daw-project";
+
+export type InsertTarget =
+  | { type: "track"; trackId: TrackId }
+  | { type: "master" };
+
+type InsertTargetResult = {
+  trackId: TrackId;
+  insert: InsertDevice;
+};
 
 /** Lightweight peak-level metadata stored in Zustand — NO peak data. */
 export type PeakLevelMeta = {
@@ -54,6 +64,37 @@ function markDirty() {
   if (useUIStore.getState().saveStatus !== "unsaved") {
     useUIStore.getState().setSaveStatus("unsaved");
   }
+}
+
+function createMasterTrack(id: TrackId): DawTrack {
+  return normalizeTrack({
+    id,
+    name: "Master",
+    type: "master",
+    color: getTrackColor(0),
+    channelCount: 2,
+    channelMode: "stereo",
+    volume: 1,
+    pan: 0,
+    muted: false,
+    solo: false,
+    armed: false,
+    clips: [],
+    inserts: [],
+    sends: [],
+    output: "master",
+    routing: {
+      inputType: "system-audio",
+      outputType: "master",
+    },
+  });
+}
+
+function resolveMasterTrackId(project: DawProject): TrackId | undefined {
+  if (project.masterTrackId && project.tracks.some((track) => track.id === project.masterTrackId)) {
+    return project.masterTrackId;
+  }
+  return project.tracks.find((track) => track.type === "master")?.id;
 }
 
 type WaveformStatusMap = Map<FileId, WaveformStatus>;
@@ -102,7 +143,9 @@ type ProjectStore = {
 
   // ── Insert devices ─────────────────────────────────────────────────────────
   addInsertDevice: (trackId: TrackId, device: InsertDevice) => void;
+  addInsertToTarget: (target: InsertTarget, device: InsertDevice) => InsertTargetResult | null;
   removeInsertDevice: (trackId: TrackId, deviceId: string) => void;
+  removeInsertFromTarget: (target: InsertTarget, deviceId: string) => InsertTargetResult | null;
   toggleInsertDevice: (trackId: TrackId, deviceId: string) => void;
   updateInsertDeviceParams: (trackId: TrackId, deviceId: string, params: Record<string, number | string | boolean>) => void;
   reorderInsertDevices: (trackId: TrackId, fromIndex: number, toIndex: number) => void;
@@ -427,6 +470,43 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     markDirty();
   },
 
+  addInsertToTarget: (target, device) => {
+    let result: InsertTargetResult | null = null;
+    set((s) => {
+      const existingMasterId = resolveMasterTrackId(s.project);
+      const trackId = target.type === "track"
+        ? target.trackId
+        : existingMasterId ?? crypto.randomUUID();
+      const hasTarget = target.type === "master" || s.project.tracks.some((t) => t.id === trackId);
+      if (!hasTarget) return s;
+
+      let tracks = s.project.tracks;
+      let masterTrackId = s.project.masterTrackId;
+      if (target.type === "master" && !existingMasterId) {
+        tracks = [...tracks, createMasterTrack(trackId)];
+        masterTrackId = trackId;
+      }
+
+      tracks = tracks.map((t) => {
+        if (t.id !== trackId) return t;
+        const inserts = t.inserts ?? [];
+        const insert = { ...device, order: inserts.length };
+        result = { trackId, insert };
+        return { ...t, inserts: [...inserts, insert] };
+      });
+
+      return {
+        project: {
+          ...s.project,
+          masterTrackId,
+          tracks,
+        },
+      };
+    });
+    if (result) markDirty();
+    return result;
+  },
+
   removeInsertDevice: (trackId, deviceId) => {
     set((s) => ({
       project: {
@@ -439,6 +519,29 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       },
     }));
     markDirty();
+  },
+
+  removeInsertFromTarget: (target, deviceId) => {
+    let result: InsertTargetResult | null = null;
+    set((s) => {
+      const trackId = target.type === "track" ? target.trackId : resolveMasterTrackId(s.project);
+      if (!trackId) return s;
+      return {
+        project: {
+          ...s.project,
+          tracks: s.project.tracks.map((t) => {
+            if (t.id !== trackId) return t;
+            const removed = (t.inserts ?? []).find((ins) => ins.id === deviceId);
+            if (!removed) return t;
+            result = { trackId, insert: removed };
+            const filtered = (t.inserts ?? []).filter((ins) => ins.id !== deviceId);
+            return { ...t, inserts: filtered.map((ins, i) => ({ ...ins, order: i })) };
+          }),
+        },
+      };
+    });
+    if (result) markDirty();
+    return result;
   },
 
   toggleInsertDevice: (trackId, deviceId) => {
