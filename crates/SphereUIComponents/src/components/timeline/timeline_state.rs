@@ -11,7 +11,7 @@ pub enum TrackType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MidiNoteState {
     pub pitch: u8,
-    pub start: f32, // beats relative to clip start
+    pub start: f32,    // beats relative to clip start
     pub duration: f32, // beats
 }
 
@@ -23,7 +23,9 @@ pub enum ClipType {
         /// by importing a real audio file. Used as the waveform cache key.
         source_path: Option<String>,
     },
-    Midi { notes: Vec<MidiNoteState> },
+    Midi {
+        notes: Vec<MidiNoteState>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +38,13 @@ pub struct ClipState {
     pub gain: f32,
     pub clip_type: ClipType,
     pub muted: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClipDragItem {
+    pub clip_id: String,
+    pub source_track_id: String,
+    pub start_beat: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -307,9 +316,18 @@ impl TimelineState {
                 name: "Volume".to_string(),
                 visible: false,
                 points: vec![
-                    AutomationPoint { beat: 0.0, value: 0.8 },
-                    AutomationPoint { beat: 4.0, value: 0.5 },
-                    AutomationPoint { beat: 8.0, value: 0.8 },
+                    AutomationPoint {
+                        beat: 0.0,
+                        value: 0.8,
+                    },
+                    AutomationPoint {
+                        beat: 4.0,
+                        value: 0.5,
+                    },
+                    AutomationPoint {
+                        beat: 8.0,
+                        value: 0.8,
+                    },
                 ],
             }],
         };
@@ -365,13 +383,41 @@ impl TimelineState {
                 gain: 1.0,
                 clip_type: ClipType::Midi {
                     notes: vec![
-                        MidiNoteState { pitch: 60, start: 0.0, duration: 1.0 },
-                        MidiNoteState { pitch: 64, start: 1.0, duration: 1.0 },
-                        MidiNoteState { pitch: 67, start: 2.0, duration: 1.0 },
-                        MidiNoteState { pitch: 72, start: 3.0, duration: 2.0 },
-                        MidiNoteState { pitch: 67, start: 5.0, duration: 1.0 },
-                        MidiNoteState { pitch: 64, start: 6.0, duration: 1.0 },
-                        MidiNoteState { pitch: 60, start: 7.0, duration: 1.0 },
+                        MidiNoteState {
+                            pitch: 60,
+                            start: 0.0,
+                            duration: 1.0,
+                        },
+                        MidiNoteState {
+                            pitch: 64,
+                            start: 1.0,
+                            duration: 1.0,
+                        },
+                        MidiNoteState {
+                            pitch: 67,
+                            start: 2.0,
+                            duration: 1.0,
+                        },
+                        MidiNoteState {
+                            pitch: 72,
+                            start: 3.0,
+                            duration: 2.0,
+                        },
+                        MidiNoteState {
+                            pitch: 67,
+                            start: 5.0,
+                            duration: 1.0,
+                        },
+                        MidiNoteState {
+                            pitch: 64,
+                            start: 6.0,
+                            duration: 1.0,
+                        },
+                        MidiNoteState {
+                            pitch: 60,
+                            start: 7.0,
+                            duration: 1.0,
+                        },
                     ],
                 },
                 muted: false,
@@ -466,7 +512,15 @@ impl TimelineState {
     pub fn build_interval_list(&self) -> Vec<f32> {
         let bpb = self.beats_per_bar();
         let mut result = Vec::new();
-        for &sub in &[1.0 / 32.0, 1.0 / 16.0, 1.0 / 8.0, 1.0 / 4.0, 1.0 / 2.0, 1.0, 2.0] {
+        for &sub in &[
+            1.0 / 32.0,
+            1.0 / 16.0,
+            1.0 / 8.0,
+            1.0 / 4.0,
+            1.0 / 2.0,
+            1.0,
+            2.0,
+        ] {
             if sub < bpb {
                 result.push(sub);
             }
@@ -520,10 +574,7 @@ impl TimelineState {
         (snapped * spb).max(0.0)
     }
 
-    pub fn get_arrangement_grid_lines(
-        &self,
-        viewport_width: f32,
-    ) -> Vec<GridLine> {
+    pub fn get_arrangement_grid_lines(&self, viewport_width: f32) -> Vec<GridLine> {
         let ppb = self.viewport.pixels_per_second * self.seconds_per_beat();
         let bpb = self.beats_per_bar();
         let base_sub = match self.grid_division {
@@ -594,7 +645,11 @@ impl TimelineState {
         let mut n = 0u32;
         for t in &self.tracks {
             if let Some(rest) = t.id.strip_prefix("track-") {
-                if let Ok(v) = rest.parse::<u32>() { if v > n { n = v; } }
+                if let Ok(v) = rest.parse::<u32>() {
+                    if v > n {
+                        n = v;
+                    }
+                }
             }
         }
         format!("track-{}", n + 1)
@@ -605,7 +660,11 @@ impl TimelineState {
         for t in &self.tracks {
             for c in &t.clips {
                 if let Some(rest) = c.id.strip_prefix("clip-") {
-                    if let Ok(v) = rest.parse::<u32>() { if v > n { n = v; } }
+                    if let Ok(v) = rest.parse::<u32>() {
+                        if v > n {
+                            n = v;
+                        }
+                    }
                 }
             }
         }
@@ -613,9 +672,15 @@ impl TimelineState {
     }
 
     pub fn track_index_at_y(&self, y: f32) -> Option<usize> {
-        if y < 0.0 { return None; }
-        let idx = (y / TRACK_HEIGHT).floor() as usize;
-        if idx < self.tracks.len() { Some(idx) } else { None }
+        if y < 0.0 {
+            return None;
+        }
+        let idx = ((y + self.viewport.scroll_y) / TRACK_HEIGHT).floor() as usize;
+        if idx < self.tracks.len() {
+            Some(idx)
+        } else {
+            None
+        }
     }
 
     /// Snap a beat value to the current grid (or return it unchanged when snap is off).
@@ -627,9 +692,17 @@ impl TimelineState {
     /// Create a new audio track with auto-assigned id/color.
     pub fn create_audio_track(&mut self) -> String {
         let id = self.next_track_id();
-        let palette = [0x56C7C9_u32, 0x7EDB9A, 0xF2C96D, 0xC290F0, 0xF49AC2, 0x83B8FF];
+        let palette = [
+            0x56C7C9_u32,
+            0x7EDB9A,
+            0xF2C96D,
+            0xC290F0,
+            0xF49AC2,
+            0x83B8FF,
+        ];
         let color = gpui::rgb(palette[self.tracks.len() % palette.len()]);
         let name = format!("Audio {}", self.tracks.len() + 1);
+        let log_name = name.clone();
         self.tracks.push(TrackState {
             id: id.clone(),
             name,
@@ -646,7 +719,16 @@ impl TimelineState {
             clips: Vec::new(),
             automation_lanes: Vec::new(),
         });
+        eprintln!("[import] created track id={} name={}", id, log_name);
         id
+    }
+
+    pub fn selected_audio_track_id(&self) -> Option<String> {
+        let selected = self.selection.selected_track_id.as_deref()?;
+        self.tracks
+            .iter()
+            .find(|track| track.id == selected && matches!(track.track_type, TrackType::Audio))
+            .map(|track| track.id.clone())
     }
 
     // ── Single-source-of-truth mutations ─────────────────────────────────────
@@ -742,6 +824,43 @@ impl TimelineState {
         self.viewport.scroll_x = new_scroll;
     }
 
+    pub fn scroll_by(&mut self, delta_x: f32, delta_y: f32, max_x: f32, max_y: f32) {
+        self.viewport.scroll_x = (self.viewport.scroll_x + delta_x).clamp(0.0, max_x.max(0.0));
+        self.viewport.scroll_y = (self.viewport.scroll_y + delta_y).clamp(0.0, max_y.max(0.0));
+    }
+
+    pub fn move_clip_to_track(&mut self, clip_id: &str, target_track_id: &str, start_beat: f32) {
+        let start_beat = self.snap_beats(start_beat).max(0.0);
+        let mut moved_clip = None;
+        let mut source_track_id = None;
+
+        for track in &mut self.tracks {
+            if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
+                let mut clip = track.clips.remove(index);
+                clip.start_beat = start_beat;
+                moved_clip = Some(clip);
+                source_track_id = Some(track.id.clone());
+                break;
+            }
+        }
+
+        let Some(clip) = moved_clip else {
+            return;
+        };
+
+        let target_id = if self.tracks.iter().any(|track| track.id == target_track_id) {
+            target_track_id.to_string()
+        } else {
+            source_track_id.unwrap_or_else(|| target_track_id.to_string())
+        };
+
+        if let Some(track) = self.tracks.iter_mut().find(|track| track.id == target_id) {
+            track.clips.push(clip);
+            self.selection.selected_track_id = Some(track.id.clone());
+            self.selection.selected_clip_ids = vec![clip_id.to_string()];
+        }
+    }
+
     /// Drop a clip onto the timeline. `drop_x` and `drop_y` are in the track
     /// area coordinate system (header_width and ruler_height already stripped).
     /// `duration_seconds` is used to compute clip length; if 0, falls back to 2 bars.
@@ -753,6 +872,10 @@ impl TimelineState {
         drop_y: f32,
         duration_seconds: f32,
     ) -> String {
+        eprintln!(
+            "[import] drop path={} clip={} drop_x={:.1} drop_y={:.1}",
+            source_path, clip_name, drop_x, drop_y
+        );
         // Resolve target track: an existing lane under drop_y, otherwise create one.
         let track_id = match self.track_index_at_y(drop_y) {
             Some(idx) if matches!(self.tracks[idx].track_type, TrackType::Audio) => {
@@ -765,18 +888,67 @@ impl TimelineState {
         let raw_beats = self.x_to_beats(drop_x.max(0.0));
         let start_beat = self.snap_beats(raw_beats).max(0.0);
 
-        // Length: prefer decoded duration; fallback to 8 beats.
+        self.insert_audio_clip(
+            track_id,
+            source_path,
+            clip_name,
+            start_beat,
+            duration_seconds,
+        )
+    }
+
+    pub fn import_audio_to_selected_or_new_track(
+        &mut self,
+        source_path: String,
+        clip_name: String,
+        duration_seconds: f32,
+    ) -> String {
+        let track_id = self
+            .selected_audio_track_id()
+            .unwrap_or_else(|| self.create_audio_track());
+        eprintln!(
+            "[import] browser path={} clip={} resolved_track_id={}",
+            source_path, clip_name, track_id
+        );
+        let start_beat = self.snap_beats(self.x_to_beats(0.0)).max(0.0);
+        self.insert_audio_clip(
+            track_id,
+            source_path,
+            clip_name,
+            start_beat,
+            duration_seconds,
+        )
+    }
+
+    fn insert_audio_clip(
+        &mut self,
+        track_id: String,
+        source_path: String,
+        clip_name: String,
+        start_beat: f32,
+        duration_seconds: f32,
+    ) -> String {
+        let track_id = if self.tracks.iter().any(|track| track.id == track_id) {
+            track_id
+        } else {
+            eprintln!(
+                "[import] target track id={} missing; creating fallback audio track",
+                track_id
+            );
+            self.create_audio_track()
+        };
+
         let duration_beats = if duration_seconds > 0.0 {
             self.seconds_to_beats(duration_seconds)
         } else {
             8.0
         };
-
         let clip_id = self.next_clip_id();
+        let log_clip_name = clip_name.clone();
         let new_clip = ClipState {
             id: clip_id.clone(),
             name: clip_name,
-            start_beat,
+            start_beat: start_beat.max(0.0),
             duration_beats,
             offset_beats: 0.0,
             gain: 1.0,
@@ -787,13 +959,36 @@ impl TimelineState {
             muted: false,
         };
 
-        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
-            t.clips.push(new_clip);
+        if let Some(track) = self.tracks.iter_mut().find(|track| track.id == track_id) {
+            track.clips.push(new_clip);
         }
-
-        // Select the new clip.
         self.selection.selected_track_id = Some(track_id);
         self.selection.selected_clip_ids = vec![clip_id.clone()];
+        debug_assert!(
+            self.tracks
+                .iter()
+                .any(|track| track.clips.iter().any(|clip| clip.id == clip_id)),
+            "imported clip must be stored inside a renderable track"
+        );
+        let selected_track = self
+            .selection
+            .selected_track_id
+            .as_deref()
+            .unwrap_or("<none>");
+        let total_clips: usize = self.tracks.iter().map(|track| track.clips.len()).sum();
+        eprintln!(
+            "[import] clip id={} name={} track_id={} tracks.len={} clips.len={} selected_clip={}",
+            clip_id,
+            log_clip_name,
+            selected_track,
+            self.tracks.len(),
+            total_clips,
+            self.selection
+                .selected_clip_ids
+                .first()
+                .map(String::as_str)
+                .unwrap_or("<none>")
+        );
         clip_id
     }
 }

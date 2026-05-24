@@ -1,6 +1,7 @@
-use gpui::{div, px, IntoElement, ParentElement, Styled};
-use crate::components::timeline::timeline_state::{ClipState, ClipType, TimelineState};
 use super::waveform_cache::{self, WaveformPeak, WaveformPreview};
+use crate::components::timeline::timeline_state::{ClipState, ClipType, TimelineState};
+use crate::theme::Colors;
+use gpui::{div, px, IntoElement, ParentElement, Styled};
 
 /// Soft upper bound on how far past the clip start we'll attempt to render.
 /// The clip element itself sets `overflow_hidden`, so anything outside this is
@@ -20,17 +21,36 @@ pub fn waveform_canvas(
     clip_width: f32,
 ) -> impl IntoElement {
     // ── Resolve preview ──────────────────────────────────────────────────────
-    let preview = match &clip.clip_type {
-        ClipType::Audio { source_path: Some(path), .. } => {
-            waveform_cache::get_file_waveform(path).unwrap_or_else(|| {
-                waveform_cache::placeholder_waveform(clip.duration_beats * 60.0 / state.bpm.max(1.0))
-            })
-        }
-        _ => waveform_cache::get_or_generate_waveform(
-            &clip.id,
-            &clip.name,
-            clip.duration_beats,
-            state.bpm,
+    let (preview, status_label, is_error) = match &clip.clip_type {
+        ClipType::Audio {
+            source_path: Some(path),
+            ..
+        } => match waveform_cache::get_file_status(path) {
+            waveform_cache::WaveformStatus::Ready(preview) => (preview, None, false),
+            waveform_cache::WaveformStatus::Pending => (
+                waveform_cache::placeholder_waveform(
+                    clip.duration_beats * 60.0 / state.bpm.max(1.0),
+                ),
+                Some("Waveform pending".to_string()),
+                false,
+            ),
+            waveform_cache::WaveformStatus::Error(_) => (
+                waveform_cache::placeholder_waveform(
+                    clip.duration_beats * 60.0 / state.bpm.max(1.0),
+                ),
+                Some("Waveform error".to_string()),
+                true,
+            ),
+        },
+        _ => (
+            waveform_cache::get_or_generate_waveform(
+                &clip.id,
+                &clip.name,
+                clip.duration_beats,
+                state.bpm,
+            ),
+            None,
+            false,
         ),
     };
 
@@ -83,8 +103,12 @@ pub fn waveform_canvas(
     let bar_elements: Vec<_> = (0..num_bars)
         .filter_map(|i| {
             let bar_left = visible_start + i as f32 * step;
-            if bar_left + bar_width <= visible_start { return None; }
-            if bar_left >= visible_end { return None; }
+            if bar_left + bar_width <= visible_start {
+                return None;
+            }
+            if bar_left >= visible_end {
+                return None;
+            }
 
             // Pixel position within the *full* clip (not just the visible slice).
             let pixel_in_clip_start = bar_left;
@@ -94,8 +118,12 @@ pub fn waveform_canvas(
             let start_peak_f = (pixel_in_clip_start / step) * bars_to_full_ratio;
             let end_peak_f = (pixel_in_clip_end / step) * bars_to_full_ratio;
             let start_peak = start_peak_f.floor() as usize;
-            let end_peak = (end_peak_f.ceil() as usize).max(start_peak + 1).min(total_peaks);
-            if start_peak >= total_peaks { return None; }
+            let end_peak = (end_peak_f.ceil() as usize)
+                .max(start_peak + 1)
+                .min(total_peaks);
+            if start_peak >= total_peaks {
+                return None;
+            }
 
             let WaveformPeak { min: mn, max: mx } = aggregate(&lod.peaks[start_peak..end_peak]);
             let mn = mn.max(-1.0);
@@ -120,11 +148,42 @@ pub fn waveform_canvas(
         })
         .collect();
 
+    let overlay = status_label.map(|label| {
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .rounded_sm()
+                    .border(px(1.0))
+                    .border_color(if is_error {
+                        Colors::status_error()
+                    } else {
+                        Colors::border_subtle()
+                    })
+                    .bg(gpui::rgba(0x00000042))
+                    .px(px(6.0))
+                    .py(px(2.0))
+                    .text_size(px(9.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(if is_error {
+                        Colors::status_error()
+                    } else {
+                        Colors::text_muted()
+                    })
+                    .child(label),
+            )
+    });
+
     div()
         .relative()
         .size_full()
         .overflow_hidden()
         .children(bar_elements)
+        .children(overlay)
 }
 
 fn empty_canvas() -> gpui::Div {
@@ -139,8 +198,12 @@ fn aggregate(peaks: &[WaveformPeak]) -> WaveformPeak {
     let mut mn = peaks[0].min;
     let mut mx = peaks[0].max;
     for p in &peaks[1..] {
-        if p.min < mn { mn = p.min; }
-        if p.max > mx { mx = p.max; }
+        if p.min < mn {
+            mn = p.min;
+        }
+        if p.max > mx {
+            mx = p.max;
+        }
     }
     WaveformPeak { min: mn, max: mx }
 }

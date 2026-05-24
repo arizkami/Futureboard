@@ -1,6 +1,6 @@
-use std::sync::{OnceLock, Mutex};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy)]
 pub struct WaveformPeak {
@@ -26,6 +26,13 @@ pub struct WaveformPreview {
     pub lods: Vec<WaveformLod>,
 }
 
+#[derive(Debug, Clone)]
+pub enum WaveformStatus {
+    Pending,
+    Ready(WaveformPreview),
+    Error(String),
+}
+
 /// LOD levels exactly as required: a power-of-two ladder from 256 to 65536.
 /// Anything inside this range is one bilinear interp away from the right level
 /// of detail for the zoom factor.
@@ -33,19 +40,61 @@ pub const LOD_LEVELS: [usize; 9] = [256, 512, 1024, 2048, 4096, 8192, 16384, 327
 
 /// Two caches: synthetic demo clips keyed by id, decoded files keyed by absolute path.
 static CLIP_CACHE: OnceLock<Mutex<HashMap<String, WaveformPreview>>> = OnceLock::new();
-static FILE_CACHE: OnceLock<Mutex<HashMap<String, WaveformPreview>>> = OnceLock::new();
+static FILE_CACHE: OnceLock<Mutex<HashMap<String, WaveformStatus>>> = OnceLock::new();
 
 fn clip_cache() -> &'static Mutex<HashMap<String, WaveformPreview>> {
     CLIP_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn file_cache() -> &'static Mutex<HashMap<String, WaveformPreview>> {
+fn file_cache() -> &'static Mutex<HashMap<String, WaveformStatus>> {
     FILE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Cheap render-path lookup — no decoding, no allocation beyond a clone.
 pub fn get_file_waveform(path: &str) -> Option<WaveformPreview> {
-    file_cache().lock().ok()?.get(path).cloned()
+    match file_cache().lock().ok()?.get(path).cloned()? {
+        WaveformStatus::Ready(preview) => Some(preview),
+        _ => None,
+    }
+}
+
+pub fn get_file_status(path: &str) -> WaveformStatus {
+    file_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(path).cloned())
+        .unwrap_or(WaveformStatus::Pending)
+}
+
+pub fn request_decode_file(path: PathBuf) {
+    let key = path.to_string_lossy().to_string();
+    let should_start = {
+        let Ok(mut cache) = file_cache().lock() else {
+            return;
+        };
+        if cache.contains_key(&key) {
+            false
+        } else {
+            cache.insert(key.clone(), WaveformStatus::Pending);
+            true
+        }
+    };
+
+    if !should_start {
+        return;
+    }
+
+    std::thread::spawn(move || {
+        let decoded = decode_file_uncached(&path);
+        if let Ok(mut cache) = file_cache().lock() {
+            cache.insert(
+                key,
+                decoded
+                    .map(WaveformStatus::Ready)
+                    .unwrap_or_else(|| WaveformStatus::Error("Decode failed".to_string())),
+            );
+        }
+    });
 }
 
 /// Decode a WAV/MP3 (or symphonia-supported) file into a multi-LOD preview.
@@ -54,9 +103,20 @@ pub fn get_file_waveform(path: &str) -> Option<WaveformPreview> {
 pub fn decode_and_cache_file(path: &Path) -> Option<WaveformPreview> {
     let key = path.to_string_lossy().to_string();
     if let Some(existing) = file_cache().lock().ok().and_then(|c| c.get(&key).cloned()) {
-        return Some(existing);
+        if let WaveformStatus::Ready(preview) = existing {
+            return Some(preview);
+        }
     }
 
+    let preview = decode_file_uncached(path)?;
+
+    if let Ok(mut c) = file_cache().lock() {
+        c.insert(key, WaveformStatus::Ready(preview.clone()));
+    }
+    Some(preview)
+}
+
+fn decode_file_uncached(path: &Path) -> Option<WaveformPreview> {
     let ext = path
         .extension()
         .and_then(|s| s.to_str())
@@ -70,10 +130,6 @@ pub fn decode_and_cache_file(path: &Path) -> Option<WaveformPreview> {
     }?;
 
     log_decoded(path, &preview);
-
-    if let Ok(mut c) = file_cache().lock() {
-        c.insert(key, preview.clone());
-    }
     Some(preview)
 }
 
@@ -90,7 +146,11 @@ fn log_decoded(path: &Path, p: &WaveformPreview) {
         total_peaks,
     );
     for lod in &p.lods {
-        eprintln!("[waveform]   lod spp={:>6} peaks={}", lod.samples_per_peak, lod.peaks.len());
+        eprintln!(
+            "[waveform]   lod spp={:>6} peaks={}",
+            lod.samples_per_peak,
+            lod.peaks.len()
+        );
     }
 }
 
@@ -119,11 +179,18 @@ impl LodBuilder {
 
     #[inline]
     fn push(&mut self, v: f32) {
-        if v < self.min { self.min = v; }
-        if v > self.max { self.max = v; }
+        if v < self.min {
+            self.min = v;
+        }
+        if v > self.max {
+            self.max = v;
+        }
         self.count += 1;
         if self.count >= self.samples_per_peak {
-            self.peaks.push(WaveformPeak { min: self.min, max: self.max });
+            self.peaks.push(WaveformPeak {
+                min: self.min,
+                max: self.max,
+            });
             self.min = 0.0;
             self.max = 0.0;
             self.count = 0;
@@ -132,7 +199,10 @@ impl LodBuilder {
 
     fn finalize(mut self) -> WaveformLod {
         if self.count > 0 {
-            self.peaks.push(WaveformPeak { min: self.min, max: self.max });
+            self.peaks.push(WaveformPeak {
+                min: self.min,
+                max: self.max,
+            });
         }
         WaveformLod {
             samples_per_peak: self.samples_per_peak,
@@ -164,7 +234,10 @@ impl LodSet {
     }
 
     fn finalize(self) -> Vec<WaveformLod> {
-        self.builders.into_iter().map(LodBuilder::finalize).collect()
+        self.builders
+            .into_iter()
+            .map(LodBuilder::finalize)
+            .collect()
     }
 }
 
@@ -193,11 +266,16 @@ fn decode_wav(path: &Path) -> Option<WaveformPreview> {
                 let mut got = 0usize;
                 for _ in 0..channels {
                     match iter.next() {
-                        Some(Ok(s)) => { sum += s; got += 1; }
+                        Some(Ok(s)) => {
+                            sum += s;
+                            got += 1;
+                        }
                         _ => break,
                     }
                 }
-                if got == 0 { break; }
+                if got == 0 {
+                    break;
+                }
                 let mono = (sum / got as f32).clamp(-1.0, 1.0);
                 lods.push(mono);
                 frames_seen += 1;
@@ -210,11 +288,16 @@ fn decode_wav(path: &Path) -> Option<WaveformPreview> {
                 let mut got = 0usize;
                 for _ in 0..channels {
                     match iter.next() {
-                        Some(Ok(s)) => { sum += s as f32 / int_scale; got += 1; }
+                        Some(Ok(s)) => {
+                            sum += s as f32 / int_scale;
+                            got += 1;
+                        }
                         _ => break,
                     }
                 }
-                if got == 0 { break; }
+                if got == 0 {
+                    break;
+                }
                 let mono = (sum / got as f32).clamp(-1.0, 1.0);
                 lods.push(mono);
                 frames_seen += 1;
@@ -222,11 +305,15 @@ fn decode_wav(path: &Path) -> Option<WaveformPreview> {
         }
     }
 
-    if frames_seen == 0 { return None; }
+    if frames_seen == 0 {
+        return None;
+    }
 
     let duration_seconds = if sample_rate > 0 {
         frames_seen as f32 / sample_rate as f32
-    } else { 0.0 };
+    } else {
+        0.0
+    };
 
     Some(WaveformPreview {
         sample_rate,
@@ -253,7 +340,12 @@ fn decode_via_symphonia(path: &Path) -> Option<WaveformPreview> {
     }
 
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
         .ok()?;
     let mut format = probed.format;
     let track = format.default_track()?.clone();
@@ -280,7 +372,9 @@ fn decode_via_symphonia(path: &Path) -> Option<WaveformPreview> {
             Ok(p) => p,
             Err(_) => break,
         };
-        if packet.track_id() != track_id { continue; }
+        if packet.track_id() != track_id {
+            continue;
+        }
 
         let decoded = match decoder.decode(&packet) {
             Ok(d) => d,
@@ -289,7 +383,10 @@ fn decode_via_symphonia(path: &Path) -> Option<WaveformPreview> {
         };
 
         if sample_buf.is_none() {
-            sample_buf = Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec()));
+            sample_buf = Some(SampleBuffer::<f32>::new(
+                decoded.capacity() as u64,
+                *decoded.spec(),
+            ));
         }
         let buf = sample_buf.as_mut()?;
         buf.copy_interleaved_ref(decoded);
@@ -309,7 +406,9 @@ fn decode_via_symphonia(path: &Path) -> Option<WaveformPreview> {
         }
     }
 
-    if frames_decoded == 0 { return None; }
+    if frames_decoded == 0 {
+        return None;
+    }
 
     let duration_seconds = frames_decoded as f32 / sample_rate as f32;
 
@@ -347,7 +446,10 @@ pub fn placeholder_waveform(duration_seconds: f32) -> WaveformPreview {
     let lod = WaveformLod {
         samples_per_peak: LOD_LEVELS[LOD_LEVELS.len() / 2],
         peaks: (0..256)
-            .map(|_| WaveformPeak { min: -0.03, max: 0.03 })
+            .map(|_| WaveformPeak {
+                min: -0.03,
+                max: 0.03,
+            })
             .collect(),
     };
     WaveformPreview {
@@ -372,7 +474,10 @@ fn generate_waveform_preview(name: &str, duration_beats: f32, bpm: f32) -> Wavef
     let name_lower = name.to_lowercase();
     let kind = if name_lower.contains("drum") || name_lower.contains("loop") {
         SynthKind::Drums
-    } else if name_lower.contains("vocal") || name_lower.contains("harmony") || name_lower.contains("dry") {
+    } else if name_lower.contains("vocal")
+        || name_lower.contains("harmony")
+        || name_lower.contains("dry")
+    {
         SynthKind::Vocals
     } else {
         SynthKind::Generic
@@ -394,7 +499,11 @@ fn generate_waveform_preview(name: &str, duration_beats: f32, bpm: f32) -> Wavef
 }
 
 #[derive(Copy, Clone)]
-enum SynthKind { Drums, Vocals, Generic }
+enum SynthKind {
+    Drums,
+    Vocals,
+    Generic,
+}
 
 fn synth_sample(kind: SynthKind, t: f32, duration: f32) -> f32 {
     let beat = t * 2.0; // arbitrary tempo for synthetic preview
@@ -403,12 +512,19 @@ fn synth_sample(kind: SynthKind, t: f32, duration: f32) -> f32 {
             let beat_fract = beat.fract();
             let beat_int = beat.floor() as i32;
             let mut amp = 0.04;
-            if beat_int % 4 == 0 { amp += 0.82 * (-6.0 * beat_fract).exp(); }
-            if beat_int % 4 == 2 { amp += 0.68 * (-4.5 * beat_fract).exp(); }
+            if beat_int % 4 == 0 {
+                amp += 0.82 * (-6.0 * beat_fract).exp();
+            }
+            if beat_int % 4 == 2 {
+                amp += 0.68 * (-4.5 * beat_fract).exp();
+            }
             let hat_pos = (beat * 2.0).fract();
-            if hat_pos < 0.12 { amp += 0.28 * (-14.0 * hat_pos).exp(); }
+            if hat_pos < 0.12 {
+                amp += 0.28 * (-14.0 * hat_pos).exp();
+            }
             let noise = ((t * 83.19).sin() * 43758.5453).fract() - 0.5;
-            (amp + noise * 0.05).clamp(-1.0, 1.0) * if (t * 1000.0).sin() > 0.0 { 1.0 } else { -1.0 }
+            (amp + noise * 0.05).clamp(-1.0, 1.0)
+                * if (t * 1000.0).sin() > 0.0 { 1.0 } else { -1.0 }
         }
         SynthKind::Vocals => {
             let phrase_beat = beat % 4.0;
@@ -436,8 +552,13 @@ fn synth_sample(kind: SynthKind, t: f32, duration: f32) -> f32 {
 ///
 /// `samples_per_pixel`: how many decoded samples fall under one screen pixel for
 /// the clip at the current zoom level.
-pub fn pick_lod<'a>(preview: &'a WaveformPreview, samples_per_pixel: f32) -> Option<&'a WaveformLod> {
-    if preview.lods.is_empty() { return None; }
+pub fn pick_lod<'a>(
+    preview: &'a WaveformPreview,
+    samples_per_pixel: f32,
+) -> Option<&'a WaveformLod> {
+    if preview.lods.is_empty() {
+        return None;
+    }
     // Target: choose the largest spp that is still ≤ samples_per_pixel.
     // i.e. coarser than 1 peak per pixel by no more than 1 level — keeps detail
     // without overdrawing thousands of bars per clip.

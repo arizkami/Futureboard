@@ -1,5 +1,5 @@
-use gpui::{div, px, IntoElement, ParentElement, Styled};
 use crate::theme::Colors;
+use gpui::{div, px, IntoElement, ParentElement, Styled};
 
 pub fn status_bar() -> impl IntoElement {
     div()
@@ -25,4 +25,3 @@ pub fn status_bar() -> impl IntoElement {
                 .child("44100 Hz  32-bit  -  DSP: 0.0%"),
         )
 }
-

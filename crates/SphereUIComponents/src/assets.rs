@@ -23,40 +23,53 @@ pub mod icons {
     pub const TIMER: &str = include_str!("../../../packages/shared/lucide/icons/timer.svg");
     pub const SAVE: &str = include_str!("../../../packages/shared/lucide/icons/save.svg");
     pub const FOLDER: &str = include_str!("../../../packages/shared/lucide/icons/folder.svg");
-    pub const FOLDER_OPEN: &str = include_str!("../../../packages/shared/lucide/icons/folder-open.svg");
+    pub const FOLDER_OPEN: &str =
+        include_str!("../../../packages/shared/lucide/icons/folder-open.svg");
     pub const SHARE: &str = include_str!("../../../packages/shared/lucide/icons/share.svg");
-    pub const PANEL_BOTTOM: &str = include_str!("../../../packages/shared/lucide/icons/panel-bottom.svg");
-    pub const PANEL_RIGHT: &str = include_str!("../../../packages/shared/lucide/icons/panel-right.svg");
+    pub const PANEL_BOTTOM: &str =
+        include_str!("../../../packages/shared/lucide/icons/panel-bottom.svg");
+    pub const PANEL_RIGHT: &str =
+        include_str!("../../../packages/shared/lucide/icons/panel-right.svg");
     pub const BUG: &str = include_str!("../../../packages/shared/lucide/icons/bug.svg");
     pub const MINUS: &str = include_str!("../../../packages/shared/lucide/icons/minus.svg");
     pub const X: &str = include_str!("../../../packages/shared/lucide/icons/x.svg");
-    
+
     // Window controls
-    pub const GENERIC_MAXIMIZE: &str = include_str!("../../../packages/shared/icons/generic_maximize.svg");
-    pub const GENERIC_MINIMIZE: &str = include_str!("../../../packages/shared/icons/generic_minimize.svg");
-    pub const GENERIC_RESTORE: &str = include_str!("../../../packages/shared/icons/generic_restore.svg");
-    pub const GENERIC_CLOSE: &str = include_str!("../../../packages/shared/icons/generic_close.svg");
-    
+    pub const GENERIC_MAXIMIZE: &str =
+        include_str!("../../../packages/shared/icons/generic_maximize.svg");
+    pub const GENERIC_MINIMIZE: &str =
+        include_str!("../../../packages/shared/icons/generic_minimize.svg");
+    pub const GENERIC_RESTORE: &str =
+        include_str!("../../../packages/shared/icons/generic_restore.svg");
+    pub const GENERIC_CLOSE: &str =
+        include_str!("../../../packages/shared/icons/generic_close.svg");
+
     // Additional icons
-    pub const MOUSE_POINTER: &str = include_str!("../../../packages/shared/lucide/icons/mouse-pointer.svg");
+    pub const MOUSE_POINTER: &str =
+        include_str!("../../../packages/shared/lucide/icons/mouse-pointer.svg");
     pub const PENCIL: &str = include_str!("../../../packages/shared/lucide/icons/pencil.svg");
     pub const SCISSORS: &str = include_str!("../../../packages/shared/lucide/icons/scissors.svg");
     pub const LINK: &str = include_str!("../../../packages/shared/lucide/icons/link.svg");
     pub const VOLUME_X: &str = include_str!("../../../packages/shared/lucide/icons/volume-x.svg");
     pub const CLOCK: &str = include_str!("../../../packages/shared/lucide/icons/clock.svg");
-    pub const SLIDERS_HORIZONTAL: &str = include_str!("../../../packages/shared/lucide/icons/sliders-horizontal.svg");
+    pub const SLIDERS_HORIZONTAL: &str =
+        include_str!("../../../packages/shared/lucide/icons/sliders-horizontal.svg");
     pub const SPARKLES: &str = include_str!("../../../packages/shared/lucide/icons/sparkles.svg");
     pub const PLUS: &str = include_str!("../../../packages/shared/lucide/icons/plus.svg");
     pub const PLUG: &str = include_str!("../../../packages/shared/lucide/icons/plug.svg");
     pub const ROUTE: &str = include_str!("../../../packages/shared/lucide/icons/route.svg");
     pub const MAGNET: &str = include_str!("../../../packages/shared/lucide/icons/magnet.svg");
-    pub const GRIP_VERTICAL: &str = include_str!("../../../packages/shared/lucide/icons/grip-vertical.svg");
+    pub const GRIP_VERTICAL: &str =
+        include_str!("../../../packages/shared/lucide/icons/grip-vertical.svg");
     pub const FILE: &str = include_str!("../../../packages/shared/lucide/icons/file.svg");
-    pub const CHEVRON_RIGHT: &str = include_str!("../../../packages/shared/lucide/icons/chevron-right.svg");
+    pub const CHEVRON_RIGHT: &str =
+        include_str!("../../../packages/shared/lucide/icons/chevron-right.svg");
+    pub const CHEVRON_DOWN: &str = r#"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="m6 9 6 6 6-6"/></svg>"#;
     pub const CHECK: &str = include_str!("../../../packages/shared/lucide/icons/check.svg");
 
     // Tabler outline
-    pub const AUTOMATION: &str = include_str!("../../../packages/shared/tabler-icons/icons/outline/automation.svg");
+    pub const AUTOMATION: &str =
+        include_str!("../../../packages/shared/tabler-icons/icons/outline/automation.svg");
 
     // Playhead downward-pointing triangle
     pub const PLAYHEAD_HANDLE: &str = r#"<svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg"><polygon points="0,0 12,0 6,12" fill="currentColor"/></svg>"#;
@@ -79,7 +92,7 @@ pub const ICON_PANEL_BOTTOM_PATH: &str = "icons/panel-bottom.svg";
 pub const ICON_PANEL_RIGHT_PATH: &str = "icons/panel-right.svg";
 pub const ICON_BUG_PATH: &str = "icons/bug.svg";
 pub const ICON_MAXIMIZE_PATH: &str = "icons/generic_maximize.svg";
-pub const ICON_MINIMIZE_PATH: &str =  "icons/generic_minimize.svg";
+pub const ICON_MINIMIZE_PATH: &str = "icons/generic_minimize.svg";
 pub const ICON_RESTORE_PATH: &str = "icons/generic_restore.svg";
 pub const ICON_X_PATH: &str = "icons/generic_close.svg";
 pub const ICON_MINUS_PATH: &str = "icons/minus.svg";
@@ -101,6 +114,7 @@ pub const ICON_MAGNET_PATH: &str = "icons/magnet.svg";
 pub const ICON_GRIP_VERTICAL_PATH: &str = "icons/grip-vertical.svg";
 pub const ICON_FILE_PATH: &str = "icons/file.svg";
 pub const ICON_CHEVRON_RIGHT_PATH: &str = "icons/chevron-right.svg";
+pub const ICON_CHEVRON_DOWN_PATH: &str = "icons/chevron-down.svg";
 pub const ICON_CHECK_PATH: &str = "icons/check.svg";
 pub const ICON_PLAYHEAD_HANDLE_PATH: &str = "icons/playhead_handle.svg";
 
@@ -113,4 +127,3 @@ pub fn register_fonts(cx: &mut gpui::App) {
         .add_fonts(vec![Cow::Borrowed(INTER_VARIABLE)])
         .expect("failed to load fonts");
 }
-

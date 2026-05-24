@@ -1,6 +1,6 @@
 pub mod assets;
-pub mod theme;
-pub mod layout;
 pub mod components;
 pub mod embedded_assets;
+pub mod layout;
 pub mod menu;
+pub mod theme;

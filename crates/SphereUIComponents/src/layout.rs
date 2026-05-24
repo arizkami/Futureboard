@@ -60,36 +60,39 @@ impl StudioLayout {
     /// TrackHeader and Mixer always read identical values.
     fn build_mixer_callbacks(&self) -> MixerCallbacks {
         let timeline_select = self.timeline.clone();
-        let on_select_track: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
-            std::sync::Arc::new(move |id: &String, _w, cx| {
-                let id = id.clone();
-                timeline_select.update(cx, |t, cx| {
-                    t.state.select_track(&id);
-                    cx.notify();
-                });
+        let on_select_track: std::sync::Arc<
+            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |id: &String, _w, cx| {
+            let id = id.clone();
+            timeline_select.update(cx, |t, cx| {
+                t.state.select_track(&id);
+                cx.notify();
             });
+        });
 
         let timeline_vol = self.timeline.clone();
-        let on_volume_change: std::sync::Arc<dyn Fn(&(String, f32), &mut Window, &mut gpui::App) + 'static> =
-            std::sync::Arc::new(move |(id, v): &(String, f32), _w, cx| {
-                let id = id.clone();
-                let v = *v;
-                timeline_vol.update(cx, |t, cx| {
-                    t.state.set_track_volume(&id, v);
-                    cx.notify();
-                });
+        let on_volume_change: std::sync::Arc<
+            dyn Fn(&(String, f32), &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |(id, v): &(String, f32), _w, cx| {
+            let id = id.clone();
+            let v = *v;
+            timeline_vol.update(cx, |t, cx| {
+                t.state.set_track_volume(&id, v);
+                cx.notify();
             });
+        });
 
         let timeline_pan = self.timeline.clone();
-        let on_pan_change: std::sync::Arc<dyn Fn(&(String, f32), &mut Window, &mut gpui::App) + 'static> =
-            std::sync::Arc::new(move |(id, v): &(String, f32), _w, cx| {
-                let id = id.clone();
-                let v = *v;
-                timeline_pan.update(cx, |t, cx| {
-                    t.state.set_track_pan(&id, v);
-                    cx.notify();
-                });
+        let on_pan_change: std::sync::Arc<
+            dyn Fn(&(String, f32), &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |(id, v): &(String, f32), _w, cx| {
+            let id = id.clone();
+            let v = *v;
+            timeline_pan.update(cx, |t, cx| {
+                t.state.set_track_pan(&id, v);
+                cx.notify();
             });
+        });
 
         let timeline_mute = self.timeline.clone();
         let on_toggle_mute: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
@@ -122,24 +125,26 @@ impl StudioLayout {
             });
 
         let timeline_input = self.timeline.clone();
-        let on_toggle_input: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
-            std::sync::Arc::new(move |id: &String, _w, cx| {
-                let id = id.clone();
-                timeline_input.update(cx, |t, cx| {
-                    t.state.toggle_track_input_monitor(&id);
-                    cx.notify();
-                });
+        let on_toggle_input: std::sync::Arc<
+            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |id: &String, _w, cx| {
+            let id = id.clone();
+            timeline_input.update(cx, |t, cx| {
+                t.state.toggle_track_input_monitor(&id);
+                cx.notify();
             });
+        });
 
         let timeline_master = self.timeline.clone();
-        let on_master_volume_change: std::sync::Arc<dyn Fn(&f32, &mut Window, &mut gpui::App) + 'static> =
-            std::sync::Arc::new(move |v: &f32, _w, cx| {
-                let v = *v;
-                timeline_master.update(cx, |t, cx| {
-                    t.state.set_master_volume(v);
-                    cx.notify();
-                });
+        let on_master_volume_change: std::sync::Arc<
+            dyn Fn(&f32, &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |v: &f32, _w, cx| {
+            let v = *v;
+            timeline_master.update(cx, |t, cx| {
+                t.state.set_master_volume(v);
+                cx.notify();
             });
+        });
 
         MixerCallbacks {
             on_select_track,
@@ -161,24 +166,23 @@ impl Render for StudioLayout {
             cx.notify();
         });
 
-        let on_resize_start = cx.listener(
-            |this, event: &gpui::MouseDownEvent, window, cx| {
-                let bs = &mut this.bottom_panel_state;
-                bs.is_resizing = true;
-                bs.resize_start_y = f32::from(event.position.y);
-                bs.resize_start_height = bs.height_px;
-                let window_h: f32 = window.bounds().size.height.into();
-                bs.max_height_px = (window_h * 0.70).max(bs.min_height_px + 40.0);
-                cx.notify();
-            },
-        );
+        let on_resize_start = cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+            let bs = &mut this.bottom_panel_state;
+            bs.is_resizing = true;
+            bs.resize_start_y = f32::from(event.position.y);
+            bs.resize_start_height = bs.height_px;
+            let window_h: f32 = window.bounds().size.height.into();
+            bs.max_height_px = (window_h * 0.70).max(bs.min_height_px + 40.0);
+            cx.notify();
+        });
 
         let on_resize_move = cx.listener(
             |this, event: &gpui::DragMoveEvent<BottomPanelResizeDrag>, _window, cx| {
                 let bs = &mut this.bottom_panel_state;
                 let cur_y: f32 = event.event.position.y.into();
                 let delta = bs.resize_start_y - cur_y;
-                let new_h = (bs.resize_start_height + delta).clamp(bs.min_height_px, bs.max_height_px);
+                let new_h =
+                    (bs.resize_start_height + delta).clamp(bs.min_height_px, bs.max_height_px);
                 if (new_h - bs.height_px).abs() > 0.5 {
                     bs.height_px = new_h;
                     cx.notify();
@@ -203,17 +207,22 @@ impl Render for StudioLayout {
         let mixer_callbacks = self.build_mixer_callbacks();
 
         // ── File browser callbacks ──────────────────────────────────────
-        let on_browser_navigate: std::sync::Arc<dyn Fn(&PathBuf, &mut Window, &mut gpui::App) + 'static> = {
+        let on_browser_toggle: std::sync::Arc<
+            dyn Fn(&(String, Option<PathBuf>), &mut Window, &mut gpui::App) + 'static,
+        > = {
             let this = cx.entity().clone();
-            std::sync::Arc::new(move |path: &PathBuf, _w, cx| {
+            std::sync::Arc::new(move |(id, path): &(String, Option<PathBuf>), _w, cx| {
+                let id = id.clone();
                 let path = path.clone();
                 this.update(cx, |this, cx| {
-                    this.file_browser.navigate_to(path);
+                    this.file_browser.toggle_node(&id, path.as_deref());
                     cx.notify();
                 });
             })
         };
-        let on_browser_select: std::sync::Arc<dyn Fn(&PathBuf, &mut Window, &mut gpui::App) + 'static> = {
+        let on_browser_select: std::sync::Arc<
+            dyn Fn(&PathBuf, &mut Window, &mut gpui::App) + 'static,
+        > = {
             let this = cx.entity().clone();
             std::sync::Arc::new(move |path: &PathBuf, _w, cx| {
                 let path = path.clone();
@@ -223,50 +232,40 @@ impl Render for StudioLayout {
                 });
             })
         };
-        let on_browser_up: std::sync::Arc<dyn Fn(&(), &mut Window, &mut gpui::App) + 'static> = {
-            let this = cx.entity().clone();
-            std::sync::Arc::new(move |_: &(), _w, cx| {
-                this.update(cx, |this, cx| {
-                    this.file_browser.navigate_up();
-                    cx.notify();
-                });
-            })
-        };
         // Double-click on an audio file imports it onto the timeline using the
         // existing waveform-cache + import_audio_at path.
-        let on_browser_activate: std::sync::Arc<dyn Fn(&PathBuf, &mut Window, &mut gpui::App) + 'static> = {
+        let on_browser_activate: std::sync::Arc<
+            dyn Fn(&PathBuf, &mut Window, &mut gpui::App) + 'static,
+        > = {
             let timeline = self.timeline.clone();
             std::sync::Arc::new(move |path: &PathBuf, _w, cx| {
                 let path = path.clone();
+                let path_for_decode = path.clone();
                 timeline.update(cx, |t, cx| {
-                    let decoded = waveform_cache::decode_and_cache_file(&path);
-                    let duration = decoded
-                        .as_ref()
-                        .map(|p| p.duration_seconds)
-                        .unwrap_or(0.0);
+                    let path_key = path.to_string_lossy().to_string();
+                    let duration = match waveform_cache::get_file_status(&path_key) {
+                        waveform_cache::WaveformStatus::Ready(preview) => preview.duration_seconds,
+                        _ => 0.0,
+                    };
                     let name = path
                         .file_name()
                         .and_then(|n| n.to_str())
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| "Imported Audio".to_string());
-                    // Drop at scroll origin on whatever lane currently sits at
-                    // y=0; if none, `import_audio_at` makes a new track.
-                    t.state.import_audio_at(
-                        path.to_string_lossy().to_string(),
-                        name,
-                        0.0,
-                        1.0e9_f32,
-                        duration,
-                    );
+                    t.state
+                        .import_audio_to_selected_or_new_track(path_key, name, duration);
                     cx.notify();
                 });
+                waveform_cache::request_decode_file(path_for_decode);
             })
         };
 
         let file_browser = self.file_browser.clone();
 
         // ── Top-menu callbacks ─────────────────────────────────────────────
-        let on_open_menu: std::sync::Arc<dyn Fn(&(String, f32), &mut Window, &mut gpui::App) + 'static> = {
+        let on_open_menu: std::sync::Arc<
+            dyn Fn(&(String, f32), &mut Window, &mut gpui::App) + 'static,
+        > = {
             let this = cx.entity().clone();
             std::sync::Arc::new(move |(id, anchor_x): &(String, f32), _w, cx| {
                 let id = id.clone();
@@ -293,7 +292,9 @@ impl Render for StudioLayout {
                 });
             })
         };
-        let on_toggle_submenu: std::sync::Arc<dyn Fn(&(usize, String), &mut Window, &mut gpui::App) + 'static> = {
+        let on_toggle_submenu: std::sync::Arc<
+            dyn Fn(&(usize, String), &mut Window, &mut gpui::App) + 'static,
+        > = {
             let this = cx.entity().clone();
             std::sync::Arc::new(move |(depth, id): &(usize, String), _w, cx| {
                 let depth = *depth;
@@ -311,7 +312,9 @@ impl Render for StudioLayout {
                 });
             })
         };
-        let on_menu_command: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> = {
+        let on_menu_command: std::sync::Arc<
+            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
+        > = {
             std::sync::Arc::new(move |command: &String, _w, _cx| {
                 eprintln!("[menu] command: {}", command);
             })
@@ -321,6 +324,7 @@ impl Render for StudioLayout {
         let menu_anchor_x = self.menu_bar.anchor_x;
         let submenu_path = self.menu_bar.submenu_path.clone();
         let viewport_width: f32 = window.bounds().size.width.into();
+        let viewport_height: f32 = window.bounds().size.height.into();
 
         let dropdown_overlay = open_menu_id.as_ref().and_then(|id| {
             let manifest = crate::menu::MenuManifest::load();
@@ -329,6 +333,7 @@ impl Render for StudioLayout {
                     menu,
                     menu_anchor_x,
                     viewport_width,
+                    viewport_height,
                     &submenu_path,
                     on_toggle_submenu.clone(),
                     on_menu_command.clone(),
@@ -344,7 +349,11 @@ impl Render for StudioLayout {
             .relative()
             .bg(Colors::surface_base())
             .font_family(theme::FONT_FAMILY)
-            .child(components::app_chrome(window, open_menu_id.as_deref(), on_open_menu))
+            .child(components::app_chrome(
+                window,
+                open_menu_id.as_deref(),
+                on_open_menu,
+            ))
             .child(
                 div()
                     .flex()
@@ -353,10 +362,9 @@ impl Render for StudioLayout {
                     .min_h_0()
                     .child(components::sidebar(
                         &file_browser,
-                        on_browser_navigate,
+                        on_browser_toggle,
                         on_browser_select,
                         on_browser_activate,
-                        on_browser_up,
                     ))
                     .child(self.timeline.clone())
                     .child(crate::components::panel::inspector_panel(

@@ -61,7 +61,10 @@ fn menu_area(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> impl IntoE
                 .text_size(px(11.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .bg(bg)
-                .hover(|s| s.bg(Colors::surface_hover()).text_color(Colors::text_primary()))
+                .hover(|s| {
+                    s.bg(Colors::surface_hover())
+                        .text_color(Colors::text_primary())
+                })
                 .id(("top-menu", i))
                 .cursor(gpui::CursorStyle::PointingHand)
                 .on_mouse_down(gpui::MouseButton::Left, move |event, w, cx| {
@@ -108,42 +111,54 @@ fn transport_controls() -> impl IntoElement {
         .child(icon_button(
             Some(assets::ICON_SKIP_BACK_PATH),
             "<<",
-            px(28.0), px(28.0), px(14.0),
+            px(28.0),
+            px(28.0),
+            px(14.0),
             Colors::text_muted(),
         ))
         // Play
         .child(icon_button(
             Some(assets::ICON_PLAY_PATH),
             ">",
-            px(28.0), px(28.0), px(14.0),
+            px(28.0),
+            px(28.0),
+            px(14.0),
             Colors::text_muted(),
         ))
         // Stop
         .child(icon_button(
             Some(assets::ICON_SQUARE_PATH),
             "[]",
-            px(28.0), px(28.0), px(14.0),
+            px(28.0),
+            px(28.0),
+            px(14.0),
             Colors::text_muted(),
         ))
         // Record
         .child(icon_button(
             Some(assets::ICON_CIRCLE_PATH),
             "REC",
-            px(28.0), px(28.0), px(14.0),
+            px(28.0),
+            px(28.0),
+            px(14.0),
             Colors::status_error(),
         ))
         // Loop
         .child(icon_button(
             Some(assets::ICON_REPEAT2_PATH),
             "LOOP",
-            px(28.0), px(28.0), px(14.0),
+            px(28.0),
+            px(28.0),
+            px(14.0),
             Colors::text_muted(),
         ))
         // Metronome
         .child(icon_button(
             Some(assets::ICON_TIMER_PATH),
             "MET",
-            px(28.0), px(28.0), px(14.0),
+            px(28.0),
+            px(28.0),
+            px(14.0),
             Colors::text_muted(),
         ))
         .child(divider())
@@ -247,21 +262,27 @@ fn panel_toggles() -> impl IntoElement {
         .child(icon_button(
             Some(assets::ICON_FOLDER_OPEN_PATH),
             "BROWSER",
-            px(28.0), px(28.0), px(14.0),
+            px(28.0),
+            px(28.0),
+            px(14.0),
             Colors::text_muted(),
         ))
         // Mixer
         .child(icon_button(
             Some(assets::ICON_PANEL_BOTTOM_PATH),
             "MIXER",
-            px(28.0), px(28.0), px(14.0),
+            px(28.0),
+            px(28.0),
+            px(14.0),
             Colors::text_muted(),
         ))
         // Inspector
         .child(icon_button(
             Some(assets::ICON_PANEL_RIGHT_PATH),
             "INSPECT",
-            px(28.0), px(28.0), px(14.0),
+            px(28.0),
+            px(28.0),
+            px(14.0),
             Colors::text_muted(),
         ))
 }
@@ -277,29 +298,35 @@ fn utility_buttons() -> impl IntoElement {
         .child(icon_button(
             Some(assets::ICON_FOLDER_PATH),
             "IMPORT",
-            px(28.0), px(28.0), px(14.0),
+            px(28.0),
+            px(28.0),
+            px(14.0),
             Colors::text_muted(),
         ))
         // Save
         .child(icon_button(
             Some(assets::ICON_SAVE_PATH),
             "SAVE",
-            px(28.0), px(28.0), px(14.0),
+            px(28.0),
+            px(28.0),
+            px(14.0),
             Colors::text_muted(),
         ))
         // Share
         .child(icon_button(
             Some(assets::ICON_SHARE_PATH),
             "SHARE",
-            px(28.0), px(28.0), px(14.0),
+            px(28.0),
+            px(28.0),
+            px(14.0),
             Colors::text_muted(),
         ))
 }
 
 fn report_bug_button() -> impl IntoElement {
-    let amber_bg     = rgba(0xFBBF2412_u32);  // rgba(251,191,36, 0.07)
-    let amber_text   = rgba(0xFBBF24B3_u32);  // rgba(251,191,36, 0.70)
-    let amber_border = rgba(0xFBBF2438_u32);  // rgba(251,191,36, 0.22)
+    let amber_bg = rgba(0xFBBF2412_u32); // rgba(251,191,36, 0.07)
+    let amber_text = rgba(0xFBBF24B3_u32); // rgba(251,191,36, 0.70)
+    let amber_border = rgba(0xFBBF2438_u32); // rgba(251,191,36, 0.22)
 
     div()
         .flex()
@@ -312,7 +339,10 @@ fn report_bug_button() -> impl IntoElement {
         .bg(amber_bg)
         .border_1()
         .border_color(amber_border)
-        .hover(|s| s.bg(rgba(0xFBBF2424_u32)).border_color(rgba(0xFBBF2466_u32)))
+        .hover(|s| {
+            s.bg(rgba(0xFBBF2424_u32))
+                .border_color(rgba(0xFBBF2466_u32))
+        })
         .child(
             svg()
                 .path(assets::ICON_BUG_PATH)
@@ -344,19 +374,40 @@ fn window_controls(window: &gpui::Window) -> impl IntoElement {
         .items_center()
         .h_full()
         .child(
-            icon_button(Some(assets::ICON_MINIMIZE_PATH), "-", px(32.0), px(32.0), px(12.0), Colors::text_muted())
-                .window_control_area(WindowControlArea::Min)
-                .occlude(),
+            icon_button(
+                Some(assets::ICON_MINIMIZE_PATH),
+                "-",
+                px(32.0),
+                px(32.0),
+                px(12.0),
+                Colors::text_muted(),
+            )
+            .window_control_area(WindowControlArea::Min)
+            .occlude(),
         )
         .child(
-            icon_button(Some(max_path), max_fallback, px(32.0), px(32.0), px(12.0), Colors::text_muted())
-                .window_control_area(WindowControlArea::Max)
-                .occlude(),
+            icon_button(
+                Some(max_path),
+                max_fallback,
+                px(32.0),
+                px(32.0),
+                px(12.0),
+                Colors::text_muted(),
+            )
+            .window_control_area(WindowControlArea::Max)
+            .occlude(),
         )
         .child(
-            icon_button(Some(assets::ICON_X_PATH), "X", px(32.0), px(32.0), px(12.0), Colors::text_muted())
-                .window_control_area(WindowControlArea::Close)
-                .occlude(),
+            icon_button(
+                Some(assets::ICON_X_PATH),
+                "X",
+                px(32.0),
+                px(32.0),
+                px(12.0),
+                Colors::text_muted(),
+            )
+            .window_control_area(WindowControlArea::Close)
+            .occlude(),
         )
 }
 

@@ -1,10 +1,10 @@
-use gpui::{div, px, svg, IntoElement, ParentElement, Styled};
-use crate::theme::Colors;
 use crate::components::timeline::timeline_state::TimelineState;
+use crate::theme::Colors;
+use gpui::{div, px, svg, IntoElement, ParentElement, Styled};
 
 pub fn playhead(state: &TimelineState) -> impl IntoElement {
     let x = state.beats_to_x(state.transport.playhead_beats);
-    
+
     // Position it relative to the scrollable content area
     div()
         .absolute()
@@ -22,6 +22,6 @@ pub fn playhead(state: &TimelineState) -> impl IntoElement {
                 .left(px(-5.5)) // center a 12px wide handle: left = -6px + 0.5px (half line width) = -5.5px
                 .w(px(12.0))
                 .h(px(12.0))
-                .text_color(Colors::accent_primary())
+                .text_color(Colors::accent_primary()),
         )
 }

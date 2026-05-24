@@ -152,7 +152,10 @@ fn track_inspector(track: &TrackState) -> impl IntoElement {
     let pan = if track.pan.abs() < 0.01 {
         "Center".to_string()
     } else if track.pan < 0.0 {
-        format!("L {}", (track.pan * -100.0).round().clamp(1.0, 100.0) as i32)
+        format!(
+            "L {}",
+            (track.pan * -100.0).round().clamp(1.0, 100.0) as i32
+        )
     } else {
         format!("R {}", (track.pan * 100.0).round().clamp(1.0, 100.0) as i32)
     };
@@ -170,13 +173,7 @@ fn track_inspector(track: &TrackState) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
-                .child(
-                    div()
-                        .w(px(4.0))
-                        .h(px(18.0))
-                        .rounded_sm()
-                        .bg(track.color),
-                )
+                .child(div().w(px(4.0)).h(px(18.0)).rounded_sm().bg(track.color))
                 .child(
                     div()
                         .text_size(px(12.0))
@@ -203,7 +200,11 @@ fn track_inspector(track: &TrackState) -> impl IntoElement {
                 .child(bool_badge("M", track.muted, gpui::rgb(0xF3C969)))
                 .child(bool_badge("S", track.solo, gpui::rgb(0x7BD88F)))
                 .child(bool_badge("R", track.armed, gpui::rgb(0xF06A61)))
-                .child(bool_badge("I", track.input_monitor, Colors::accent_primary())),
+                .child(bool_badge(
+                    "I",
+                    track.input_monitor,
+                    Colors::accent_primary(),
+                )),
         )
 }
 

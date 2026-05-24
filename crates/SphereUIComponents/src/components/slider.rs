@@ -7,8 +7,8 @@
 //! volume.
 
 use gpui::{
-    div, px, App, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Window,
+    div, px, App, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement, ParentElement,
+    Render, StatefulInteractiveElement, Styled, Window,
 };
 
 use crate::theme::Colors;
@@ -122,9 +122,16 @@ pub fn slider(
                         .bg(accent),
                 ),
         )
-        .on_drag(SliderDrag { id: id_string.clone() }, move |drag, _offset, _window, cx| {
-            cx.new(|_| SliderDrag { id: drag.id.clone() })
-        })
+        .on_drag(
+            SliderDrag {
+                id: id_string.clone(),
+            },
+            move |drag, _offset, _window, cx| {
+                cx.new(|_| SliderDrag {
+                    id: drag.id.clone(),
+                })
+            },
+        )
         .on_drag_move::<SliderDrag>(move |event: &DragMoveEvent<SliderDrag>, window, cx| {
             if event.drag(cx).id != id_string {
                 return;

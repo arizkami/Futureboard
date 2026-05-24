@@ -23,12 +23,14 @@
 //!   only the fader area grows to fill remaining height.
 
 use gpui::{
-    div, px, rgba, svg, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled,
+    div, px, rgba, svg, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
+    Styled,
 };
 
 use crate::assets;
-use crate::components::fader::{db_scale_column, db_value_pill, fader as render_fader, FADER_TRACK_HEIGHT};
+use crate::components::fader::{
+    db_scale_column, db_value_pill, fader as render_fader, FADER_TRACK_HEIGHT,
+};
 use crate::components::knob::{format_pan_label, knob_bipolar};
 use crate::components::timeline::timeline_state::{volume, MasterBusState, TrackState, TrackType};
 use crate::theme::Colors;
@@ -53,14 +55,21 @@ const SEC_FOOTER_H: f32 = 26.0;
 /// views can never disagree.
 #[derive(Clone)]
 pub struct MixerCallbacks {
-    pub on_select_track: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    pub on_volume_change: std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
-    pub on_pan_change: std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
-    pub on_toggle_mute: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    pub on_toggle_solo: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    pub on_select_track:
+        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    pub on_volume_change:
+        std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
+    pub on_pan_change:
+        std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
+    pub on_toggle_mute:
+        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    pub on_toggle_solo:
+        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     pub on_toggle_arm: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    pub on_toggle_input: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    pub on_master_volume_change: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
+    pub on_toggle_input:
+        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    pub on_master_volume_change:
+        std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
 }
 
 // ─── Mixer sub-header ("Mixer  N ch") ────────────────────────────────────────
@@ -316,8 +325,14 @@ fn meter_bar_col(level: f32) -> gpui::Div {
     let green = fill.min(green_max);
     let yellow = if fill > green_max {
         (fill - green_max).min(yellow_max - green_max)
-    } else { 0.0 };
-    let red = if fill > yellow_max { fill - yellow_max } else { 0.0 };
+    } else {
+        0.0
+    };
+    let red = if fill > yellow_max {
+        fill - yellow_max
+    } else {
+        0.0
+    };
 
     div()
         .w(px(5.0))
@@ -325,9 +340,30 @@ fn meter_bar_col(level: f32) -> gpui::Div {
         .bg(rgba(0xFFFFFF0A_u32))
         .rounded_sm()
         .relative()
-        .child(div().absolute().bottom(px(0.0)).w_full().h(px(green)).bg(rgba(0x85E0A3CC_u32)))
-        .child(div().absolute().bottom(px(green)).w_full().h(px(yellow)).bg(rgba(0xF4CF7ACC_u32)))
-        .child(div().absolute().bottom(px(green + yellow)).w_full().h(px(red)).bg(rgba(0xF4877FCC_u32)))
+        .child(
+            div()
+                .absolute()
+                .bottom(px(0.0))
+                .w_full()
+                .h(px(green))
+                .bg(rgba(0x85E0A3CC_u32)),
+        )
+        .child(
+            div()
+                .absolute()
+                .bottom(px(green))
+                .w_full()
+                .h(px(yellow))
+                .bg(rgba(0xF4CF7ACC_u32)),
+        )
+        .child(
+            div()
+                .absolute()
+                .bottom(px(green + yellow))
+                .w_full()
+                .h(px(red))
+                .bg(rgba(0xF4877FCC_u32)),
+        )
 }
 
 // ─── Strip sections ─────────────────────────────────────────────────────────
@@ -414,7 +450,11 @@ fn sends_section(track: &TrackState) -> impl IntoElement {
         .child(empty_slot())
 }
 
-fn pan_section(track: &TrackState, callbacks: &MixerCallbacks, _is_selected: bool) -> impl IntoElement {
+fn pan_section(
+    track: &TrackState,
+    callbacks: &MixerCallbacks,
+    _is_selected: bool,
+) -> impl IntoElement {
     let pan_label: gpui::SharedString = format_pan_label(track.pan).into();
 
     let track_id = track.id.clone();
@@ -468,7 +508,11 @@ fn pan_section(track: &TrackState, callbacks: &MixerCallbacks, _is_selected: boo
         )
 }
 
-fn fader_area(track: &TrackState, callbacks: &MixerCallbacks, is_selected: bool) -> impl IntoElement {
+fn fader_area(
+    track: &TrackState,
+    callbacks: &MixerCallbacks,
+    is_selected: bool,
+) -> impl IntoElement {
     let db_str = volume::format_db(track.volume);
     let track_id = track.id.clone();
     let vol_cb = callbacks.on_volume_change.clone();
@@ -568,9 +612,10 @@ fn channel_strip(
 
     let select_id = track.id.clone();
     let select_cb = callbacks.on_select_track.clone();
-    let on_select_strip = move |_: &gpui::MouseDownEvent, w: &mut gpui::Window, cx: &mut gpui::App| {
-        select_cb(&select_id, w, cx);
-    };
+    let on_select_strip =
+        move |_: &gpui::MouseDownEvent, w: &mut gpui::Window, cx: &mut gpui::App| {
+            select_cb(&select_id, w, cx);
+        };
 
     div()
         .flex()
@@ -771,7 +816,6 @@ fn master_strip(
         .child(strip_footer("Master"))
 }
 
-
 // ─── Public: Mixer Panel ─────────────────────────────────────────────────────
 
 pub fn mixer_panel(
@@ -840,12 +884,7 @@ pub fn mixer_panel(
                         ),
                 )
                 // Gutter separating channels from the master block.
-                .child(
-                    div()
-                        .w(px(1.0))
-                        .h_full()
-                        .bg(rgba(0xFFFFFF1F_u32)),
-                )
+                .child(div().w(px(1.0)).h_full().bg(rgba(0xFFFFFF1F_u32)))
                 // Pinned master block
                 .child(master_strip(accent, master, on_master)),
         )
