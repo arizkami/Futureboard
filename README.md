@@ -99,15 +99,6 @@ bun run build:audio:plugins
 
 ---
 
-## 🎨 Design Language
-
-Futureboard Studio prioritizes a high-density, professional visual layout (similar to Ableton Live and Zed Editor).
-
-- All dialogue windows, widgets, and preferences should reuse design elements specified in [DESIGN.md](DESIGN.md).
-- Avoid standard Bootstrap or generic Tailwind configurations. Stick to the curated DAW dark color palette tokens.
-
----
-
 ## 📄 License
 
 MIT License. See [LICENSE](LICENSE) for the full license text.
