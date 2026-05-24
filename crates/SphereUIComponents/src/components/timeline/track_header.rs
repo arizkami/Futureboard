@@ -1,4 +1,7 @@
-use gpui::{div, px, rgba, svg, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled};
+use gpui::{
+    div, px, rgba, svg, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
+    Styled,
+};
 
 use crate::assets;
 use crate::components::fader::db_value_pill;
@@ -11,7 +14,8 @@ use crate::components::timeline::vu_meter::vu_meter_with_levels;
 use crate::theme::Colors;
 
 type TrackCallback = std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>;
-type VolumeCallback = std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
+type VolumeCallback =
+    std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
 
 /// Bundle of callbacks the TrackHeader can fire. Keeping them in one struct
 /// keeps the function signature manageable and lets new actions land without
@@ -84,7 +88,11 @@ fn pill_button(
                 .path(path)
                 .w(px(10.0))
                 .h(px(10.0))
-                .text_color(if active { active_fg } else { Colors::text_secondary() }),
+                .text_color(if active {
+                    active_fg
+                } else {
+                    Colors::text_secondary()
+                }),
         )
     } else {
         btn.child(label)
@@ -350,10 +358,12 @@ pub fn track_header(
                                 .child(format_pan_label(track.pan))
                         })
                         // Compact meter
-                        .child(vu_meter_with_levels(track.meter_level_l, track.meter_level_r))
+                        .child(vu_meter_with_levels(
+                            track.meter_level_l,
+                            track.meter_level_r,
+                        ))
                         // Bordered dB pill
                         .child(db_value_pill(volume::format_db(track.volume), is_selected)),
                 ),
         )
 }
-

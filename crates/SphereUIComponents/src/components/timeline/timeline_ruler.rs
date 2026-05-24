@@ -1,7 +1,13 @@
-use gpui::{div, px, svg, InteractiveElement, StatefulInteractiveElement, IntoElement, ParentElement, Styled, Window, App};
-use crate::theme::Colors;
 use crate::assets;
-use crate::components::timeline::timeline_state::{TimelineState, GridLineLevel, HEADER_WIDTH, RULER_HEIGHT};
+use crate::components::sidebar::SIDEBAR_WIDTH;
+use crate::components::timeline::timeline_state::{
+    GridLineLevel, TimelineState, HEADER_WIDTH, RULER_HEIGHT,
+};
+use crate::theme::Colors;
+use gpui::{
+    div, px, svg, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
+    Styled,
+};
 
 pub fn timeline_ruler(
     state: &TimelineState,
@@ -13,11 +19,11 @@ pub fn timeline_ruler(
     let on_toggle_snap_clone = on_toggle_snap.clone();
     let on_cycle_grid_clone = on_cycle_grid.clone();
     let on_add_track_clone = on_add_track.clone();
-    
-    // Width of the ruler grid area (e.g. window size 1400 - sidebar 272 - header HEADER_WIDTH)
+
+    // Width of the ruler grid area (e.g. window size 1400 - sidebar - header).
     let ruler_grid_width = 5000.0;
     let lines = state.get_arrangement_grid_lines(ruler_grid_width);
-    
+
     let on_seek_clone = on_seek.clone();
 
     div()
@@ -85,7 +91,11 @@ pub fn timeline_ruler(
                                 .h(px(20.0))
                                 .w(px(20.0))
                                 .rounded_md()
-                                .bg(if state.snap_to_grid { Colors::accent_primary() } else { Colors::surface_raised() })
+                                .bg(if state.snap_to_grid {
+                                    Colors::accent_primary()
+                                } else {
+                                    Colors::surface_raised()
+                                })
                                 .border(px(1.0))
                                 .border_color(Colors::border_subtle())
                                 .cursor(gpui::CursorStyle::PointingHand)
@@ -98,7 +108,11 @@ pub fn timeline_ruler(
                                         .path(assets::ICON_MAGNET_PATH)
                                         .w(px(12.0))
                                         .h(px(12.0))
-                                        .text_color(if state.snap_to_grid { gpui::rgb(0x101216) } else { Colors::text_secondary() })
+                                        .text_color(if state.snap_to_grid {
+                                            gpui::rgb(0x101216)
+                                        } else {
+                                            Colors::text_secondary()
+                                        }),
                                 ),
                         )
                         // Grid Resolution Button
@@ -133,34 +147,34 @@ pub fn timeline_ruler(
                 .cursor(gpui::CursorStyle::Crosshair)
                 .id("ruler-markings-area")
                 // Seek timeline position on click
-                .on_mouse_down(gpui::MouseButton::Left, move |event: &gpui::MouseDownEvent, window, cx| {
-                    // event.position.x is absolute screen position.
-                    // Sidebar is 272px, Track Header is HEADER_WIDTH.
-                    let x: f32 = event.position.x.into();
-                    let click_x = x - 272.0 - HEADER_WIDTH;
-                    on_seek_clone(&click_x, window, cx);
-                })
-                .children(
-                    if state.transport.loop_enabled {
-                        let lx = state.beats_to_x(state.transport.loop_start_beats);
-                        let rx = state.beats_to_x(state.transport.loop_end_beats);
-                        let width = (rx - lx).max(0.0);
-                        Some(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .left(px(lx))
-                                .w(px(width))
-                                .bg(gpui::rgba(0x7bd88f14))
-                                .border_l(px(1.0))
-                                .border_r(px(1.0))
-                                .border_color(gpui::rgb(0x7bd88f))
-                        )
-                    } else {
-                        None
-                    }
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    move |event: &gpui::MouseDownEvent, window, cx| {
+                        // event.position.x is absolute screen position.
+                        let x: f32 = event.position.x.into();
+                        let click_x = x - SIDEBAR_WIDTH - HEADER_WIDTH;
+                        on_seek_clone(&click_x, window, cx);
+                    },
                 )
+                .children(if state.transport.loop_enabled {
+                    let lx = state.beats_to_x(state.transport.loop_start_beats);
+                    let rx = state.beats_to_x(state.transport.loop_end_beats);
+                    let width = (rx - lx).max(0.0);
+                    Some(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(px(lx))
+                            .w(px(width))
+                            .bg(gpui::rgba(0x7bd88f14))
+                            .border_l(px(1.0))
+                            .border_r(px(1.0))
+                            .border_color(gpui::rgb(0x7bd88f)),
+                    )
+                } else {
+                    None
+                })
                 // Ticks: every visible grid line, drawn as a 1 px vertical mark
                 // anchored to the bottom of the ruler. Bar lines reach the top;
                 // beat and sub lines are shorter.
@@ -181,35 +195,32 @@ pub fn timeline_ruler(
                         .bottom_0()
                         .w(px(1.0))
                         .h(px(tick_h))
-                        .bg(gpui::Rgba { r: 1.0, g: 1.0, b: 1.0, a: tick_alpha })
+                        .bg(gpui::Rgba {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: tick_alpha,
+                        })
                 }))
                 // Labels: emitted as siblings of the ticks (not children of a
                 // 1 px-wide tick div, which previously made labels wrap one
                 // character per line and look like random digits). Each label
                 // gets its own min-width so the text lays out on a single row.
-                .children(
-                    lines
-                        .iter()
-                        .filter(|l| l.show_label)
-                        .map(|line| {
-                            let label = state.format_bar_beat(line.beat);
-                            let (font_weight, text_color) = match line.level {
-                                GridLineLevel::Bar => (
-                                    gpui::FontWeight::BOLD,
-                                    Colors::text_secondary(),
-                                ),
-                                _ => (gpui::FontWeight::NORMAL, Colors::text_muted()),
-                            };
-                            div()
-                                .absolute()
-                                .left(px(line.x + 3.0))
-                                .top(px(4.0))
-                                .min_w(px(40.0))
-                                .text_size(px(10.0))
-                                .font_weight(font_weight)
-                                .text_color(text_color)
-                                .child(label)
-                        }),
-                ),
+                .children(lines.iter().filter(|l| l.show_label).map(|line| {
+                    let label = state.format_bar_beat(line.beat);
+                    let (font_weight, text_color) = match line.level {
+                        GridLineLevel::Bar => (gpui::FontWeight::BOLD, Colors::text_secondary()),
+                        _ => (gpui::FontWeight::NORMAL, Colors::text_muted()),
+                    };
+                    div()
+                        .absolute()
+                        .left(px(line.x + 3.0))
+                        .top(px(4.0))
+                        .min_w(px(40.0))
+                        .text_size(px(10.0))
+                        .font_weight(font_weight)
+                        .text_color(text_color)
+                        .child(label)
+                })),
         )
 }

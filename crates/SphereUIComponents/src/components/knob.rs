@@ -266,9 +266,7 @@ fn render_knob(
                 start_y: 0.0,
                 start_value: value,
             },
-            move |drag, _offset, _window, cx| {
-                cx.new(|_| drag.clone())
-            },
+            move |drag, _offset, _window, cx| cx.new(|_| drag.clone()),
         )
         .on_drag_move::<KnobDrag>({
             let id_string = id_string.clone();

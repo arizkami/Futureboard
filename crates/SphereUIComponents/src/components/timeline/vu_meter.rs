@@ -1,5 +1,5 @@
-use gpui::{div, px, IntoElement, ParentElement, Styled};
 use crate::theme::Colors;
+use gpui::{div, px, IntoElement, ParentElement, Styled};
 
 /// Legacy fallback meter, kept so old call sites still link. New code should
 /// use [`vu_meter_with_levels`] and pass the track's real meter state.

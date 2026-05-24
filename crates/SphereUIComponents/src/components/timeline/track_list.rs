@@ -2,7 +2,7 @@ use gpui::{div, px, IntoElement, ParentElement, Styled};
 
 use crate::components::timeline::automation_lane::automation_lane;
 use crate::components::timeline::timeline_grid::timeline_grid;
-use crate::components::timeline::timeline_state::{TimelineState, HEADER_WIDTH};
+use crate::components::timeline::timeline_state::{TimelineState, HEADER_WIDTH, TRACK_HEIGHT};
 use crate::components::timeline::track_header::{track_header, TrackHeaderCallbacks};
 use crate::components::timeline::track_lane::track_lane;
 
@@ -11,20 +11,24 @@ pub fn track_list(
     header_callbacks: TrackHeaderCallbacks,
     on_select_track: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     on_select_clip: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    on_add_clip: std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
+    on_add_clip: std::sync::Arc<
+        dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+    >,
 ) -> impl IntoElement {
     let grid_width = 5000.0;
-    let grid_height = state.tracks.len() as f32 * 76.0;
+    let grid_height = state.tracks.len() as f32 * TRACK_HEIGHT;
 
     let mut rows = Vec::new();
     for (index, track) in state.tracks.iter().enumerate() {
         let row = div()
             .flex()
             .flex_col()
+            .w_full()
             .child(
                 div()
                     .flex()
                     .flex_row()
+                    .h(px(TRACK_HEIGHT))
                     .child(track_header(track, index, state, header_callbacks.clone()))
                     .child(track_lane(
                         track,
@@ -35,9 +39,13 @@ pub fn track_list(
                         on_add_clip.clone(),
                     )),
             )
-            .children(track.automation_lanes.iter().filter(|l| l.visible).map(|lane| {
-                automation_lane(lane, track.color, state)
-            }));
+            .children(
+                track
+                    .automation_lanes
+                    .iter()
+                    .filter(|l| l.visible)
+                    .map(|lane| automation_lane(lane, track.color, state)),
+            );
         rows.push(row);
     }
 
@@ -45,6 +53,7 @@ pub fn track_list(
         .relative()
         .flex_1()
         .w_full()
+        .overflow_hidden()
         .child(
             div()
                 .absolute()
@@ -56,6 +65,10 @@ pub fn track_list(
         )
         .child(
             div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px(-state.viewport.scroll_y))
                 .flex()
                 .flex_col()
                 .w_full()

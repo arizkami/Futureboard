@@ -1,22 +1,29 @@
-use gpui::{div, px, svg, Context, ExternalPaths, InteractiveElement, IntoElement, ParentElement, Render, Styled, Window, StatefulInteractiveElement};
-use crate::theme::Colors;
 use crate::assets;
-use crate::components::timeline::timeline_state::{TimelineState, TimelineTool, SnapDivision, TrackState, TrackType, ClipState, ClipType, MidiNoteState, HEADER_WIDTH, RULER_HEIGHT};
-use crate::components::timeline::timeline_ruler::timeline_ruler;
-use crate::components::timeline::track_list::track_list;
+use crate::components::sidebar::{BrowserDragItem, SIDEBAR_WIDTH};
 use crate::components::timeline::floating_tools_bar::floating_tools_bar;
+use crate::components::timeline::timeline_ruler::timeline_ruler;
+use crate::components::timeline::timeline_state::{
+    ClipDragItem, ClipState, ClipType, MidiNoteState, SnapDivision, TimelineState, TimelineTool,
+    TrackType, HEADER_WIDTH, RULER_HEIGHT, TRACK_HEIGHT,
+};
+use crate::components::timeline::track_list::track_list;
 use crate::components::timeline::waveform_cache;
+use crate::theme::Colors;
+use gpui::{
+    div, px, svg, Context, ExternalPaths, InteractiveElement, IntoElement, ParentElement, Render,
+    ScrollDelta, StatefulInteractiveElement, Styled, Window,
+};
 
-/// Sidebar width to subtract when translating window-space x coordinates
-/// into timeline content-space x. Kept in sync with `sidebar.rs`.
-const SIDEBAR_WIDTH: f32 = 272.0;
 /// App chrome (top titlebar/menu strip) — used to convert window-space y into
 /// the timeline track area. Mirrors the value used by app_chrome.
 const APP_CHROME_HEIGHT: f32 = 36.0;
 
 fn is_supported_audio_ext(path: &std::path::Path) -> bool {
     matches!(
-        path.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase()).as_deref(),
+        path.extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
         Some("wav") | Some("mp3") | Some("flac") | Some("ogg")
     )
 }
@@ -29,6 +36,8 @@ pub struct Timeline {
     /// a synthetic MouseUp, so we have to remember the last cursor position
     /// observed during the drag.
     last_drag_position: Option<gpui::Point<gpui::Pixels>>,
+    clip_drag_origin: Option<gpui::Point<gpui::Pixels>>,
+    clip_drag_target_track_index: Option<usize>,
 }
 
 impl Timeline {
@@ -37,6 +46,8 @@ impl Timeline {
         Self {
             state: TimelineState::default(),
             last_drag_position: None,
+            clip_drag_origin: None,
+            clip_drag_target_track_index: None,
         }
     }
 
@@ -46,7 +57,118 @@ impl Timeline {
         Self {
             state: TimelineState::demo_project(),
             last_drag_position: None,
+            clip_drag_origin: None,
+            clip_drag_target_track_index: None,
         }
+    }
+
+    fn timeline_content_width(&self) -> f32 {
+        let longest_seconds = self
+            .state
+            .tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .map(|clip| {
+                self.state
+                    .beats_to_seconds(clip.start_beat + clip.duration_beats)
+                    + 4.0
+            })
+            .fold(16.0_f32, f32::max);
+        (longest_seconds * self.state.viewport.pixels_per_second).max(1200.0)
+    }
+
+    fn max_scroll_offsets(&self, window: &Window) -> (f32, f32) {
+        let window_size = window.bounds().size;
+        let window_w: f32 = window_size.width.into();
+        let window_h: f32 = window_size.height.into();
+        let track_view_w = (window_w - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
+        let track_view_h = (window_h - APP_CHROME_HEIGHT - RULER_HEIGHT - 220.0).max(TRACK_HEIGHT);
+        let content_w = self.timeline_content_width();
+        let content_h = self.state.tracks.len() as f32 * TRACK_HEIGHT;
+        (
+            (content_w - track_view_w).max(0.0),
+            (content_h - track_view_h).max(0.0),
+        )
+    }
+
+    fn move_dragged_clip_to_position(
+        &mut self,
+        drag: &ClipDragItem,
+        position: gpui::Point<gpui::Pixels>,
+        window: &Window,
+    ) {
+        let origin = *self.clip_drag_origin.get_or_insert(position);
+        let dx: f32 = (position.x - origin.x).into();
+        let dy: f32 = (position.y - origin.y).into();
+        let ppb = self.state.viewport.pixels_per_second * self.state.seconds_per_beat();
+        let new_start = (drag.start_beat + dx / ppb.max(1.0)).max(0.0);
+        let snapped = self.state.snap_beats(new_start).max(0.0);
+
+        let source_index = self
+            .state
+            .tracks
+            .iter()
+            .position(|track| track.id == drag.source_track_id)
+            .unwrap_or(0);
+        let slot = (dy / TRACK_HEIGHT).round() as isize;
+        let max_index = self.state.tracks.len().saturating_sub(1) as isize;
+        let target_index = (source_index as isize + slot).clamp(0, max_index) as usize;
+        self.clip_drag_target_track_index = Some(target_index);
+
+        let current_track_id = self
+            .state
+            .find_clip(&drag.clip_id)
+            .map(|(track, _)| track.id.clone())
+            .unwrap_or_else(|| drag.source_track_id.clone());
+        self.state
+            .move_clip_to_track(&drag.clip_id, &current_track_id, snapped);
+
+        let (max_x, max_y) = self.max_scroll_offsets(window);
+        self.state.viewport.scroll_x = self.state.viewport.scroll_x.clamp(0.0, max_x);
+        self.state.viewport.scroll_y = self.state.viewport.scroll_y.clamp(0.0, max_y);
+    }
+
+    fn import_audio_path_at_last_drag(
+        &mut self,
+        path: &std::path::Path,
+        force_new_track: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> bool {
+        if !is_supported_audio_ext(path) {
+            return false;
+        }
+
+        let duration_seconds = match waveform_cache::get_file_status(&path.to_string_lossy()) {
+            waveform_cache::WaveformStatus::Ready(preview) => preview.duration_seconds,
+            _ => 0.0,
+        };
+        let clip_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Imported Audio".to_string());
+
+        let (drop_x, drop_y) = match self.last_drag_position {
+            Some(p) if !force_new_track => {
+                let x: f32 = p.x.into();
+                let y: f32 = p.y.into();
+                let lane_x = (x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
+                let lane_y = (y - APP_CHROME_HEIGHT - RULER_HEIGHT).max(0.0);
+                (lane_x, lane_y)
+            }
+            _ => (0.0, 1.0e9_f32),
+        };
+
+        self.state.import_audio_at(
+            path.to_string_lossy().to_string(),
+            clip_name,
+            drop_x,
+            drop_y,
+            duration_seconds,
+        );
+        waveform_cache::request_decode_file(path.to_path_buf());
+        true
     }
 }
 
@@ -90,10 +212,11 @@ impl Render for Timeline {
             cx.notify();
         });
 
-        let on_volume_change = cx.listener(|this, (track_id, volume): &(String, f32), _window, cx| {
-            this.state.set_track_volume(track_id, *volume);
-            cx.notify();
-        });
+        let on_volume_change =
+            cx.listener(|this, (track_id, volume): &(String, f32), _window, cx| {
+                this.state.set_track_volume(track_id, *volume);
+                cx.notify();
+            });
 
         let on_pan_change = cx.listener(|this, (track_id, pan): &(String, f32), _window, cx| {
             this.state.set_track_pan(track_id, *pan);
@@ -108,12 +231,27 @@ impl Render for Timeline {
                 };
                 let duration = 4.0;
                 let clip_type = match t.track_type {
-                    TrackType::Audio => ClipType::Audio { file_id: "new-file".to_string(), source_path: None },
+                    TrackType::Audio => ClipType::Audio {
+                        file_id: "new-file".to_string(),
+                        source_path: None,
+                    },
                     _ => ClipType::Midi {
                         notes: vec![
-                            MidiNoteState { pitch: 60, start: 0.0, duration: 1.0 },
-                            MidiNoteState { pitch: 64, start: 1.0, duration: 1.0 },
-                            MidiNoteState { pitch: 67, start: 2.0, duration: 2.0 },
+                            MidiNoteState {
+                                pitch: 60,
+                                start: 0.0,
+                                duration: 1.0,
+                            },
+                            MidiNoteState {
+                                pitch: 64,
+                                start: 1.0,
+                                duration: 1.0,
+                            },
+                            MidiNoteState {
+                                pitch: 67,
+                                start: 2.0,
+                                duration: 2.0,
+                            },
                         ],
                     },
                 };
@@ -189,23 +327,53 @@ impl Render for Timeline {
         });
 
         // Wrap callbacks in std::sync::Arc to allow easy cloning when passing down to sub-elements
-        let on_select_track: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_select_track);
-        let on_select_clip: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_select_clip);
-        let on_toggle_mute: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_toggle_mute);
-        let on_toggle_solo: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_toggle_solo);
-        let on_toggle_arm: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_toggle_arm);
-        let on_toggle_input: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_toggle_input);
-        let on_delete_track: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_delete_track);
-        let on_volume_change: std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_volume_change);
-        let _on_pan_change: std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_pan_change);
-        let on_add_clip: std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_add_clip);
-        let on_add_track: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_add_track);
-        let on_toggle_snap: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_toggle_snap);
-        let on_cycle_grid: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_cycle_grid);
-        let on_seek: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_seek);
-        let on_select_tool: std::sync::Arc<dyn Fn(&TimelineTool, &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_select_tool);
-        let on_zoom_in: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_zoom_in);
-        let on_zoom_out: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static> = std::sync::Arc::new(on_zoom_out);
+        let on_select_track: std::sync::Arc<
+            dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_select_track);
+        let on_select_clip: std::sync::Arc<
+            dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_select_clip);
+        let on_toggle_mute: std::sync::Arc<
+            dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_toggle_mute);
+        let on_toggle_solo: std::sync::Arc<
+            dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_toggle_solo);
+        let on_toggle_arm: std::sync::Arc<
+            dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_toggle_arm);
+        let on_toggle_input: std::sync::Arc<
+            dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_toggle_input);
+        let on_delete_track: std::sync::Arc<
+            dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_delete_track);
+        let on_volume_change: std::sync::Arc<
+            dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_volume_change);
+        let _on_pan_change: std::sync::Arc<
+            dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_pan_change);
+        let on_add_clip: std::sync::Arc<
+            dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_add_clip);
+        let on_add_track: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(on_add_track);
+        let on_toggle_snap: std::sync::Arc<
+            dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_toggle_snap);
+        let on_cycle_grid: std::sync::Arc<
+            dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_cycle_grid);
+        let on_seek: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(on_seek);
+        let on_select_tool: std::sync::Arc<
+            dyn Fn(&TimelineTool, &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_select_tool);
+        let on_zoom_in: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(on_zoom_in);
+        let on_zoom_out: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(on_zoom_out);
 
         let header_callbacks = crate::components::timeline::track_header::TrackHeaderCallbacks {
             on_select_track: on_select_track.clone(),
@@ -224,57 +392,110 @@ impl Render for Timeline {
         // ── Drag/drop import wiring ─────────────────────────────────────
         // Track the mouse position throughout an external file drag so that
         // when `on_drop` fires we can resolve the drop coordinates.
-        let on_drag_track = cx.listener(|this, event: &gpui::DragMoveEvent<ExternalPaths>, _window, _cx| {
-            this.last_drag_position = Some(event.event.position);
-        });
+        let on_drag_track = cx.listener(
+            |this, event: &gpui::DragMoveEvent<ExternalPaths>, _window, _cx| {
+                this.last_drag_position = Some(event.event.position);
+            },
+        );
 
         let on_files_dropped = cx.listener(|this, paths: &ExternalPaths, _window, cx| {
-            let drop_pos = this.last_drag_position;
             let mut any_imported = false;
             // Multi-file drops: the first file lands at the cursor; subsequent
             // files always land on a brand-new track (forced via y past the end).
             let mut force_new_track = false;
             for path in paths.paths().iter() {
-                if !is_supported_audio_ext(path) { continue; }
-
-                // Decode (or pull from cache) — populates the path-keyed waveform
-                // cache so the clip renders the real shape on next paint.
-                let decoded = waveform_cache::decode_and_cache_file(path);
-                let duration_seconds = decoded.as_ref().map(|p| p.duration_seconds).unwrap_or(0.0);
-                let clip_name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "Imported Audio".to_string());
-
-                // Resolve drop coordinates relative to the track area.
-                let (drop_x, drop_y) = match drop_pos {
-                    Some(p) if !force_new_track => {
-                        let x: f32 = p.x.into();
-                        let y: f32 = p.y.into();
-                        let lane_x = (x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
-                        let lane_y = (y - APP_CHROME_HEIGHT - RULER_HEIGHT).max(0.0);
-                        (lane_x, lane_y)
-                    }
-                    // No drag tracking captured, or stacking a subsequent file:
-                    // a y past the last track forces `import_audio_at` to make a new track.
-                    _ => (0.0, 1.0e9_f32),
-                };
-
-                this.state.import_audio_at(
-                    path.to_string_lossy().to_string(),
-                    clip_name,
-                    drop_x,
-                    drop_y,
-                    duration_seconds,
-                );
-                any_imported = true;
-                force_new_track = true;
+                let imported =
+                    this.import_audio_path_at_last_drag(path, force_new_track, _window, cx);
+                any_imported |= imported;
+                force_new_track |= imported;
             }
             if any_imported {
                 this.last_drag_position = None;
                 cx.notify();
             }
+        });
+
+        let on_browser_drag_track = cx.listener(
+            |this, event: &gpui::DragMoveEvent<BrowserDragItem>, _window, _cx| {
+                this.last_drag_position = Some(event.event.position);
+            },
+        );
+
+        let on_browser_file_dropped = cx.listener(|this, item: &BrowserDragItem, window, cx| {
+            if this.import_audio_path_at_last_drag(&item.path, false, window, cx) {
+                this.last_drag_position = None;
+                cx.notify();
+            }
+        });
+
+        let on_clip_drag_move = cx.listener(
+            |this, event: &gpui::DragMoveEvent<ClipDragItem>, window, cx| {
+                let drag = event.drag(cx).clone();
+                this.last_drag_position = Some(event.event.position);
+                this.move_dragged_clip_to_position(&drag, event.event.position, window);
+                cx.notify();
+            },
+        );
+
+        let on_clip_dropped = cx.listener(|this, drag: &ClipDragItem, _window, cx| {
+            let target_index = this.clip_drag_target_track_index;
+            if let Some(target_track_id) = target_index
+                .and_then(|index| this.state.tracks.get(index))
+                .map(|track| track.id.clone())
+            {
+                let current_start = this
+                    .state
+                    .find_clip(&drag.clip_id)
+                    .map(|(_, clip)| clip.start_beat)
+                    .unwrap_or(drag.start_beat);
+                this.state
+                    .move_clip_to_track(&drag.clip_id, &target_track_id, current_start);
+            }
+            this.clip_drag_origin = None;
+            this.clip_drag_target_track_index = None;
+            this.last_drag_position = None;
+            cx.notify();
+        });
+
+        let on_ctrl_wheel_zoom = cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
+            let delta = match event.delta {
+                ScrollDelta::Pixels(p) => {
+                    let x: f32 = p.x.into();
+                    let y: f32 = p.y.into();
+                    (x, y)
+                }
+                ScrollDelta::Lines(p) => (p.x * 36.0, p.y * 36.0),
+            };
+
+            if !event.modifiers.control {
+                let (max_x, max_y) = this.max_scroll_offsets(window);
+                let horizontal = if event.modifiers.shift {
+                    delta.1
+                } else {
+                    delta.0
+                };
+                this.state.scroll_by(horizontal, delta.1, max_x, max_y);
+                window.prevent_default();
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+
+            window.prevent_default();
+            cx.stop_propagation();
+
+            if delta.1.abs() < 0.01 {
+                return;
+            }
+
+            let x: f32 = event.position.x.into();
+            let anchor = (x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
+            let factor = (1.0018_f32).powf(-delta.1);
+            this.state.zoom_by(factor, anchor);
+            let (max_x, max_y) = this.max_scroll_offsets(window);
+            this.state.viewport.scroll_x = this.state.viewport.scroll_x.clamp(0.0, max_x);
+            this.state.viewport.scroll_y = this.state.viewport.scroll_y.clamp(0.0, max_y);
+            cx.notify();
         });
 
         div()
@@ -286,6 +507,11 @@ impl Render for Timeline {
             .relative()
             .on_drag_move::<ExternalPaths>(on_drag_track)
             .on_drop::<ExternalPaths>(on_files_dropped)
+            .on_drag_move::<BrowserDragItem>(on_browser_drag_track)
+            .on_drop::<BrowserDragItem>(on_browser_file_dropped)
+            .on_drag_move::<ClipDragItem>(on_clip_drag_move)
+            .on_drop::<ClipDragItem>(on_clip_dropped)
+            .on_scroll_wheel(on_ctrl_wheel_zoom)
             // 1. Timeline Ruler
             .child(timeline_ruler(
                 state,
@@ -295,30 +521,25 @@ impl Render for Timeline {
                 on_seek.clone(),
             ))
             // 2. Track List Scroll Area
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .child(
-                        track_list(
-                            state,
-                            header_callbacks.clone(),
-                            on_select_track.clone(),
-                            on_select_clip.clone(),
-                            on_add_clip.clone(),
-                        )
-                    )
-            )
+            .child(div().flex_1().min_h_0().relative().child(track_list(
+                state,
+                header_callbacks.clone(),
+                on_select_track.clone(),
+                on_select_clip.clone(),
+                on_add_clip.clone(),
+            )))
             // 3. Playhead Overlay (spanning both ruler and tracks)
             .child(
                 div()
                     .absolute()
-                    .left(px(crate::components::timeline::timeline_state::HEADER_WIDTH))
+                    .left(px(
+                        crate::components::timeline::timeline_state::HEADER_WIDTH,
+                    ))
                     .right_0()
                     .top_0()
                     .bottom_0()
-                    .child(crate::components::timeline::playhead::playhead(state))
+                    .overflow_hidden()
+                    .child(crate::components::timeline::playhead::playhead(state)),
             )
             // 3. Floating Tools Bar
             .child(
@@ -326,7 +547,10 @@ impl Render for Timeline {
                     .absolute()
                     .bottom(px(16.0))
                     .left(px(16.0))
-                    .child(floating_tools_bar(state.active_tool, on_select_tool.clone()))
+                    .child(floating_tools_bar(
+                        state.active_tool,
+                        on_select_tool.clone(),
+                    )),
             )
             // 4. Zoom Controls
             .child(
@@ -366,8 +590,8 @@ impl Render for Timeline {
                                     .path(assets::ICON_MINUS_PATH)
                                     .w(px(12.0))
                                     .h(px(12.0))
-                                    .text_color(Colors::text_secondary())
-                            )
+                                    .text_color(Colors::text_secondary()),
+                            ),
                     )
                     // Zoom readout label
                     .child(
@@ -377,13 +601,14 @@ impl Render for Timeline {
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(Colors::text_muted())
                             .child({
-                                let ppb = state.viewport.pixels_per_second * state.seconds_per_beat();
+                                let ppb =
+                                    state.viewport.pixels_per_second * state.seconds_per_beat();
                                 if ppb >= 100.0 {
                                     format!("{:.0} px/bt", ppb)
                                 } else {
                                     format!("{:.1} px/bt", ppb)
                                 }
-                            })
+                            }),
                     )
                     // Zoom In Button
                     .child(
@@ -406,9 +631,9 @@ impl Render for Timeline {
                                     .path(assets::ICON_PLUS_PATH)
                                     .w(px(12.0))
                                     .h(px(12.0))
-                                    .text_color(Colors::text_secondary())
-                            )
-                    )
+                                    .text_color(Colors::text_secondary()),
+                            ),
+                    ),
             )
     }
 }

@@ -62,7 +62,11 @@ pub fn db_scale_column() -> gpui::Div {
                 .top(px(top))
                 .right(px(0.0))
                 .text_size(px(7.5))
-                .text_color(if db == 0.0 { rgba(0xFFFFFF59_u32) } else { rgba(0xFFFFFF2E_u32) })
+                .text_color(if db == 0.0 {
+                    rgba(0xFFFFFF59_u32)
+                } else {
+                    rgba(0xFFFFFF2E_u32)
+                })
                 .child(label),
         );
     }
@@ -162,10 +166,7 @@ fn fader_rail(thumb_top: f32, accent: gpui::Rgba) -> gpui::Div {
 
 /// Bordered dB readout pill. Use this above the fader instead of plain text so
 /// the value reads as a proper integrated control.
-pub fn db_value_pill(
-    db_text: impl Into<gpui::SharedString>,
-    highlight: bool,
-) -> impl IntoElement {
+pub fn db_value_pill(db_text: impl Into<gpui::SharedString>, highlight: bool) -> impl IntoElement {
     let border = if highlight {
         rgba(0xFFFFFF3A_u32)
     } else {
@@ -224,9 +225,16 @@ pub fn fader(
         .flex_row()
         .justify_center()
         .child(fader_rail(thumb_top, accent))
-        .on_drag(FaderDrag { id: id_string.clone() }, move |drag, _offset, _window, cx| {
-            cx.new(|_| FaderDrag { id: drag.id.clone() })
-        })
+        .on_drag(
+            FaderDrag {
+                id: id_string.clone(),
+            },
+            move |drag, _offset, _window, cx| {
+                cx.new(|_| FaderDrag {
+                    id: drag.id.clone(),
+                })
+            },
+        )
         .on_drag_move::<FaderDrag>(move |event: &DragMoveEvent<FaderDrag>, window, cx| {
             if event.drag(cx).id != id_string {
                 return;

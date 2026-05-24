@@ -17,9 +17,8 @@ use std::sync::OnceLock;
 use serde::Deserialize;
 
 /// JSON manifest produced by the sync script.
-pub const NATIVE_MENU_JSON: &str = include_str!(
-    "../../../packages/shared/generated/native-menu.json"
-);
+pub const NATIVE_MENU_JSON: &str =
+    include_str!("../../../packages/shared/generated/native-menu.json");
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MenuManifest {

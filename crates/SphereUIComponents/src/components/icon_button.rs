@@ -1,5 +1,5 @@
-use gpui::{div, svg, Div, ParentElement, Pixels, Styled, InteractiveElement, Rgba};
 use crate::theme::Colors;
+use gpui::{div, svg, Div, InteractiveElement, ParentElement, Pixels, Rgba, Styled};
 
 /// A reusable icon button component.
 /// If `icon_path` is provided, it attempts to render the SVG asset.
@@ -23,13 +23,7 @@ pub fn icon_button(
         .hover(|style| style.bg(Colors::surface_hover()));
 
     if let Some(path) = icon_path {
-        button = button.child(
-            svg()
-                .path(path)
-                .w(icon_size)
-                .h(icon_size)
-                .text_color(color)
-        );
+        button = button.child(svg().path(path).w(icon_size).h(icon_size).text_color(color));
     } else {
         button = button.child(fallback_text);
     }

@@ -1,6 +1,6 @@
+use crate::assets;
 use gpui::{AssetSource, Result, SharedString};
 use std::borrow::Cow;
-use crate::assets;
 
 pub struct EmbeddedAssets;
 
@@ -39,7 +39,7 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_RESTORE_PATH => Some(assets::icons::GENERIC_RESTORE.as_bytes()),
             assets::ICON_X_PATH => Some(assets::icons::GENERIC_CLOSE.as_bytes()),
             assets::ICON_MINUS_PATH => Some(assets::icons::MINUS.as_bytes()),
-            
+
             // New ones
             assets::ICON_MOUSE_POINTER_PATH => Some(assets::icons::MOUSE_POINTER.as_bytes()),
             assets::ICON_PENCIL_PATH => Some(assets::icons::PENCIL.as_bytes()),
@@ -48,7 +48,9 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_VOLUME_X_PATH => Some(assets::icons::VOLUME_X.as_bytes()),
             assets::ICON_CLOCK_PATH => Some(assets::icons::CLOCK.as_bytes()),
             assets::ICON_AUTOMATION_PATH => Some(assets::icons::AUTOMATION.as_bytes()),
-            assets::ICON_SLIDERS_HORIZONTAL_PATH => Some(assets::icons::SLIDERS_HORIZONTAL.as_bytes()),
+            assets::ICON_SLIDERS_HORIZONTAL_PATH => {
+                Some(assets::icons::SLIDERS_HORIZONTAL.as_bytes())
+            }
             assets::ICON_SPARKLES_PATH => Some(assets::icons::SPARKLES.as_bytes()),
             assets::ICON_PLUS_PATH => Some(assets::icons::PLUS.as_bytes()),
             assets::ICON_PLUG_PATH => Some(assets::icons::PLUG.as_bytes()),
@@ -57,9 +59,10 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_GRIP_VERTICAL_PATH => Some(assets::icons::GRIP_VERTICAL.as_bytes()),
             assets::ICON_FILE_PATH => Some(assets::icons::FILE.as_bytes()),
             assets::ICON_CHEVRON_RIGHT_PATH => Some(assets::icons::CHEVRON_RIGHT.as_bytes()),
+            assets::ICON_CHEVRON_DOWN_PATH => Some(assets::icons::CHEVRON_DOWN.as_bytes()),
             assets::ICON_CHECK_PATH => Some(assets::icons::CHECK.as_bytes()),
             assets::ICON_PLAYHEAD_HANDLE_PATH => Some(assets::icons::PLAYHEAD_HANDLE.as_bytes()),
-            
+
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -103,6 +106,7 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_GRIP_VERTICAL_PATH,
             assets::ICON_FILE_PATH,
             assets::ICON_CHEVRON_RIGHT_PATH,
+            assets::ICON_CHEVRON_DOWN_PATH,
             assets::ICON_CHECK_PATH,
             assets::ICON_PLAYHEAD_HANDLE_PATH,
         ];
