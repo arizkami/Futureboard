@@ -26,10 +26,25 @@ mod dsp;
 pub mod engine;
 pub mod error;
 mod graph;
+pub mod native;
 pub mod recording;
 mod runtime;
 pub mod types;
 mod vst3_processor;
+
+// ── Native Rust facade ───────────────────────────────────────────────────
+//
+// Re-exports so the Rust-Native shell can write:
+//
+//     use sphere_direct_audio_engine::{AudioEngine, EngineConfig, AudioBackend, EngineStats};
+//
+// without reaching into the NAPI-flavored modules. Both this facade and
+// the `SphereDirectAudioEngine` NAPI class wrap the same `EngineInner`.
+pub use crate::error::SphereAudioError;
+pub use crate::native::{
+    AudioBackend, AudioEngine, EngineConfig, EngineStats, DEFAULT_BUFFER_SIZE,
+    DEFAULT_SAMPLE_RATE,
+};
 
 use std::sync::Arc;
 
