@@ -13,7 +13,7 @@ pub mod slider;
 mod status_bar;
 pub mod timeline;
 
-pub use app_chrome::app_chrome;
+pub use app_chrome::{app_chrome, TransportChromeState};
 pub use bottom_panel::{bottom_panel, BottomPanelResizeDrag, BottomPanelState, BottomTab};
 pub use fader::fader;
 pub use icon::icon;

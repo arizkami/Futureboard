@@ -5,9 +5,18 @@ use crate::components::timeline::timeline_state::{
 };
 use crate::theme::Colors;
 use gpui::{
-    div, px, svg, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled,
+    div, px, svg, AppContext, Empty, InteractiveElement, IntoElement, ParentElement, Render,
+    StatefulInteractiveElement, Styled, Window,
 };
+
+#[derive(Clone, Debug)]
+struct RulerSeekDrag;
+
+impl Render for RulerSeekDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
 
 pub fn timeline_ruler(
     state: &TimelineState,
@@ -25,6 +34,7 @@ pub fn timeline_ruler(
     let lines = state.get_arrangement_grid_lines(ruler_grid_width);
 
     let on_seek_clone = on_seek.clone();
+    let on_seek_drag = on_seek.clone();
 
     div()
         .flex()
@@ -46,7 +56,7 @@ pub fn timeline_ruler(
                 .w(px(HEADER_WIDTH))
                 .h_full()
                 .px(px(8.0))
-                .bg(gpui::rgb(0x10141B))
+                .bg(Colors::surface_panel())
                 .border_r(px(1.0))
                 .border_color(Colors::border_strong())
                 .child(
@@ -157,6 +167,19 @@ pub fn timeline_ruler(
                         let x: f32 = event.position.x.into();
                         let click_x = x - SIDEBAR_WIDTH - HEADER_WIDTH;
                         on_seek_clone(&click_x, window, cx);
+                    },
+                )
+                .on_drag(RulerSeekDrag, |_, _offset, _window, cx| {
+                    cx.new(|_| RulerSeekDrag)
+                })
+                .on_drag_move::<RulerSeekDrag>(
+                    move |event: &gpui::DragMoveEvent<RulerSeekDrag>, window, cx| {
+                        let x: f32 = event.event.position.x.into();
+                        let ox: f32 = event.bounds.origin.x.into();
+                        let click_x = (x - ox).max(0.0);
+                        on_seek_drag(&click_x, window, cx);
+                        window.prevent_default();
+                        cx.stop_propagation();
                     },
                 )
                 .children(if state.transport.loop_enabled {

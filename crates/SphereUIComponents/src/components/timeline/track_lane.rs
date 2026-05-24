@@ -26,21 +26,21 @@ pub fn track_lane(
             r: 1.0,
             g: 1.0,
             b: 1.0,
-            a: 0.028,
+            a: 0.055,
         }
     } else if even {
         gpui::Rgba {
             r: 1.0,
             g: 1.0,
             b: 1.0,
-            a: 0.010,
+            a: 0.026,
         }
     } else {
         gpui::Rgba {
             r: 0.0,
             g: 0.0,
             b: 0.0,
-            a: 0.12,
+            a: 0.16,
         }
     };
 

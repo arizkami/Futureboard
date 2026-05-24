@@ -107,13 +107,10 @@ pub fn track_header(
 ) -> impl IntoElement {
     let track_id = track.id.clone();
     let is_selected = state.selection.selected_track_id.as_ref() == Some(&track.id);
-    // Deeper-than-lane background so the header column reads as a separate
-    // *frontmost* layer instead of blending into the timeline body. The
-    // lane uses surface_base (0x171B22); the header sits one step deeper.
     let header_bg = if is_selected {
-        gpui::rgb(0x222a35)
+        Colors::surface_raised()
     } else {
-        gpui::rgb(0x10141B)
+        Colors::surface_panel()
     };
 
     let id_num = {

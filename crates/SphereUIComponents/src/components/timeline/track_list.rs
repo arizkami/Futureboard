@@ -5,6 +5,7 @@ use crate::components::timeline::timeline_grid::timeline_grid;
 use crate::components::timeline::timeline_state::{TimelineState, HEADER_WIDTH, TRACK_HEIGHT};
 use crate::components::timeline::track_header::{track_header, TrackHeaderCallbacks};
 use crate::components::timeline::track_lane::track_lane;
+use crate::theme::Colors;
 
 pub fn track_list(
     state: &TimelineState,
@@ -16,7 +17,7 @@ pub fn track_list(
     >,
 ) -> impl IntoElement {
     let grid_width = 5000.0;
-    let grid_height = state.tracks.len() as f32 * TRACK_HEIGHT;
+    let grid_height = state.viewport.viewport_height.max(TRACK_HEIGHT);
 
     let mut rows = Vec::new();
     for (index, track) in state.tracks.iter().enumerate() {
@@ -58,7 +59,34 @@ pub fn track_list(
     div()
         .relative()
         .size_full()
+        .bg(Colors::surface_base())
         .overflow_hidden()
+        // Full-height left pane background. Individual TrackHeader rows scroll
+        // over this, while the empty area below the final row still reads as
+        // the same fixed header column and never receives grid/playhead paint.
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .bottom_0()
+                .w(px(HEADER_WIDTH))
+                .bg(Colors::surface_panel())
+                .border_r(px(1.0))
+                .border_color(Colors::border_strong())
+                .child(
+                    div()
+                        .absolute()
+                        .right(px(0.0))
+                        .top_0()
+                        .bottom_0()
+                        .w(px(1.0))
+                        .bg(Colors::border_strong()),
+                ),
+        )
+        // Back layer: timeline body grid, clipped to the right content area.
+        // This must stay before the row stack so lane row backgrounds and clips
+        // are always painted above the base arrangement surface.
         .child(
             div()
                 .absolute()
@@ -68,6 +96,7 @@ pub fn track_list(
                 .bottom_0()
                 .child(timeline_grid(state, grid_width, grid_height)),
         )
+        // Foreground layer: scrolling TrackHeader/TrackLane rows.
         .child(
             div()
                 .absolute()

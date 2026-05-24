@@ -69,7 +69,10 @@ impl NativeAudioState {
         if self.engine.is_none() {
             self.initialize_engine()?;
         }
-        let engine = self.engine.as_mut().ok_or(SphereAudioError::EngineNotOpen)?;
+        let engine = self
+            .engine
+            .as_mut()
+            .ok_or(SphereAudioError::EngineNotOpen)?;
         match engine.start() {
             Ok(()) => {
                 self.running = true;

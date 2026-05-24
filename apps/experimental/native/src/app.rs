@@ -1,7 +1,7 @@
+use crate::window::studio_window_options;
 use gpui::{App, AppContext};
 use sphere_ui_components::assets;
 use sphere_ui_components::layout::StudioLayout;
-use crate::window::studio_window_options;
 
 pub fn setup(cx: &mut App) {
     eprintln!("[boot] register fonts");

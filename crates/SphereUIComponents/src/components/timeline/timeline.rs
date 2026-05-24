@@ -10,8 +10,8 @@ use crate::components::timeline::track_list::track_list;
 use crate::components::timeline::waveform_cache;
 use crate::theme::Colors;
 use gpui::{
-    div, px, svg, Context, Empty, ExternalPaths, InteractiveElement, IntoElement, ParentElement,
-    Render, ScrollDelta, StatefulInteractiveElement, Styled, Window,
+    div, px, svg, AppContext, Context, Empty, ExternalPaths, InteractiveElement, IntoElement,
+    ParentElement, Render, ScrollDelta, StatefulInteractiveElement, Styled, Window,
 };
 
 /// App chrome (top titlebar/menu strip) — used to convert window-space y into
@@ -30,6 +30,9 @@ fn is_supported_audio_ext(path: &std::path::Path) -> bool {
 
 pub struct Timeline {
     pub state: TimelineState,
+    on_seek_beats: Option<std::sync::Arc<dyn Fn(f32, f32) + Send + Sync + 'static>>,
+    on_track_param_change:
+        Option<std::sync::Arc<dyn Fn(String, String, f32) + Send + Sync + 'static>>,
     /// Window-space position of the last drag-move event while files are
     /// being dragged. We need this because `on_drop::<ExternalPaths>` does
     /// not carry the drop position itself — gpui translates the submit into
@@ -38,6 +41,24 @@ pub struct Timeline {
     last_drag_position: Option<gpui::Point<gpui::Pixels>>,
     clip_drag_origin: Option<gpui::Point<gpui::Pixels>>,
     clip_drag_target_track_index: Option<usize>,
+    pan_last_position: Option<gpui::Point<gpui::Pixels>>,
+}
+
+#[derive(Clone, Debug)]
+struct ScrollbarDrag {
+    axis: ScrollAxis,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ScrollAxis {
+    Horizontal,
+    Vertical,
+}
+
+impl Render for ScrollbarDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        Empty
+    }
 }
 
 impl Timeline {
@@ -45,9 +66,12 @@ impl Timeline {
     pub fn new() -> Self {
         Self {
             state: TimelineState::default(),
+            on_seek_beats: None,
+            on_track_param_change: None,
             last_drag_position: None,
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
+            pan_last_position: None,
         }
     }
 
@@ -56,9 +80,12 @@ impl Timeline {
     pub fn with_demo_content() -> Self {
         Self {
             state: TimelineState::demo_project(),
+            on_seek_beats: None,
+            on_track_param_change: None,
             last_drag_position: None,
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
+            pan_last_position: None,
         }
     }
 
@@ -77,7 +104,22 @@ impl Timeline {
         (longest_seconds * self.state.viewport.pixels_per_second).max(1200.0)
     }
 
+    pub fn set_native_audio_callbacks(
+        &mut self,
+        on_seek_beats: Option<std::sync::Arc<dyn Fn(f32, f32) + Send + Sync + 'static>>,
+        on_track_param_change: Option<
+            std::sync::Arc<dyn Fn(String, String, f32) + Send + Sync + 'static>,
+        >,
+    ) {
+        self.on_seek_beats = on_seek_beats;
+        self.on_track_param_change = on_track_param_change;
+    }
+
     fn max_scroll_offsets(&self, window: &Window) -> (f32, f32) {
+        self.scroll_geometry(window).2
+    }
+
+    fn scroll_geometry(&self, window: &Window) -> (f32, f32, (f32, f32)) {
         let window_size = window.bounds().size;
         let window_w: f32 = window_size.width.into();
         let window_h: f32 = window_size.height.into();
@@ -86,8 +128,12 @@ impl Timeline {
         let content_w = self.timeline_content_width();
         let content_h = self.state.tracks.len() as f32 * TRACK_HEIGHT;
         (
-            (content_w - track_view_w).max(0.0),
-            (content_h - track_view_h).max(0.0),
+            track_view_w,
+            track_view_h,
+            (
+                (content_w - track_view_w).max(0.0),
+                (content_h - track_view_h).max(0.0),
+            ),
         )
     }
 
@@ -227,6 +273,14 @@ impl Timeline {
 
 impl Render for Timeline {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (viewport_w, viewport_h, (scroll_max_x, scroll_max_y)) = self.scroll_geometry(window);
+        self.state.update_viewport_size(viewport_w, viewport_h);
+        self.state.clamp_scroll(scroll_max_x, scroll_max_y);
+        let scrolling = self.state.smooth_scroll_towards_target();
+        if scrolling {
+            cx.notify();
+        }
+
         let on_select_track = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.select_track(track_id);
             cx.notify();
@@ -239,11 +293,29 @@ impl Render for Timeline {
 
         let on_toggle_mute = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.toggle_track_mute(track_id);
+            if let Some(track) = this.state.find_track(track_id) {
+                if let Some(cb) = this.on_track_param_change.as_ref() {
+                    cb(
+                        track_id.clone(),
+                        "mute".to_string(),
+                        if track.muted { 1.0 } else { 0.0 },
+                    );
+                }
+            }
             cx.notify();
         });
 
         let on_toggle_solo = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.toggle_track_solo(track_id);
+            if let Some(track) = this.state.find_track(track_id) {
+                if let Some(cb) = this.on_track_param_change.as_ref() {
+                    cb(
+                        track_id.clone(),
+                        "solo".to_string(),
+                        if track.solo { 1.0 } else { 0.0 },
+                    );
+                }
+            }
             cx.notify();
         });
 
@@ -268,11 +340,17 @@ impl Render for Timeline {
         let on_volume_change =
             cx.listener(|this, (track_id, volume): &(String, f32), _window, cx| {
                 this.state.set_track_volume(track_id, *volume);
+                if let Some(cb) = this.on_track_param_change.as_ref() {
+                    cb(track_id.clone(), "volume".to_string(), *volume);
+                }
                 cx.notify();
             });
 
         let on_pan_change = cx.listener(|this, (track_id, pan): &(String, f32), _window, cx| {
             this.state.set_track_pan(track_id, *pan);
+            if let Some(cb) = this.on_track_param_change.as_ref() {
+                cb(track_id.clone(), "pan".to_string(), *pan);
+            }
             cx.notify();
         });
 
@@ -354,6 +432,9 @@ impl Render for Timeline {
             let beats = this.state.x_to_beats(*click_x);
             let snapped_sec = this.state.snap_time(beats * this.state.seconds_per_beat());
             this.state.transport.playhead_beats = snapped_sec / this.state.seconds_per_beat();
+            if let Some(cb) = this.on_seek_beats.as_ref() {
+                cb(this.state.transport.playhead_beats, this.state.bpm);
+            }
             cx.notify();
         });
 
@@ -449,11 +530,10 @@ impl Render for Timeline {
         // edges of the lane area. Clicking the track jumps the scroll
         // position to that point — gives a functional scrollbar without
         // needing a stateful drag.
-        let (scroll_max_x, scroll_max_y) = self.max_scroll_offsets(window);
         let content_w = self.timeline_content_width();
         let content_h = (self.state.tracks.len() as f32 * TRACK_HEIGHT).max(1.0);
-        let lane_view_h = (content_h - scroll_max_y).max(TRACK_HEIGHT);
-        let lane_view_w = (content_w - scroll_max_x).max(1.0);
+        let lane_view_h = viewport_h.max(TRACK_HEIGHT);
+        let lane_view_w = viewport_w.max(1.0);
 
         // ── Drag/drop import wiring ─────────────────────────────────────
         // Track the mouse position throughout an external file drag so that
@@ -523,6 +603,48 @@ impl Render for Timeline {
             cx.notify();
         });
 
+        let on_middle_pan_start = cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+            this.pan_last_position = Some(event.position);
+            window.prevent_default();
+            cx.stop_propagation();
+            cx.notify();
+        });
+
+        let on_middle_pan_move = cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
+            if event.pressed_button != Some(gpui::MouseButton::Middle) {
+                this.pan_last_position = None;
+                return;
+            }
+
+            let Some(previous) = this.pan_last_position else {
+                this.pan_last_position = Some(event.position);
+                return;
+            };
+
+            let dx: f32 = (event.position.x - previous.x).into();
+            let dy: f32 = (event.position.y - previous.y).into();
+            let (max_x, max_y) = this.max_scroll_offsets(window);
+            let next_x = this.state.viewport.scroll_x - dx;
+            let next_y = this.state.viewport.scroll_y - dy;
+            this.state
+                .set_scroll_immediate(next_x, next_y, max_x, max_y);
+            this.pan_last_position = Some(event.position);
+            window.prevent_default();
+            cx.stop_propagation();
+            cx.notify();
+        });
+
+        let on_middle_pan_end = cx.listener(|this, _event: &gpui::MouseUpEvent, _window, cx| {
+            this.pan_last_position = None;
+            cx.notify();
+        });
+
+        let on_middle_pan_end_out =
+            cx.listener(|this, _event: &gpui::MouseUpEvent, _window, cx| {
+                this.pan_last_position = None;
+                cx.notify();
+            });
+
         let on_ctrl_wheel_zoom = cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
             let delta = match event.delta {
                 ScrollDelta::Pixels(p) => {
@@ -535,12 +657,17 @@ impl Render for Timeline {
 
             if !event.modifiers.control {
                 let (max_x, max_y) = this.max_scroll_offsets(window);
-                let horizontal = if event.modifiers.shift {
-                    delta.1
+                let (scroll_x, scroll_y) = if event.modifiers.shift {
+                    let horizontal = if delta.1.abs() > 0.01 {
+                        delta.1
+                    } else {
+                        delta.0
+                    };
+                    (horizontal, 0.0)
                 } else {
-                    delta.0
+                    (delta.0, delta.1)
                 };
-                this.state.scroll_by(horizontal, delta.1, max_x, max_y);
+                this.state.scroll_by(scroll_x, scroll_y, max_x, max_y);
                 window.prevent_default();
                 cx.stop_propagation();
                 cx.notify();
@@ -559,8 +686,7 @@ impl Render for Timeline {
             let factor = (1.0018_f32).powf(-delta.1);
             this.state.zoom_by(factor, anchor);
             let (max_x, max_y) = this.max_scroll_offsets(window);
-            this.state.viewport.scroll_x = this.state.viewport.scroll_x.clamp(0.0, max_x);
-            this.state.viewport.scroll_y = this.state.viewport.scroll_y.clamp(0.0, max_y);
+            this.state.clamp_scroll(max_x, max_y);
             cx.notify();
         });
 
@@ -570,6 +696,9 @@ impl Render for Timeline {
             .flex_1()
             .h_full()
             .bg(Colors::surface_base())
+            .border_l(px(1.0))
+            .border_r(px(1.0))
+            .border_color(Colors::border_subtle())
             .relative()
             .on_drag_move::<ExternalPaths>(on_drag_track)
             .on_drop::<ExternalPaths>(on_files_dropped)
@@ -577,6 +706,10 @@ impl Render for Timeline {
             .on_drop::<BrowserDragItem>(on_browser_file_dropped)
             .on_drag_move::<ClipDragItem>(on_clip_drag_move)
             .on_drop::<ClipDragItem>(on_clip_dropped)
+            .on_mouse_down(gpui::MouseButton::Middle, on_middle_pan_start)
+            .on_mouse_move(on_middle_pan_move)
+            .on_mouse_up(gpui::MouseButton::Middle, on_middle_pan_end)
+            .on_mouse_up_out(gpui::MouseButton::Middle, on_middle_pan_end_out)
             .on_scroll_wheel(on_ctrl_wheel_zoom)
             // 1. Timeline Ruler
             .child(timeline_ruler(
@@ -760,9 +893,34 @@ fn vertical_scrollbar(
         // still yields a valid scroll position.
         let local = (click_y - 36.0 - RULER_HEIGHT).max(0.0);
         let frac = (local / track_h.max(1.0)).clamp(0.0, 1.0);
-        this.state.viewport.scroll_y = (frac * max_scroll).clamp(0.0, max_scroll);
+        this.state.set_scroll_immediate(
+            this.state.viewport.scroll_x,
+            (frac * max_scroll).clamp(0.0, max_scroll),
+            f32::MAX,
+            max_scroll,
+        );
         cx.notify();
     });
+
+    let on_thumb_drag = cx.listener(
+        move |this, event: &gpui::DragMoveEvent<ScrollbarDrag>, _w, cx| {
+            if event.drag(cx).axis != ScrollAxis::Vertical {
+                return;
+            }
+            let y: f32 = event.event.position.y.into();
+            let oy: f32 = event.bounds.origin.y.into();
+            let track_range = (track_h - thumb_h).max(1.0);
+            let local = (y - oy - thumb_h * 0.5).clamp(0.0, track_range);
+            let frac = local / track_range;
+            this.state.set_scroll_immediate(
+                this.state.viewport.scroll_x,
+                frac * max_scroll,
+                f32::MAX,
+                max_scroll,
+            );
+            cx.notify();
+        },
+    );
 
     div()
         .absolute()
@@ -772,6 +930,13 @@ fn vertical_scrollbar(
         .w(px(SCROLLBAR_THICKNESS))
         .id("timeline-vscroll")
         .on_mouse_down(gpui::MouseButton::Left, on_track_click)
+        .on_drag(
+            ScrollbarDrag {
+                axis: ScrollAxis::Vertical,
+            },
+            |drag, _offset, _window, cx| cx.new(|_| drag.clone()),
+        )
+        .on_drag_move::<ScrollbarDrag>(on_thumb_drag)
         .child(
             div()
                 .absolute()
@@ -804,9 +969,34 @@ fn horizontal_scrollbar(
         let click_x: f32 = event.position.x.into();
         let local = (click_x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
         let frac = (local / track_w.max(1.0)).clamp(0.0, 1.0);
-        this.state.viewport.scroll_x = (frac * max_scroll).clamp(0.0, max_scroll);
+        this.state.set_scroll_immediate(
+            (frac * max_scroll).clamp(0.0, max_scroll),
+            this.state.viewport.scroll_y,
+            max_scroll,
+            f32::MAX,
+        );
         cx.notify();
     });
+
+    let on_thumb_drag = cx.listener(
+        move |this, event: &gpui::DragMoveEvent<ScrollbarDrag>, _w, cx| {
+            if event.drag(cx).axis != ScrollAxis::Horizontal {
+                return;
+            }
+            let x: f32 = event.event.position.x.into();
+            let ox: f32 = event.bounds.origin.x.into();
+            let track_range = (track_w - thumb_w).max(1.0);
+            let local = (x - ox - thumb_w * 0.5).clamp(0.0, track_range);
+            let frac = local / track_range;
+            this.state.set_scroll_immediate(
+                frac * max_scroll,
+                this.state.viewport.scroll_y,
+                max_scroll,
+                f32::MAX,
+            );
+            cx.notify();
+        },
+    );
 
     div()
         .absolute()
@@ -816,6 +1006,13 @@ fn horizontal_scrollbar(
         .h(px(SCROLLBAR_THICKNESS))
         .id("timeline-hscroll")
         .on_mouse_down(gpui::MouseButton::Left, on_track_click)
+        .on_drag(
+            ScrollbarDrag {
+                axis: ScrollAxis::Horizontal,
+            },
+            |drag, _offset, _window, cx| cx.new(|_| drag.clone()),
+        )
+        .on_drag_move::<ScrollbarDrag>(on_thumb_drag)
         .child(
             div()
                 .absolute()

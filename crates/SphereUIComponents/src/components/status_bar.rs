@@ -1,7 +1,7 @@
 use crate::theme::Colors;
 use gpui::{div, px, IntoElement, ParentElement, Styled};
 
-pub fn status_bar() -> impl IntoElement {
+pub fn status_bar(left: impl Into<String>, right: impl Into<String>) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
@@ -16,12 +16,12 @@ pub fn status_bar() -> impl IntoElement {
                 .flex_1()
                 .text_color(Colors::text_muted())
                 .text_size(px(10.5))
-                .child("Ready"),
+                .child(left.into()),
         )
         .child(
             div()
                 .text_color(Colors::text_muted())
                 .text_size(px(10.5))
-                .child("44100 Hz  32-bit  -  DSP: 0.0%"),
+                .child(right.into()),
         )
 }

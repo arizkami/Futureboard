@@ -22,7 +22,7 @@ use crate::backend::BackendKind;
 use crate::device;
 use crate::engine::EngineInner;
 use crate::error::SphereAudioError;
-use crate::types::JsDauxConfig;
+use crate::types::{EngineProjectSnapshot, JsDauxConfig, JsMeterSnapshot};
 
 /// Default sample rate used when the caller does not specify one. Mirrors
 /// the system's "Auto" path — most backends ignore this and pick their
@@ -117,6 +117,7 @@ pub struct EngineStats {
     pub running: bool,
     pub stream_open: bool,
     pub transport_playing: bool,
+    pub position_seconds: f64,
     pub sample_rate: u32,
     pub buffer_size: u32,
     pub backend_name: String,
@@ -213,6 +214,11 @@ impl AudioEngine {
         self.inner.pause()
     }
 
+    /// Seek the native transport to an absolute project time in seconds.
+    pub fn seek(&self, position_seconds: f64) -> Result<(), SphereAudioError> {
+        self.inner.seek(position_seconds.max(0.0))
+    }
+
     /// Toggle the transport between play and pause. Returns the new playing
     /// state. No-ops cleanly if the stream is not open yet.
     pub fn toggle_transport(&self) -> Result<bool, SphereAudioError> {
@@ -259,6 +265,7 @@ impl AudioEngine {
             running: st.running,
             stream_open: st.stream_open,
             transport_playing: self.inner.shared_playing(),
+            position_seconds: st.position_seconds,
             sample_rate: st.sample_rate,
             buffer_size: st.buffer_size,
             backend_name: daux.backend_name,
@@ -267,6 +274,26 @@ impl AudioEngine {
             glitch_count: daux.glitch_count as u64,
             estimated_latency_ms: daux.estimated_latency_ms,
         }
+    }
+
+    /// Build/update the realtime runtime graph from a control-thread project snapshot.
+    pub fn load_project(&self, snapshot: EngineProjectSnapshot) -> Result<(), SphereAudioError> {
+        self.inner.load_project(snapshot)
+    }
+
+    /// Update a track or master parameter without rebuilding the full runtime graph.
+    pub fn update_track_param(
+        &self,
+        track_id: &str,
+        param_id: &str,
+        value: f64,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.update_track_param(track_id, param_id, value)
+    }
+
+    /// Poll meter atomics and runtime track meters for UI display.
+    pub fn meters(&self) -> JsMeterSnapshot {
+        self.inner.get_meters()
     }
 }
 

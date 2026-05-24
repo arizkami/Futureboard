@@ -43,27 +43,34 @@ pub fn timeline_grid(
     div()
         .absolute()
         .inset_0()
-        // Alternating shading
-        .children(shading_elements)
-        // Grid lines (sub, beat, then bar on top)
-        .children(lines.into_iter().map(|line| {
-            let alpha = match line.level {
-                GridLineLevel::Bar => 0.14,
-                GridLineLevel::Beat => 0.062,
-                GridLineLevel::Sub => 0.026,
-            };
-
+        // Layer 1: alternating bar fills. This layer is always behind every
+        // grid line, including the first visible bar at x=0.
+        .child(div().absolute().inset_0().children(shading_elements))
+        // Layer 2: grid lines. Keep these as a separate later child so no bar
+        // fill can accidentally cover the first-column/bar line.
+        .child(
             div()
                 .absolute()
-                .left(px(line.x))
-                .top_0()
-                .bottom_0()
-                .w(px(1.0))
-                .bg(gpui::Rgba {
-                    r: 1.0,
-                    g: 1.0,
-                    b: 1.0,
-                    a: alpha,
-                })
-        }))
+                .inset_0()
+                .children(lines.into_iter().map(|line| {
+                    let alpha = match line.level {
+                        GridLineLevel::Bar => 0.14,
+                        GridLineLevel::Beat => 0.062,
+                        GridLineLevel::Sub => 0.026,
+                    };
+
+                    div()
+                        .absolute()
+                        .left(px(line.x))
+                        .top_0()
+                        .bottom_0()
+                        .w(px(1.0))
+                        .bg(gpui::Rgba {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: alpha,
+                        })
+                })),
+        )
 }

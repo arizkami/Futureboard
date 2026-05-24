@@ -128,7 +128,12 @@ pub enum TimelineTool {
 pub struct TimelineViewport {
     pub scroll_x: f32,
     pub scroll_y: f32,
+    pub target_scroll_x: f32,
+    pub target_scroll_y: f32,
     pub pixels_per_second: f32,
+    pub pixels_per_beat: f32,
+    pub viewport_width: f32,
+    pub viewport_height: f32,
     pub track_area_height: f32,
 }
 
@@ -240,7 +245,12 @@ impl Default for TimelineState {
             viewport: TimelineViewport {
                 scroll_x: 0.0,
                 scroll_y: 0.0,
+                target_scroll_x: 0.0,
+                target_scroll_y: 0.0,
                 pixels_per_second: 150.0,
+                pixels_per_beat: 75.0,
+                viewport_width: 0.0,
+                viewport_height: 500.0,
                 track_area_height: 500.0,
             },
             transport: TransportState {
@@ -437,7 +447,12 @@ impl TimelineState {
             viewport: TimelineViewport {
                 scroll_x: 0.0,
                 scroll_y: 0.0,
+                target_scroll_x: 0.0,
+                target_scroll_y: 0.0,
                 pixels_per_second: 150.0, // Default zoom level in Web UI
+                pixels_per_beat: 75.0,
+                viewport_width: 0.0,
+                viewport_height: 500.0,
                 track_area_height: 500.0,
             },
             transport: TransportState {
@@ -474,6 +489,7 @@ impl TimelineState {
 pub const HEADER_WIDTH: f32 = 320.0; // Keep it slightly wider for native controls
 pub const TRACK_HEIGHT: f32 = 76.0;
 pub const RULER_HEIGHT: f32 = 30.0;
+pub type TrackId = String;
 
 impl TimelineState {
     pub fn seconds_per_beat(&self) -> f32 {
@@ -486,6 +502,14 @@ impl TimelineState {
 
     pub fn beats_to_seconds(&self, beats: f32) -> f32 {
         beats * self.seconds_per_beat()
+    }
+
+    pub fn pixels_per_beat(&self) -> f32 {
+        self.viewport.pixels_per_second * self.seconds_per_beat()
+    }
+
+    fn sync_pixels_per_beat(&mut self) {
+        self.viewport.pixels_per_beat = self.pixels_per_beat();
     }
 
     pub fn beats_per_bar(&self) -> f32 {
@@ -508,10 +532,35 @@ impl TimelineState {
         self.seconds_to_beats(self.content_x_to_time(x) as f64)
     }
 
+    pub fn beat_to_x(&self, beat: f32) -> f32 {
+        self.beats_to_x(beat)
+    }
+
+    pub fn x_to_beat(&self, x: f32) -> f64 {
+        self.x_to_beats(x) as f64
+    }
+
+    pub fn lane_y_to_track_id(&self, y: f32) -> Option<TrackId> {
+        self.track_index_at_y(y)
+            .and_then(|index| self.tracks.get(index))
+            .map(|track| track.id.clone())
+    }
+
+    pub fn update_viewport_size(&mut self, width: f32, height: f32) {
+        self.viewport.viewport_width = width.max(0.0);
+        self.viewport.viewport_height = height.max(0.0);
+        self.viewport.track_area_height = height.max(0.0);
+        self.sync_pixels_per_beat();
+    }
+
     pub fn get_visible_beat_range(&self, width: f32) -> (f32, f32) {
         let start = self.x_to_beats(0.0);
         let end = self.x_to_beats(width);
         (start, end)
+    }
+
+    pub fn visible_beat_range(&self, viewport_width: f32) -> (f32, f32) {
+        self.get_visible_beat_range(viewport_width)
     }
 
     pub fn build_interval_list(&self) -> Vec<f32> {
@@ -580,59 +629,97 @@ impl TimelineState {
     }
 
     pub fn get_arrangement_grid_lines(&self, viewport_width: f32) -> Vec<GridLine> {
-        let ppb = self.viewport.pixels_per_second * self.seconds_per_beat();
+        const MIN_LINE_SPACING_PX: f32 = 8.0;
+        const MIN_LABEL_SPACING_PX: f32 = 46.0;
+
+        let ppb = self.pixels_per_beat().max(0.0001);
         let bpb = self.beats_per_bar();
-        let base_sub = match self.grid_division {
-            SnapDivision::Auto => self.get_grid_sub_beats(ppb),
-            SnapDivision::Off => self.get_grid_sub_beats(ppb),
-            SnapDivision::Bar1 => bpb,
-            _ => self.grid_division.step_beats(bpb),
-        };
-        let mut sub = base_sub;
-        while sub * ppb < 4.0 {
-            sub *= 2.0;
-        }
-        let interval = self.get_grid_interval_beats(ppb);
-        let eps = sub * 0.01;
+        let viewport_width = viewport_width.max(1.0);
+        let (start_beat, end_beat) = self.visible_beat_range(viewport_width);
+        let start_beat = start_beat.max(0.0);
+        let end_beat = end_beat.max(start_beat);
 
-        let start_beat = self.viewport.scroll_x / ppb;
-        let end_beat = (self.viewport.scroll_x + viewport_width) / ppb;
-        let first = (start_beat / sub).floor() * sub;
+        let mut lines: Vec<GridLine> = Vec::new();
+        let mut occupied_x: Vec<i32> = Vec::new();
 
-        let mut lines = Vec::new();
-        let limit = end_beat + sub;
-        let mut beat = first;
-        while beat <= limit {
+        let mut add_line = |beat: f32, level: GridLineLevel| {
+            if beat < start_beat - bpb || beat > end_beat + bpb {
+                return;
+            }
             let rb = (beat * 100000.0).round() / 100000.0;
-            let x = (rb * ppb - self.viewport.scroll_x).round();
-
-            // Bar boundary - beat is a multiple of bpb
-            let mod_bar = ((rb % bpb) + bpb) % bpb;
-            let is_bar = mod_bar < eps || mod_bar > bpb - eps;
-
-            // Quarter-note beat boundary
-            let mod_qn = ((rb % 1.0) + 1.0) % 1.0;
-            let is_beat = !is_bar && (mod_qn < eps || mod_qn > 1.0 - eps);
-
-            // Label
-            let mod_lbl = ((rb % interval) + interval) % interval;
-            let is_label = mod_lbl < eps || mod_lbl > interval - eps;
-
+            let x = self.beat_to_x(rb).round();
+            let x_key = x as i32;
+            if x < -1.0 || x > viewport_width + 1.0 {
+                return;
+            }
+            if occupied_x
+                .iter()
+                .any(|existing| (x_key - *existing).abs() < 1)
+            {
+                return;
+            }
+            occupied_x.push(x_key);
             lines.push(GridLine {
                 x,
                 beat: rb,
-                level: if is_bar {
-                    GridLineLevel::Bar
-                } else if is_beat {
-                    GridLineLevel::Beat
-                } else {
-                    GridLineLevel::Sub
-                },
-                show_label: is_label,
+                level,
+                show_label: false,
             });
+        };
 
-            beat += sub;
+        // Strongest level first. Later, weaker levels skip duplicate pixel x
+        // positions, so a bar line can never be overpainted by a beat/sub line.
+        let first_bar = (start_beat / bpb).floor() - 1.0;
+        let last_bar = (end_beat / bpb).ceil() + 1.0;
+        let mut bar = first_bar;
+        while bar <= last_bar {
+            add_line(bar * bpb, GridLineLevel::Bar);
+            bar += 1.0;
         }
+
+        if ppb >= 12.0 {
+            let first_beat = start_beat.floor() - 1.0;
+            let last_beat = end_beat.ceil() + 1.0;
+            let mut beat = first_beat;
+            while beat <= last_beat {
+                add_line(beat, GridLineLevel::Beat);
+                beat += 1.0;
+            }
+        }
+
+        let sub_step = if ppb >= 96.0 {
+            Some(1.0 / 16.0)
+        } else if ppb >= 32.0 {
+            Some(1.0 / 4.0)
+        } else {
+            None
+        };
+
+        if let Some(step) = sub_step.filter(|step| step * ppb >= MIN_LINE_SPACING_PX) {
+            let first_sub = (start_beat / step).floor() - 1.0;
+            let last_sub = (end_beat / step).ceil() + 1.0;
+            let mut slot = first_sub;
+            while slot <= last_sub {
+                add_line(slot * step, GridLineLevel::Sub);
+                slot += 1.0;
+            }
+        }
+
+        lines.sort_by(|a, b| a.x.total_cmp(&b.x));
+
+        let mut last_label_x = f32::NEG_INFINITY;
+        for line in &mut lines {
+            let can_label_level = match line.level {
+                GridLineLevel::Bar => true,
+                GridLineLevel::Beat => ppb >= 48.0,
+                GridLineLevel::Sub => false,
+            };
+            if can_label_level && line.x - last_label_x >= MIN_LABEL_SPACING_PX {
+                line.show_label = true;
+                last_label_x = line.x;
+            }
+        }
+
         lines
     }
 
@@ -824,14 +911,48 @@ impl TimelineState {
         // Time under anchor before the change.
         let anchor_time = (anchor_x + self.viewport.scroll_x) / old_pps;
         self.viewport.pixels_per_second = new_pps;
+        self.sync_pixels_per_beat();
         // Re-solve scroll_x so the same anchor_time lands under anchor_x.
         let new_scroll = (anchor_time * new_pps - anchor_x).max(0.0);
         self.viewport.scroll_x = new_scroll;
+        self.viewport.target_scroll_x = new_scroll;
     }
 
     pub fn scroll_by(&mut self, delta_x: f32, delta_y: f32, max_x: f32, max_y: f32) {
-        self.viewport.scroll_x = (self.viewport.scroll_x + delta_x).clamp(0.0, max_x.max(0.0));
-        self.viewport.scroll_y = (self.viewport.scroll_y + delta_y).clamp(0.0, max_y.max(0.0));
+        self.viewport.target_scroll_x =
+            (self.viewport.target_scroll_x + delta_x).clamp(0.0, max_x.max(0.0));
+        self.viewport.target_scroll_y =
+            (self.viewport.target_scroll_y + delta_y).clamp(0.0, max_y.max(0.0));
+        self.smooth_scroll_towards_target();
+    }
+
+    pub fn set_scroll_immediate(&mut self, x: f32, y: f32, max_x: f32, max_y: f32) {
+        self.viewport.scroll_x = x.clamp(0.0, max_x.max(0.0));
+        self.viewport.scroll_y = y.clamp(0.0, max_y.max(0.0));
+        self.viewport.target_scroll_x = self.viewport.scroll_x;
+        self.viewport.target_scroll_y = self.viewport.scroll_y;
+    }
+
+    pub fn clamp_scroll(&mut self, max_x: f32, max_y: f32) {
+        let max_x = max_x.max(0.0);
+        let max_y = max_y.max(0.0);
+        self.viewport.scroll_x = self.viewport.scroll_x.clamp(0.0, max_x);
+        self.viewport.scroll_y = self.viewport.scroll_y.clamp(0.0, max_y);
+        self.viewport.target_scroll_x = self.viewport.target_scroll_x.clamp(0.0, max_x);
+        self.viewport.target_scroll_y = self.viewport.target_scroll_y.clamp(0.0, max_y);
+    }
+
+    pub fn smooth_scroll_towards_target(&mut self) -> bool {
+        let dx = self.viewport.target_scroll_x - self.viewport.scroll_x;
+        let dy = self.viewport.target_scroll_y - self.viewport.scroll_y;
+        if dx.abs() < 0.35 && dy.abs() < 0.35 {
+            self.viewport.scroll_x = self.viewport.target_scroll_x;
+            self.viewport.scroll_y = self.viewport.target_scroll_y;
+            return false;
+        }
+        self.viewport.scroll_x += dx * 0.42;
+        self.viewport.scroll_y += dy * 0.42;
+        true
     }
 
     pub fn move_clip_to_track(&mut self, clip_id: &str, target_track_id: &str, start_beat: f32) {

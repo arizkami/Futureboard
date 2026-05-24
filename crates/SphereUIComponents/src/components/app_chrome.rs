@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, px, rgba, svg, App, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, Window, WindowControlArea,
+    div, px, rgba, svg, App, InteractiveElement, IntoElement, ParentElement, Styled, Window,
+    WindowControlArea,
 };
 
 use crate::assets;
@@ -14,6 +14,17 @@ use crate::theme::Colors;
 /// — anchor_x is the click X position which the dropdown overlay uses to
 /// align itself under the clicked label.
 pub type MenuOpenCb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
+pub type ChromeActionCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
+
+#[derive(Clone)]
+pub struct TransportChromeState {
+    pub playing: bool,
+    pub position_label: String,
+    pub bpm_label: String,
+    pub time_signature_label: String,
+    pub on_play_toggle: ChromeActionCb,
+    pub on_stop: ChromeActionCb,
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -101,7 +112,15 @@ fn project_title() -> impl IntoElement {
 
 // ── Right section — transport + panel toggles + utility ───────────────────────
 
-fn transport_controls() -> impl IntoElement {
+fn transport_controls(state: TransportChromeState) -> impl IntoElement {
+    let play_color = if state.playing {
+        Colors::accent_primary()
+    } else {
+        Colors::text_muted()
+    };
+    let on_play = state.on_play_toggle.clone();
+    let on_stop = state.on_stop.clone();
+
     div()
         .flex()
         .flex_row()
@@ -117,23 +136,37 @@ fn transport_controls() -> impl IntoElement {
             Colors::text_muted(),
         ))
         // Play
-        .child(icon_button(
-            Some(assets::ICON_PLAY_PATH),
-            ">",
-            px(28.0),
-            px(28.0),
-            px(14.0),
-            Colors::text_muted(),
-        ))
+        .child(
+            icon_button(
+                Some(assets::ICON_PLAY_PATH),
+                ">",
+                px(28.0),
+                px(28.0),
+                px(14.0),
+                play_color,
+            )
+            .cursor(gpui::CursorStyle::PointingHand)
+            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                on_play(&(), window, cx);
+            })
+            .occlude(),
+        )
         // Stop
-        .child(icon_button(
-            Some(assets::ICON_SQUARE_PATH),
-            "[]",
-            px(28.0),
-            px(28.0),
-            px(14.0),
-            Colors::text_muted(),
-        ))
+        .child(
+            icon_button(
+                Some(assets::ICON_SQUARE_PATH),
+                "[]",
+                px(28.0),
+                px(28.0),
+                px(14.0),
+                Colors::text_muted(),
+            )
+            .cursor(gpui::CursorStyle::PointingHand)
+            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                on_stop(&(), window, cx);
+            })
+            .occlude(),
+        )
         // Record
         .child(icon_button(
             Some(assets::ICON_CIRCLE_PATH),
@@ -173,7 +206,7 @@ fn transport_controls() -> impl IntoElement {
                 .text_color(Colors::text_primary())
                 .text_size(px(13.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child("1.1.1"),
+                .child(state.position_label),
         )
         .child(divider())
         // BPM
@@ -203,7 +236,7 @@ fn transport_controls() -> impl IntoElement {
                         .text_color(Colors::text_primary())
                         .text_size(px(11.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child("120"),
+                        .child(state.bpm_label),
                 ),
         )
         // Time signature
@@ -226,7 +259,13 @@ fn transport_controls() -> impl IntoElement {
                         .text_color(Colors::text_primary())
                         .text_size(px(11.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child("4"),
+                        .child(
+                            state
+                                .time_signature_label
+                                .split_once('/')
+                                .map(|(num, _)| num.to_string())
+                                .unwrap_or_else(|| "4".to_string()),
+                        ),
                 )
                 .child(
                     div()
@@ -246,7 +285,13 @@ fn transport_controls() -> impl IntoElement {
                         .text_color(Colors::text_primary())
                         .text_size(px(11.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child("4"),
+                        .child(
+                            state
+                                .time_signature_label
+                                .split_once('/')
+                                .map(|(_, den)| den.to_string())
+                                .unwrap_or_else(|| "4".to_string()),
+                        ),
                 ),
         )
 }
@@ -417,6 +462,7 @@ pub fn app_chrome(
     window: &gpui::Window,
     open_menu_id: Option<&str>,
     on_open_menu: MenuOpenCb,
+    transport: TransportChromeState,
 ) -> impl IntoElement {
     div()
         .flex()
@@ -435,7 +481,7 @@ pub fn app_chrome(
         // ── Drag region spacer ────────────────────────────────────────────────
         .child(div().flex_1())
         // ── Right: transport controls ─────────────────────────────────────────
-        .child(transport_controls())
+        .child(transport_controls(transport))
         .child(divider())
         // Panel toggles: Browser | Mixer | Inspector
         .child(panel_toggles())
