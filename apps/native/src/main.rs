@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+// #![windows_subsystem = "windows"]
 
 mod app;
 mod audio_state;
@@ -16,10 +16,7 @@ fn main() {
     }));
 
     eprintln!("[boot] gpui application starting");
-    // `gpui::Application::new()` was removed in the patched zed/gpui;
-    // use the platform helper crate which picks the right backend
-    // (Windows/macOS/Linux) and wires it into `with_platform`.
-    gpui_platform::application()
+    gpui::Application::new()
         .with_assets(EmbeddedAssets::new())
         .run(app::setup);
     eprintln!("[boot] gpui application exited");

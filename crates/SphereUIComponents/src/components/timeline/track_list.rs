@@ -25,6 +25,10 @@ pub fn track_list(
     let _s = crate::perf::PerfScope::enter("TrackList");
     let grid_width = state.viewport.viewport_width.max(1.0);
     let grid_height = state.viewport.viewport_height.max(TRACK_HEIGHT);
+    let insert_y = state.drag_target_index.map(|index| {
+        (index as f32 * TRACK_HEIGHT - state.viewport.scroll_y)
+            .clamp(0.0, grid_height.max(TRACK_HEIGHT))
+    });
 
     let mut rows = Vec::new();
     for (index, track) in state.tracks.iter().enumerate() {
@@ -117,4 +121,14 @@ pub fn track_list(
                 .w_full()
                 .children(rows),
         )
+        .children(insert_y.map(|y| {
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px((y - 1.0).max(0.0)))
+                .h(px(2.0))
+                .bg(Colors::accent_primary())
+                .shadow_lg()
+        }))
 }

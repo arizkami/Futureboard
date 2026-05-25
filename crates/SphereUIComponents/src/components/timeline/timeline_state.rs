@@ -48,6 +48,14 @@ pub struct ClipDragItem {
     pub start_beat: f32,
 }
 
+#[derive(Debug, Clone)]
+pub struct TrackDragItem {
+    pub track_id: String,
+    pub origin_index: usize,
+    pub name: String,
+    pub color: gpui::Rgba,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AutomationPoint {
     pub beat: f32,
@@ -84,6 +92,17 @@ pub struct TrackState {
     pub meter_level_r: f32,
     pub clips: Vec<ClipState>,
     pub automation_lanes: Vec<AutomationLaneState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateTrackOptions {
+    pub track_type: TrackType,
+    pub name: String,
+    pub color: gpui::Rgba,
+    pub volume: f32,
+    pub pan: f32,
+    pub armed: bool,
+    pub input_monitor: bool,
 }
 
 /// Volume / dB mapping helpers. Linear in dB between the soft floor and a
@@ -235,6 +254,10 @@ pub struct TimelineState {
     pub active_tool: TimelineTool,
     pub snap_to_grid: bool,
     pub grid_division: SnapDivision,
+    pub dragging_track_id: Option<TrackId>,
+    pub drag_origin_index: Option<usize>,
+    pub drag_current_y: f32,
+    pub drag_target_index: Option<usize>,
 }
 
 impl Default for TimelineState {
@@ -280,6 +303,10 @@ impl Default for TimelineState {
             active_tool: TimelineTool::Pointer,
             snap_to_grid: true,
             grid_division: SnapDivision::Div1_16,
+            dragging_track_id: None,
+            drag_origin_index: None,
+            drag_current_y: 0.0,
+            drag_target_index: None,
         }
     }
 }
@@ -486,6 +513,10 @@ impl TimelineState {
             active_tool: TimelineTool::Pointer,
             snap_to_grid: true,
             grid_division: SnapDivision::Div1_16,
+            dragging_track_id: None,
+            drag_origin_index: None,
+            drag_current_y: 0.0,
+            drag_target_index: None,
         }
     }
 
@@ -787,6 +818,62 @@ impl TimelineState {
         }
     }
 
+    pub fn track_insert_index_at_y(&self, y: f32) -> usize {
+        if self.tracks.is_empty() {
+            return 0;
+        }
+        let content_y = (y + self.viewport.scroll_y).max(0.0);
+        ((content_y / TRACK_HEIGHT).round() as usize).clamp(0, self.tracks.len())
+    }
+
+    pub fn begin_track_drag(&mut self, track_id: &str, origin_index: usize, y: f32) {
+        self.dragging_track_id = Some(track_id.to_string());
+        self.drag_origin_index = Some(origin_index);
+        self.drag_current_y = y;
+        self.drag_target_index = Some(origin_index.min(self.tracks.len()));
+    }
+
+    pub fn update_track_drag(&mut self, y: f32) {
+        self.drag_current_y = y;
+        self.drag_target_index = Some(self.track_insert_index_at_y(y));
+    }
+
+    pub fn clear_track_drag(&mut self) {
+        self.dragging_track_id = None;
+        self.drag_origin_index = None;
+        self.drag_current_y = 0.0;
+        self.drag_target_index = None;
+    }
+
+    pub fn reorder_track(&mut self, track_id: &str, target_index: usize) -> bool {
+        let Some(origin_index) = self.tracks.iter().position(|track| track.id == track_id) else {
+            self.clear_track_drag();
+            return false;
+        };
+        let target_index = target_index.clamp(0, self.tracks.len());
+        let insert_index = if origin_index < target_index {
+            target_index.saturating_sub(1)
+        } else {
+            target_index
+        };
+        if insert_index == origin_index {
+            self.clear_track_drag();
+            return false;
+        }
+
+        let track = self.tracks.remove(origin_index);
+        let insert_index = insert_index.min(self.tracks.len());
+        self.tracks.insert(insert_index, track);
+        if let Some(selected) = self.selection.selected_track_id.as_deref() {
+            if !self.tracks.iter().any(|track| track.id == selected) {
+                self.selection.selected_track_id =
+                    self.tracks.get(insert_index).map(|t| t.id.clone());
+            }
+        }
+        self.clear_track_drag();
+        true
+    }
+
     /// Snap a beat value to the current grid (or return it unchanged when snap is off).
     pub fn snap_beats(&self, beats: f32) -> f32 {
         let snapped_sec = self.snap_time(beats * self.seconds_per_beat());
@@ -795,61 +882,55 @@ impl TimelineState {
 
     /// Create a new audio track with auto-assigned id/color.
     pub fn create_audio_track(&mut self) -> String {
-        let id = self.next_track_id();
-        let palette = [
-            0x56C7C9_u32,
-            0x7EDB9A,
-            0xF2C96D,
-            0xC290F0,
-            0xF49AC2,
-            0x83B8FF,
-        ];
-        let color = gpui::rgb(palette[self.tracks.len() % palette.len()]);
         let name = format!("Audio {}", self.tracks.len() + 1);
         let log_name = name.clone();
-        self.tracks.push(TrackState {
-            id: id.clone(),
-            name,
+        let id = self.create_track(CreateTrackOptions {
             track_type: TrackType::Audio,
-            color,
+            name,
+            color: self.track_color_for_index(self.tracks.len()),
             volume: volume::db_to_norm(0.0),
             pan: 0.0,
-            muted: false,
-            solo: false,
             armed: false,
             input_monitor: false,
-            meter_level_l: 0.0,
-            meter_level_r: 0.0,
-            clips: Vec::new(),
-            automation_lanes: Vec::new(),
         });
         eprintln!("[import] created track id={} name={}", id, log_name);
         id
     }
 
     pub fn create_midi_track(&mut self) -> String {
-        let id = self.next_track_id();
-        let palette = [
-            0xC290F0_u32,
-            0x83B8FF,
-            0x7EDB9A,
-            0xF2C96D,
-            0x56C7C9,
-            0xF49AC2,
-        ];
-        let color = gpui::rgb(palette[self.tracks.len() % palette.len()]);
         let name = format!("MIDI {}", self.tracks.len() + 1);
-        self.tracks.push(TrackState {
-            id: id.clone(),
-            name,
+        self.create_track(CreateTrackOptions {
             track_type: TrackType::Midi,
-            color,
+            name,
+            color: self.track_color_for_index(self.tracks.len()),
             volume: volume::db_to_norm(0.0),
             pan: 0.0,
-            muted: false,
-            solo: false,
             armed: false,
             input_monitor: false,
+        })
+    }
+
+    pub fn track_color_for_index(&self, index: usize) -> gpui::Rgba {
+        const PALETTE: [u32; 12] = [
+            0x56C7C9, 0x7EDB9A, 0xF2C96D, 0xF27E77, 0xA99CFF, 0x6EB7E8, 0xE89B61, 0xD982B6,
+            0xA8D36F, 0x9CAFE8, 0xC49A6C, 0x71D6B5,
+        ];
+        gpui::rgb(PALETTE[index % PALETTE.len()])
+    }
+
+    pub fn create_track(&mut self, options: CreateTrackOptions) -> String {
+        let id = self.next_track_id();
+        self.tracks.push(TrackState {
+            id: id.clone(),
+            name: options.name,
+            track_type: options.track_type,
+            color: options.color,
+            volume: options.volume.clamp(0.0, 1.0),
+            pan: options.pan.clamp(-1.0, 1.0),
+            muted: false,
+            solo: false,
+            armed: options.armed,
+            input_monitor: options.input_monitor,
             meter_level_l: 0.0,
             meter_level_r: 0.0,
             clips: Vec::new(),

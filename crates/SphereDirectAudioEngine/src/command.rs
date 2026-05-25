@@ -34,4 +34,10 @@ pub enum EngineCommand {
     StopTransport,
     /// Seek transport to an absolute position in seconds.
     Seek { position_seconds: f64 },
+    /// Enable or disable generated metronome clicks.
+    SetMetronomeEnabled(bool),
+    /// Set project tempo for metronome scheduling.
+    SetBpm(f64),
+    /// Set project time signature for metronome accent scheduling.
+    SetTimeSignature(u32, u32),
 }

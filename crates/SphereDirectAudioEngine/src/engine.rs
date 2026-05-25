@@ -431,6 +431,22 @@ impl EngineInner {
         self.send_command(EngineCommand::Seek { position_seconds })
     }
 
+    pub fn set_metronome_enabled(&self, enabled: bool) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::SetMetronomeEnabled(enabled))
+    }
+
+    pub fn set_bpm(&self, bpm: f64) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::SetBpm(bpm))
+    }
+
+    pub fn set_time_signature(
+        &self,
+        numerator: u32,
+        denominator: u32,
+    ) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::SetTimeSignature(numerator, denominator))
+    }
+
     // ── Test tone ──────────────────────────────────────────────────────────
 
     pub fn set_test_tone(&self, enabled: bool, frequency: f32) {
@@ -1834,6 +1850,7 @@ where
     let mut playing_local = false;
     let mut render_path_logged = false;
     let mut block_scratch: Vec<f32> = Vec::new();
+    let mut metronome = crate::backend::render::LocalAudioState::new(sr);
 
     // Meter state with peak hold.
     let mut prev_peak_l = 0.0f32;
@@ -1893,6 +1910,19 @@ where
                                 position_seconds, pos
                             );
                             shared.position_samples.store(pos, Ordering::Relaxed);
+                            metronome.reset_metronome_schedule(pos, output_sample_rate);
+                        }
+                        EngineCommand::SetMetronomeEnabled(enabled) => {
+                            let pos = shared.position_samples.load(Ordering::Relaxed);
+                            metronome.set_metronome_enabled(enabled, pos, output_sample_rate);
+                        }
+                        EngineCommand::SetBpm(bpm) => {
+                            let pos = shared.position_samples.load(Ordering::Relaxed);
+                            metronome.set_bpm(bpm, pos, output_sample_rate);
+                        }
+                        EngineCommand::SetTimeSignature(num, den) => {
+                            let pos = shared.position_samples.load(Ordering::Relaxed);
+                            metronome.set_time_signature(num, den, pos, output_sample_rate);
                         }
                         EngineCommand::SetMasterVolume { value } => {
                             shared
@@ -1973,6 +2003,14 @@ where
                             frame[1] = (frame[1] + tone_r).clamp(-1.0, 1.0);
                         }
                     }
+                    for (i, frame) in scratch.chunks_mut(ch).enumerate() {
+                        let click =
+                            metronome.metronome_sample(base_sample + i as u64, output_sample_rate);
+                        if click != 0.0 {
+                            frame[0] = (frame[0] + click * master_vol).clamp(-1.0, 1.0);
+                            frame[1] = (frame[1] + click * master_vol).clamp(-1.0, 1.0);
+                        }
+                    }
                     for (out_frame, frame) in data.chunks_mut(ch).zip(scratch.chunks(ch)) {
                         let l = frame[0].clamp(-1.0, 1.0);
                         let r = frame[1].clamp(-1.0, 1.0);
@@ -2001,8 +2039,14 @@ where
                         } else {
                             (0.0, 0.0)
                         };
-                        let l = (tone_l + project_l).clamp(-1.0, 1.0);
-                        let r = (tone_r + project_r).clamp(-1.0, 1.0);
+                        let click = if playing_local {
+                            metronome.metronome_sample(base_sample + frames, output_sample_rate)
+                                * master_vol
+                        } else {
+                            0.0
+                        };
+                        let l = (tone_l + project_l + click).clamp(-1.0, 1.0);
+                        let r = (tone_r + project_r + click).clamp(-1.0, 1.0);
                         frame[0] = T::from_sample(l);
                         frame[1] = T::from_sample(r);
                         // Extra channels get silence.
@@ -2027,7 +2071,14 @@ where
                         } else {
                             (0.0, 0.0)
                         };
-                        let value = (tone + (project_l + project_r) * 0.5).clamp(-1.0, 1.0);
+                        let click = if playing_local {
+                            metronome.metronome_sample(base_sample + frames, output_sample_rate)
+                                * master_vol
+                        } else {
+                            0.0
+                        };
+                        let value =
+                            (tone + (project_l + project_r) * 0.5 + click).clamp(-1.0, 1.0);
                         *sample = T::from_sample(value);
                         peak_l = peak_l.max(value.abs());
                         sum_sq_l += value * value;

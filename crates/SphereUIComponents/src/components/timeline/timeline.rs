@@ -4,7 +4,7 @@ use crate::components::timeline::floating_tools_bar::floating_tools_bar;
 use crate::components::timeline::timeline_ruler::timeline_ruler;
 use crate::components::timeline::timeline_state::{
     ClipDragItem, ClipState, ClipType, MidiNoteState, SnapDivision, TimelineState, TimelineTool,
-    TrackType, HEADER_WIDTH, RULER_HEIGHT, TRACK_HEIGHT,
+    TrackDragItem, TrackType, HEADER_WIDTH, RULER_HEIGHT, TRACK_HEIGHT,
 };
 use crate::components::timeline::track_list::track_list;
 use crate::components::timeline::waveform_cache;
@@ -34,6 +34,7 @@ pub struct Timeline {
     on_seek_beats: Option<std::sync::Arc<dyn Fn(f32, f32) + Send + Sync + 'static>>,
     on_track_param_change:
         Option<std::sync::Arc<dyn Fn(String, String, f32) + Send + Sync + 'static>>,
+    on_add_track: Option<TimelineAddTrackCb>,
     /// Window-space position of the last drag-move event while files are
     /// being dragged. We need this because `on_drop::<ExternalPaths>` does
     /// not carry the drop position itself — gpui translates the submit into
@@ -56,6 +57,8 @@ pub enum TimelineContextTarget {
 pub type TimelineContextMenuCb = std::sync::Arc<
     dyn Fn(&(TimelineContextTarget, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static,
 >;
+pub type TimelineAddTrackCb =
+    std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>;
 
 #[derive(Clone, Debug)]
 struct ScrollbarDrag {
@@ -81,6 +84,7 @@ impl Timeline {
             state: TimelineState::default(),
             on_seek_beats: None,
             on_track_param_change: None,
+            on_add_track: None,
             last_drag_position: None,
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
@@ -96,6 +100,7 @@ impl Timeline {
             state: TimelineState::demo_project(),
             on_seek_beats: None,
             on_track_param_change: None,
+            on_add_track: None,
             last_drag_position: None,
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
@@ -106,6 +111,10 @@ impl Timeline {
 
     pub fn set_context_menu_callback(&mut self, callback: Option<TimelineContextMenuCb>) {
         self.on_context_menu = callback;
+    }
+
+    pub fn set_add_track_callback(&mut self, callback: Option<TimelineAddTrackCb>) {
+        self.on_add_track = callback;
     }
 
     fn timeline_content_width(&self) -> f32 {
@@ -191,6 +200,11 @@ impl Timeline {
         let (max_x, max_y) = self.max_scroll_offsets(window);
         self.state.viewport.scroll_x = self.state.viewport.scroll_x.clamp(0.0, max_x);
         self.state.viewport.scroll_y = self.state.viewport.scroll_y.clamp(0.0, max_y);
+    }
+
+    fn track_area_y_from_window(position: gpui::Point<gpui::Pixels>) -> f32 {
+        let y: f32 = position.y.into();
+        (y - APP_CHROME_HEIGHT - RULER_HEIGHT).max(0.0)
     }
 
     fn import_audio_path_at_last_drag(
@@ -300,7 +314,14 @@ impl Render for Timeline {
         if scrolling {
             cx.notify();
         }
-        crate::perf::count("clips", self.state.tracks.iter().map(|t| t.clips.len() as u64).sum::<u64>());
+        crate::perf::count(
+            "clips",
+            self.state
+                .tracks
+                .iter()
+                .map(|t| t.clips.len() as u64)
+                .sum::<u64>(),
+        );
 
         let on_select_track = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.select_track(track_id);
@@ -423,9 +444,14 @@ impl Render for Timeline {
             cx.notify();
         });
 
-        let on_add_track = cx.listener(|this, _: &(), _window, cx| {
-            this.state.create_audio_track();
-            cx.notify();
+        let on_add_track = cx.listener(|this, _: &(), window, cx| {
+            if let Some(callback) = this.on_add_track.as_ref() {
+                callback(&(), window, cx);
+            } else {
+                let id = this.state.create_audio_track();
+                this.state.select_track(&id);
+                cx.notify();
+            }
         });
 
         let on_toggle_snap = cx.listener(|this, _: &(), _window, cx| {
@@ -658,6 +684,29 @@ impl Render for Timeline {
             cx.notify();
         });
 
+        let on_track_drag_move = cx.listener(
+            |this, event: &gpui::DragMoveEvent<TrackDragItem>, _window, cx| {
+                let drag = event.drag(cx).clone();
+                let y = Self::track_area_y_from_window(event.event.position);
+                if this.state.dragging_track_id.as_deref() != Some(drag.track_id.as_str()) {
+                    this.state
+                        .begin_track_drag(&drag.track_id, drag.origin_index, y);
+                }
+                this.state.update_track_drag(y);
+                cx.notify();
+            },
+        );
+
+        let on_track_dropped = cx.listener(|this, drag: &TrackDragItem, _window, cx| {
+            let target_index = this
+                .state
+                .drag_target_index
+                .unwrap_or(drag.origin_index)
+                .clamp(0, this.state.tracks.len());
+            this.state.reorder_track(&drag.track_id, target_index);
+            cx.notify();
+        });
+
         let on_middle_pan_start = cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
             this.pan_last_position = Some(event.position);
             window.prevent_default();
@@ -761,6 +810,8 @@ impl Render for Timeline {
             .on_drop::<BrowserDragItem>(on_browser_file_dropped)
             .on_drag_move::<ClipDragItem>(on_clip_drag_move)
             .on_drop::<ClipDragItem>(on_clip_dropped)
+            .on_drag_move::<TrackDragItem>(on_track_drag_move)
+            .on_drop::<TrackDragItem>(on_track_dropped)
             .on_mouse_down(gpui::MouseButton::Middle, on_middle_pan_start)
             .when_some(on_timeline_context, |this, cb| {
                 this.on_mouse_down(gpui::MouseButton::Right, move |event, window, cx| {

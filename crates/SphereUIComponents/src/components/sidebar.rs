@@ -164,31 +164,27 @@ pub fn sidebar(
     let on_context_l = on_context_menu.clone();
     let nodes_for_list = nodes.clone();
 
-    let listing_scroll = uniform_list(
-        "browser-tree",
-        count,
-        move |range, _window, _cx| {
-            let nodes = nodes_for_list.clone();
-            let on_toggle = on_toggle_l.clone();
-            let on_select = on_select_l.clone();
-            let on_activate = on_activate_l.clone();
-            let on_context = on_context_l.clone();
-            range
-                .map(|i| {
-                    tree_row(
-                        i,
-                        &nodes[i],
-                        on_toggle.clone(),
-                        on_select.clone(),
-                        on_activate.clone(),
-                        on_context.clone(),
-                    )
-                    .into_any_element()
-                })
-                .collect::<Vec<_>>()
-        },
-    )
-    .track_scroll(&scroll)
+    let listing_scroll = uniform_list("browser-tree", count, move |range, _window, _cx| {
+        let nodes = nodes_for_list.clone();
+        let on_toggle = on_toggle_l.clone();
+        let on_select = on_select_l.clone();
+        let on_activate = on_activate_l.clone();
+        let on_context = on_context_l.clone();
+        range
+            .map(|i| {
+                tree_row(
+                    i,
+                    &nodes[i],
+                    on_toggle.clone(),
+                    on_select.clone(),
+                    on_activate.clone(),
+                    on_context.clone(),
+                )
+                .into_any_element()
+            })
+            .collect::<Vec<_>>()
+    })
+    .track_scroll(scroll)
     .size_full()
     .px(px(2.0))
     .py(px(3.0));
@@ -462,7 +458,7 @@ fn tree_row(
 /// fits, the thumb is hidden.
 fn scrollbar_thumb(scroll: ScrollHandle) -> impl IntoElement {
     let viewport_h: f32 = scroll.bounds().size.height.into();
-    let max_y: f32 = scroll.max_offset().y.into();
+    let max_y: f32 = scroll.max_offset().height.into();
     let raw_y: f32 = scroll.offset().y.into();
     let offset_y: f32 = -raw_y;
 

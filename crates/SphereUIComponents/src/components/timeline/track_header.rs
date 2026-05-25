@@ -1,7 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, rgba, svg, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled,
+    div, px, rgba, svg, AppContext, InteractiveElement, IntoElement, ParentElement, Render,
+    StatefulInteractiveElement, Styled, Window,
 };
 
 use crate::assets;
@@ -9,7 +9,7 @@ use crate::components::fader::db_value_pill;
 use crate::components::knob::format_pan_label;
 use crate::components::slider::slider;
 use crate::components::timeline::timeline_state::{
-    volume, TimelineState, TrackState, TrackType, HEADER_WIDTH, TRACK_HEIGHT,
+    volume, TimelineState, TrackDragItem, TrackState, TrackType, HEADER_WIDTH, TRACK_HEIGHT,
 };
 use crate::components::timeline::vu_meter::vu_meter_with_levels;
 use crate::theme::Colors;
@@ -33,6 +33,40 @@ pub struct TrackHeaderCallbacks {
     pub on_delete_track: TrackCallback,
     pub on_volume_change: VolumeCallback,
     pub on_context_menu: Option<TrackContextCallback>,
+}
+
+pub struct TrackDragPreview {
+    pub name: String,
+    pub color: gpui::Rgba,
+}
+
+impl Render for TrackDragPreview {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .h(px(28.0))
+            .min_w(px(150.0))
+            .px(px(8.0))
+            .rounded_md()
+            .border(px(1.0))
+            .border_color({
+                let mut c = self.color;
+                c.a = 0.72;
+                c
+            })
+            .bg(Colors::surface_raised())
+            .shadow_lg()
+            .child(div().w(px(3.0)).h(px(16.0)).rounded_full().bg(self.color))
+            .child(
+                div()
+                    .ml(px(7.0))
+                    .text_size(px(10.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(Colors::text_primary())
+                    .child(self.name.clone()),
+            )
+    }
 }
 
 fn type_badge(kind: TrackType, color: gpui::Rgba) -> impl IntoElement {
@@ -111,8 +145,15 @@ pub fn track_header(
 ) -> impl IntoElement {
     let track_id = track.id.clone();
     let is_selected = state.selection.selected_track_id.as_ref() == Some(&track.id);
-    let header_bg = if is_selected {
+    let is_dragging = state.dragging_track_id.as_deref() == Some(track.id.as_str());
+    let is_drop_target =
+        state.drag_target_index == Some(index) || state.drag_target_index == Some(index + 1);
+    let header_bg = if is_dragging {
+        rgba(0xFFFFFF12_u32)
+    } else if is_selected {
         Colors::surface_raised()
+    } else if is_drop_target && state.dragging_track_id.is_some() {
+        rgba(0xFFFFFF0D_u32)
     } else {
         Colors::surface_panel()
     };
@@ -182,6 +223,9 @@ pub fn track_header(
     };
     let context_id = track_id.clone();
     let on_context = callbacks.on_context_menu.clone();
+    let drag_track_id = track_id.clone();
+    let drag_name = track.name.clone();
+    let drag_color = track.color;
 
     div()
         .flex()
@@ -189,6 +233,7 @@ pub fn track_header(
         .w(px(HEADER_WIDTH))
         .h(px(TRACK_HEIGHT))
         .bg(header_bg)
+        .opacity(if is_dragging { 0.62 } else { 1.0 })
         // Stronger right border so the header column reads as a distinct
         // pane rather than blending into the lane area. The inner accent
         // strip on the right keeps the overall feel subtle.
@@ -229,11 +274,37 @@ pub fn track_header(
                                 .items_center()
                                 .gap(px(6.0))
                                 .child(
-                                    svg()
-                                        .path(assets::ICON_GRIP_VERTICAL_PATH)
-                                        .w(px(9.0))
-                                        .h(px(9.0))
-                                        .text_color(Colors::text_faint()),
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .w(px(15.0))
+                                        .h(px(30.0))
+                                        .rounded_sm()
+                                        .id(("track-drag-handle", id_num))
+                                        .cursor(gpui::CursorStyle::PointingHand)
+                                        .hover(|s| s.bg(rgba(0xFFFFFF12_u32)))
+                                        .on_drag(
+                                            TrackDragItem {
+                                                track_id: drag_track_id,
+                                                origin_index: index,
+                                                name: drag_name.clone(),
+                                                color: drag_color,
+                                            },
+                                            move |drag, _offset, _window, cx| {
+                                                cx.new(|_| TrackDragPreview {
+                                                    name: drag.name.clone(),
+                                                    color: drag.color,
+                                                })
+                                            },
+                                        )
+                                        .child(
+                                            svg()
+                                                .path(assets::ICON_GRIP_VERTICAL_PATH)
+                                                .w(px(9.0))
+                                                .h(px(9.0))
+                                                .text_color(Colors::text_faint()),
+                                        ),
                                 )
                                 .child(
                                     div()

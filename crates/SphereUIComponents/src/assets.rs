@@ -58,6 +58,16 @@ pub mod icons {
     pub const PLUS: &str = include_str!("../../../packages/shared/lucide/icons/plus.svg");
     pub const PLUG: &str = include_str!("../../../packages/shared/lucide/icons/plug.svg");
     pub const ROUTE: &str = include_str!("../../../packages/shared/lucide/icons/route.svg");
+    pub const MIC: &str = include_str!("../../../packages/shared/lucide/icons/mic.svg");
+    pub const CPU: &str = include_str!("../../../packages/shared/lucide/icons/cpu.svg");
+    pub const MUSIC: &str = include_str!("../../../packages/shared/lucide/icons/music.svg");
+    pub const GIT_MERGE: &str = include_str!("../../../packages/shared/lucide/icons/git-merge.svg");
+    pub const GIT_FORK: &str = include_str!("../../../packages/shared/lucide/icons/git-fork.svg");
+    pub const CORNER_DOWN_LEFT: &str =
+        include_str!("../../../packages/shared/lucide/icons/corner-down-left.svg");
+    pub const VOLUME_2: &str = include_str!("../../../packages/shared/lucide/icons/volume-2.svg");
+    pub const CIRCLE_DOT: &str =
+        include_str!("../../../packages/shared/lucide/icons/circle-dot.svg");
     pub const MAGNET: &str = include_str!("../../../packages/shared/lucide/icons/magnet.svg");
     pub const GRIP_VERTICAL: &str =
         include_str!("../../../packages/shared/lucide/icons/grip-vertical.svg");
@@ -110,6 +120,14 @@ pub const ICON_SPARKLES_PATH: &str = "icons/sparkles.svg";
 pub const ICON_PLUS_PATH: &str = "icons/plus.svg";
 pub const ICON_PLUG_PATH: &str = "icons/plug.svg";
 pub const ICON_ROUTE_PATH: &str = "icons/route.svg";
+pub const ICON_MIC_PATH: &str = "icons/mic.svg";
+pub const ICON_CPU_PATH: &str = "icons/cpu.svg";
+pub const ICON_MUSIC_PATH: &str = "icons/music.svg";
+pub const ICON_GIT_MERGE_PATH: &str = "icons/git-merge.svg";
+pub const ICON_GIT_FORK_PATH: &str = "icons/git-fork.svg";
+pub const ICON_CORNER_DOWN_LEFT_PATH: &str = "icons/corner-down-left.svg";
+pub const ICON_VOLUME_2_PATH: &str = "icons/volume-2.svg";
+pub const ICON_CIRCLE_DOT_PATH: &str = "icons/circle-dot.svg";
 pub const ICON_MAGNET_PATH: &str = "icons/magnet.svg";
 pub const ICON_GRIP_VERTICAL_PATH: &str = "icons/grip-vertical.svg";
 pub const ICON_FILE_PATH: &str = "icons/file.svg";

@@ -178,27 +178,6 @@ fn section_header(label: &'static str, accent: gpui::Rgba) -> impl IntoElement {
         )
 }
 
-fn insert_row(name: &str, accent: gpui::Rgba) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.0))
-        .mx(px(3.0))
-        .border_l(px(2.0))
-        .border_color(accent)
-        .px(px(4.0))
-        .py(px(2.0))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .text_size(px(9.0))
-                .text_color(rgba(0xFFFFFFB8_u32))
-                .child(name.to_string()),
-        )
-}
-
 fn empty_slot() -> impl IntoElement {
     div()
         .flex()

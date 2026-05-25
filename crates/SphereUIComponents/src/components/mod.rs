@@ -1,4 +1,5 @@
 mod app_chrome;
+pub mod add_track_dialog;
 mod bottom_panel;
 pub mod context_menu;
 pub mod fader;
@@ -16,6 +17,9 @@ mod status_bar;
 pub mod timeline;
 
 pub use app_chrome::{app_chrome, ProjectChromeState, TransportChromeState};
+pub use add_track_dialog::{
+    add_track_dialog, AddTrackDialogCallbacks, AddTrackDialogState, AddTrackKind,
+};
 pub use bottom_panel::{bottom_panel, BottomPanelResizeDrag, BottomPanelState, BottomTab};
 pub use fader::fader;
 pub use icon::icon;

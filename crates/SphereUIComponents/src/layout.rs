@@ -11,13 +11,16 @@ use std::{
 };
 
 use crate::components;
+use crate::components::add_track_dialog::{
+    add_track_dialog, AddTrackDialogCallbacks, AddTrackDialogState, AddTrackKind,
+};
 use crate::components::context_menu::ContextMenuEntry;
 use crate::components::file_browser::{read_directory, FileBrowserState};
 use crate::components::mixer_panel::MixerCallbacks;
 use crate::components::project_switcher::ProjectSwitcherState;
 use crate::components::timeline::timeline::TimelineContextTarget;
 use crate::components::timeline::timeline_state::{
-    self, ClipType, TimelineState, TrackState, TrackType,
+    self, ClipType, CreateTrackOptions, TimelineState, TrackState, TrackType,
 };
 use crate::components::timeline::waveform_cache;
 use crate::components::{BottomPanelResizeDrag, BottomPanelState};
@@ -76,6 +79,7 @@ pub struct StudioLayout {
     browser_scroll: UniformListScrollHandle,
     menu_bar: MenuBarUiState,
     project_switcher: ProjectSwitcherState,
+    add_track_dialog: AddTrackDialogState,
     open_popover: Option<OpenPopover>,
     audio_engine: Option<DAUx::AudioEngine>,
     audio_running: bool,
@@ -260,6 +264,7 @@ impl StudioLayout {
             browser_scroll: UniformListScrollHandle::new(),
             menu_bar: MenuBarUiState::default(),
             project_switcher: ProjectSwitcherState::default(),
+            add_track_dialog: AddTrackDialogState::closed(),
             open_popover: None,
             audio_engine,
             audio_running: false,
@@ -482,6 +487,7 @@ impl StudioLayout {
         if !self.sync_audio_project(cx, true) {
             return;
         }
+        self.sync_metronome_controls(cx);
 
         let (playhead_beats, bpm) = {
             let timeline = self.timeline.read(cx);
@@ -533,6 +539,36 @@ impl StudioLayout {
             cx.notify();
         });
         self.poll_native_audio(cx);
+    }
+
+    fn sync_metronome_controls(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.audio_engine.as_ref() else {
+            return;
+        };
+        let (enabled, bpm, num, den) = {
+            let timeline = self.timeline.read(cx);
+            (
+                timeline.state.transport.metronome_enabled,
+                timeline.state.bpm as f64,
+                timeline.state.time_signature_num,
+                timeline.state.time_signature_den,
+            )
+        };
+        if let Err(error) = engine.set_bpm(bpm) {
+            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                eprintln!("[audio] set BPM failed: {error}");
+            }
+        }
+        if let Err(error) = engine.set_time_signature(num, den) {
+            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                eprintln!("[audio] set time signature failed: {error}");
+            }
+        }
+        if let Err(error) = engine.set_metronome_enabled(enabled) {
+            if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                eprintln!("[audio] set metronome failed: {error}");
+            }
+        }
     }
 
     fn stop_native_playback(&mut self, cx: &mut Context<Self>) {
@@ -594,8 +630,17 @@ impl StudioLayout {
 
             // ── Project / track / edit commands available in native shell ─
             "project:new" => self.reset_project(cx),
-            "track:add-audio" => self.add_audio_track(cx),
-            "track:add-midi" => self.add_midi_track(cx),
+            "track:add" | "project:add-track" => self.open_add_track_dialog(cx),
+            "track:add-audio" => self.open_add_track_dialog_with_kind(AddTrackKind::Audio, cx),
+            "track:add-midi" => self.open_add_track_dialog_with_kind(AddTrackKind::Midi, cx),
+            "track:add-instrument" => {
+                self.open_add_track_dialog_with_kind(AddTrackKind::Instrument, cx)
+            }
+            "track:add-plugin" => self.open_add_track_dialog_with_kind(AddTrackKind::Plugin, cx),
+            "track:add-bus" => self.open_add_track_dialog_with_kind(AddTrackKind::Bus, cx),
+            "track:add-return" => self.open_add_track_dialog_with_kind(AddTrackKind::Return, cx),
+            "track:add-group" => self.open_add_track_dialog_with_kind(AddTrackKind::Group, cx),
+            "track:add-master" => self.open_add_track_dialog_with_kind(AddTrackKind::Master, cx),
             "track:delete" => self.delete_selected_track(cx),
             "track:mute" => self.toggle_selected_track_mute(cx),
             "track:solo" => self.toggle_selected_track_solo(cx),
@@ -630,24 +675,90 @@ impl StudioLayout {
         });
     }
 
-    fn add_audio_track(&mut self, cx: &mut Context<Self>) {
-        self.project_switcher.current_project.is_dirty = true;
-        self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
-        let _ = self.timeline.update(cx, |timeline, cx| {
-            let id = timeline.state.create_audio_track();
-            timeline.state.select_track(&id);
-            cx.notify();
-        });
+    fn open_add_track_dialog(&mut self, cx: &mut Context<Self>) {
+        self.open_add_track_dialog_with_kind(AddTrackKind::Audio, cx);
     }
 
-    fn add_midi_track(&mut self, cx: &mut Context<Self>) {
+    fn open_add_track_dialog_with_kind(&mut self, kind: AddTrackKind, cx: &mut Context<Self>) {
+        let mut track_count = 0;
+        let mut has_master_track = false;
+        let _ = self.timeline.update(cx, |timeline, _cx| {
+            track_count = timeline.state.tracks.len();
+            has_master_track = timeline
+                .state
+                .tracks
+                .iter()
+                .any(|track| track.track_type == TrackType::Master);
+        });
+        let mut dialog = AddTrackDialogState::open_for(track_count, has_master_track);
+        dialog.selected_kind = kind;
+        dialog.track_name = format!("{} {}", kind.label(), dialog.next_number);
+        self.add_track_dialog = dialog;
+        self.open_popover = None;
+        self.menu_bar.open_menu_id = None;
+        self.menu_bar.submenu_path.clear();
+        cx.notify();
+    }
+
+    fn close_add_track_dialog(&mut self, cx: &mut Context<Self>) {
+        self.add_track_dialog.is_open = false;
+        cx.notify();
+    }
+
+    fn select_add_track_kind(&mut self, kind: AddTrackKind, cx: &mut Context<Self>) {
+        if kind.native_track_type().is_none() {
+            return;
+        }
+        self.add_track_dialog.selected_kind = kind;
+        self.add_track_dialog.track_name =
+            format!("{} {}", kind.label(), self.add_track_dialog.next_number);
+        self.add_track_dialog.channel_count = if kind == AddTrackKind::Midi { 0 } else { 2 };
+        self.add_track_dialog.arm_track = false;
+        self.add_track_dialog.monitor_mode = "off";
+        cx.notify();
+    }
+
+    fn confirm_add_track_dialog(&mut self, cx: &mut Context<Self>) {
+        if !self.add_track_dialog.is_open || !self.add_track_dialog.is_valid() {
+            return;
+        }
+        let dialog = self.add_track_dialog.clone();
+        let Some(track_type) = dialog.selected_kind.native_track_type() else {
+            return;
+        };
         self.project_switcher.current_project.is_dirty = true;
         self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
         let _ = self.timeline.update(cx, |timeline, cx| {
-            let id = timeline.state.create_midi_track();
-            timeline.state.select_track(&id);
+            let count = dialog.count.clamp(1, 32) as usize;
+            let base_name = cleaned_track_name(&dialog.track_name, dialog.selected_kind);
+            let mut selected_track_id = None;
+            for i in 0..count {
+                let name = if count == 1 {
+                    base_name.clone()
+                } else {
+                    format!("{} {}", numbered_name_stem(&base_name), dialog.next_number + i)
+                };
+                let id = timeline.state.create_track(CreateTrackOptions {
+                    track_type,
+                    name,
+                    color: timeline
+                        .state
+                        .track_color_for_index(dialog.color_index.saturating_add(i)),
+                    volume: dialog.volume.clamp(0.0, 1.0),
+                    pan: dialog.pan.clamp(-1.0, 1.0),
+                    armed: dialog.selected_kind == AddTrackKind::Audio && dialog.arm_track,
+                    input_monitor: dialog.selected_kind == AddTrackKind::Audio
+                        && dialog.monitor_mode != "off",
+                });
+                selected_track_id = Some(id);
+            }
+            if let Some(id) = selected_track_id {
+                timeline.state.select_track(&id);
+            }
             cx.notify();
         });
+        self.add_track_dialog.is_open = false;
+        cx.notify();
     }
 
     fn delete_selected_track(&mut self, cx: &mut Context<Self>) {
@@ -809,6 +920,51 @@ impl StudioLayout {
         }
     }
 
+    fn handle_add_track_dialog_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.add_track_dialog.is_open {
+            return false;
+        }
+        let key = event.keystroke.key.as_str();
+        let no_mods = {
+            let mods = event.keystroke.modifiers;
+            !mods.control && !mods.alt && !mods.platform && !mods.function
+        };
+        match key {
+            "escape" => self.close_add_track_dialog(cx),
+            "enter" | "numpad_enter" => self.confirm_add_track_dialog(cx),
+            "backspace" if no_mods => {
+                self.add_track_dialog.track_name.pop();
+                cx.notify();
+            }
+            "delete" if no_mods => {
+                self.add_track_dialog.track_name.clear();
+                cx.notify();
+            }
+            "arrow_up" | "up" if no_mods => {
+                self.add_track_dialog.count = (self.add_track_dialog.count + 1).min(32);
+                cx.notify();
+            }
+            "arrow_down" | "down" if no_mods => {
+                self.add_track_dialog.count = self.add_track_dialog.count.saturating_sub(1).max(1);
+                cx.notify();
+            }
+            _ if no_mods && key == "space" => {
+                self.add_track_dialog.track_name.push(' ');
+                cx.notify();
+            }
+            _ if no_mods && key.chars().count() == 1 => {
+                self.add_track_dialog.track_name.push_str(key);
+                cx.notify();
+            }
+            _ => {}
+        }
+        true
+    }
+
     fn context_entries(
         &self,
         target: &ContextTarget,
@@ -944,11 +1100,20 @@ impl StudioLayout {
                 });
             }
             TransportCommand::ToggleMetronome => {
-                let _ = self.timeline.update(cx, |timeline, cx| {
+                let enabled = self.timeline.update(cx, |timeline, cx| {
                     timeline.state.transport.metronome_enabled =
                         !timeline.state.transport.metronome_enabled;
+                    let enabled = timeline.state.transport.metronome_enabled;
                     cx.notify();
+                    enabled
                 });
+                if let (enabled, Some(engine)) = (enabled, self.audio_engine.as_ref()) {
+                    if let Err(error) = engine.set_metronome_enabled(enabled) {
+                        if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                            eprintln!("[audio] set metronome failed: {error}");
+                        }
+                    }
+                }
             }
             TransportCommand::Record => {
                 eprintln!("[transport] record is disabled in native Stage 2.1");
@@ -1586,6 +1751,17 @@ impl Render for StudioLayout {
         let _ = self.timeline.update(cx, |timeline, _cx| {
             timeline.set_context_menu_callback(Some(on_timeline_context));
         });
+        let on_add_track: components::timeline::timeline::TimelineAddTrackCb = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |_: &(), _w, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.open_add_track_dialog(cx);
+                });
+            })
+        };
+        let _ = self.timeline.update(cx, |timeline, _cx| {
+            timeline.set_add_track_callback(Some(on_add_track));
+        });
 
         // ── Top-menu callbacks ─────────────────────────────────────────────
         let on_open_menu: std::sync::Arc<
@@ -1745,6 +1921,109 @@ impl Render for StudioLayout {
                 None => None,
             }
         };
+        let add_track_overlay = if self.add_track_dialog.is_open {
+            let target = cx.entity().clone();
+            let callbacks = AddTrackDialogCallbacks {
+                on_close: Arc::new({
+                    let target = target.clone();
+                    move |_: &(), _w, cx| {
+                        let _ = target.update(cx, |this, cx| this.close_add_track_dialog(cx));
+                    }
+                }),
+                on_confirm: Arc::new({
+                    let target = target.clone();
+                    move |_: &(), _w, cx| {
+                        let _ = target.update(cx, |this, cx| this.confirm_add_track_dialog(cx));
+                    }
+                }),
+                on_select_kind: Arc::new({
+                    let target = target.clone();
+                    move |kind: &AddTrackKind, _w, cx| {
+                        let kind = *kind;
+                        let _ =
+                            target.update(cx, |this, cx| this.select_add_track_kind(kind, cx));
+                    }
+                }),
+                on_count_delta: Arc::new({
+                    let target = target.clone();
+                    move |delta: &i32, _w, cx| {
+                        let delta = *delta;
+                        let _ = target.update(cx, |this, cx| {
+                            let current = this.add_track_dialog.count as i32;
+                            this.add_track_dialog.count = (current + delta).clamp(1, 32) as u32;
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_channel_count: Arc::new({
+                    let target = target.clone();
+                    move |channels: &u32, _w, cx| {
+                        let channels = *channels;
+                        let _ = target.update(cx, |this, cx| {
+                            this.add_track_dialog.channel_count = channels.clamp(1, 2);
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_color_index: Arc::new({
+                    let target = target.clone();
+                    move |index: &u32, _w, cx| {
+                        let index = *index as usize;
+                        let _ = target.update(cx, |this, cx| {
+                            this.add_track_dialog.color_index = index;
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_volume: Arc::new({
+                    let target = target.clone();
+                    move |value: &f32, _w, cx| {
+                        let value = *value;
+                        let _ = target.update(cx, |this, cx| {
+                            this.add_track_dialog.volume = value.clamp(0.0, 1.0);
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_pan: Arc::new({
+                    let target = target.clone();
+                    move |value: &f32, _w, cx| {
+                        let value = *value;
+                        let _ = target.update(cx, |this, cx| {
+                            this.add_track_dialog.pan = value.clamp(-1.0, 1.0);
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_arm: Arc::new({
+                    let target = target.clone();
+                    move |armed: &bool, _w, cx| {
+                        let armed = *armed;
+                        let _ = target.update(cx, |this, cx| {
+                            this.add_track_dialog.arm_track = armed;
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_monitor: Arc::new({
+                    let target = target.clone();
+                    move |mode: &String, _w, cx| {
+                        let mode = match mode.as_str() {
+                            "auto" => "auto",
+                            "in" => "in",
+                            _ => "off",
+                        };
+                        let _ = target.update(cx, |this, cx| {
+                            this.add_track_dialog.monitor_mode = mode;
+                            cx.notify();
+                        });
+                    }
+                }),
+            };
+            Some(add_track_dialog(&self.add_track_dialog, callbacks).into_any_element())
+        } else {
+            None
+        };
         let transport_chrome = self.transport_chrome_state(cx);
         let project_chrome = components::ProjectChromeState {
             name: self.project_switcher.current_project.name.clone(),
@@ -1759,7 +2038,7 @@ impl Render for StudioLayout {
         // events to focused elements; without this the root div never sees
         // keystrokes even though `shortcut_command` is wired.
         if window.focused(cx).is_none() {
-            self.focus_handle.focus(window, cx);
+            self.focus_handle.focus(window);
         }
         let focus_holder = self.focus_handle.clone();
 
@@ -1784,7 +2063,8 @@ impl Render for StudioLayout {
             .font_family(theme::FONT_FAMILY)
             .capture_key_down(move |event, _window, cx| {
                 let handled = shortcut_target.update(cx, |this, cx| {
-                    let handled = this.handle_project_switcher_key(event, cx);
+                    let handled = this.handle_add_track_dialog_key(event, cx)
+                        || this.handle_project_switcher_key(event, cx);
                     if handled {
                         cx.notify();
                     }
@@ -1795,6 +2075,12 @@ impl Render for StudioLayout {
                 }
                 if event.keystroke.key.as_str() == "escape" {
                     let _ = shortcut_target.update(cx, |this, cx| {
+                        let _ = this.timeline.update(cx, |timeline, cx| {
+                            if timeline.state.dragging_track_id.is_some() {
+                                timeline.state.clear_track_drag();
+                                cx.notify();
+                            }
+                        });
                         this.menu_bar.open_menu_id = None;
                         this.menu_bar.submenu_path.clear();
                         this.open_popover = None;
@@ -1876,6 +2162,7 @@ impl Render for StudioLayout {
             // panel. The dropdown's own backdrop captures click-outside.
             .children(dropdown_overlay)
             .children(popover_overlay)
+            .children(add_track_overlay)
     }
 }
 
@@ -1999,6 +2286,24 @@ fn transport_command_from_id(command_id: &str) -> Option<TransportCommand> {
 
 fn normalize_command_id(command_id: &str) -> String {
     command_id.trim().replace('.', ":").replace('_', "-")
+}
+
+fn cleaned_track_name(name: &str, kind: AddTrackKind) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        kind.label().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn numbered_name_stem(name: &str) -> String {
+    let stem = name.trim_end_matches(|c: char| c.is_ascii_digit()).trim_end();
+    if stem.is_empty() {
+        "Track".to_string()
+    } else {
+        stem.to_string()
+    }
 }
 
 fn track_type_name(track_type: TrackType) -> &'static str {

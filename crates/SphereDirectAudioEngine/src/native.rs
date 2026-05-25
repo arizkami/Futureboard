@@ -221,6 +221,22 @@ impl AudioEngine {
         self.inner.seek(position_seconds.max(0.0))
     }
 
+    pub fn set_metronome_enabled(&self, enabled: bool) -> Result<(), SphereAudioError> {
+        self.inner.set_metronome_enabled(enabled)
+    }
+
+    pub fn set_bpm(&self, bpm: f64) -> Result<(), SphereAudioError> {
+        self.inner.set_bpm(bpm)
+    }
+
+    pub fn set_time_signature(
+        &self,
+        numerator: u32,
+        denominator: u32,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.set_time_signature(numerator, denominator)
+    }
+
     /// Toggle the transport between play and pause. Returns the new playing
     /// state. No-ops cleanly if the stream is not open yet.
     pub fn toggle_transport(&self) -> Result<bool, SphereAudioError> {

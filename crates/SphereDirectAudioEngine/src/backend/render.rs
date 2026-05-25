@@ -30,6 +30,16 @@ pub struct LocalAudioState {
     pub prev_peak_l: f32,
     pub prev_peak_r: f32,
     pub render_path_logged: bool,
+    pub metronome_enabled: bool,
+    pub metronome_bpm: f64,
+    pub metronome_ts_num: u32,
+    pub metronome_ts_den: u32,
+    pub metronome_next_sample: u64,
+    pub metronome_click_remaining: u32,
+    pub metronome_click_len: u32,
+    pub metronome_click_phase: f64,
+    pub metronome_click_phase_inc: f64,
+    pub metronome_click_gain: f32,
 }
 
 impl LocalAudioState {
@@ -43,7 +53,93 @@ impl LocalAudioState {
             prev_peak_l: 0.0,
             prev_peak_r: 0.0,
             render_path_logged: false,
+            metronome_enabled: false,
+            metronome_bpm: 120.0,
+            metronome_ts_num: 4,
+            metronome_ts_den: 4,
+            metronome_next_sample: 0,
+            metronome_click_remaining: 0,
+            metronome_click_len: (sample_rate * 0.024).round().max(1.0) as u32,
+            metronome_click_phase: 0.0,
+            metronome_click_phase_inc: 0.0,
+            metronome_click_gain: 0.0,
         }
+    }
+
+    pub fn set_metronome_enabled(&mut self, enabled: bool, position_sample: u64, sample_rate: u32) {
+        self.metronome_enabled = enabled;
+        self.metronome_click_remaining = 0;
+        self.reset_metronome_schedule(position_sample, sample_rate);
+    }
+
+    pub fn set_bpm(&mut self, bpm: f64, position_sample: u64, sample_rate: u32) {
+        self.metronome_bpm = bpm.clamp(1.0, 999.0);
+        self.reset_metronome_schedule(position_sample, sample_rate);
+    }
+
+    pub fn set_time_signature(
+        &mut self,
+        numerator: u32,
+        denominator: u32,
+        position_sample: u64,
+        sample_rate: u32,
+    ) {
+        self.metronome_ts_num = numerator.clamp(1, 64);
+        self.metronome_ts_den = denominator.clamp(1, 64);
+        self.reset_metronome_schedule(position_sample, sample_rate);
+    }
+
+    pub fn reset_metronome_schedule(&mut self, position_sample: u64, sample_rate: u32) {
+        let interval = self.metronome_interval_samples(sample_rate);
+        self.metronome_next_sample = position_sample
+            .saturating_add(interval - 1)
+            .saturating_div(interval)
+            .saturating_mul(interval);
+    }
+
+    #[inline]
+    fn metronome_interval_samples(&self, sample_rate: u32) -> u64 {
+        let beat_unit_quarters = 4.0 / self.metronome_ts_den.max(1) as f64;
+        ((sample_rate.max(1) as f64 * 60.0 / self.metronome_bpm.max(1.0)) * beat_unit_quarters)
+            .round()
+            .max(1.0) as u64
+    }
+
+    #[inline]
+    pub fn metronome_sample(&mut self, project_sample: u64, sample_rate: u32) -> f32 {
+        if !self.metronome_enabled {
+            return 0.0;
+        }
+
+        let interval = self.metronome_interval_samples(sample_rate);
+        while project_sample >= self.metronome_next_sample {
+            let beat_index = self.metronome_next_sample / interval.max(1);
+            let accent = beat_index % self.metronome_ts_num.max(1) as u64 == 0;
+            let freq = if accent { 1760.0 } else { 980.0 };
+            self.metronome_click_phase = 0.0;
+            self.metronome_click_phase_inc = freq / sample_rate.max(1) as f64;
+            self.metronome_click_gain = if accent { 0.34 } else { 0.22 };
+            self.metronome_click_remaining = self.metronome_click_len;
+            self.metronome_next_sample = self.metronome_next_sample.saturating_add(interval);
+        }
+
+        if self.metronome_click_remaining == 0 {
+            return 0.0;
+        }
+
+        let age = self
+            .metronome_click_len
+            .saturating_sub(self.metronome_click_remaining) as f32;
+        let t = age / self.metronome_click_len.max(1) as f32;
+        let env = (1.0 - t).max(0.0);
+        let sample = (self.metronome_click_phase * std::f64::consts::TAU).sin() as f32
+            * env
+            * env
+            * self.metronome_click_gain;
+        self.metronome_click_phase += self.metronome_click_phase_inc;
+        self.metronome_click_phase -= self.metronome_click_phase.floor();
+        self.metronome_click_remaining = self.metronome_click_remaining.saturating_sub(1);
+        sample
     }
 }
 
@@ -111,6 +207,19 @@ pub fn drain_commands(
                 let pos = (position_seconds * sr) as u64;
                 eprintln!("[DAUx] Seek → {:.3}s ({}sa)", position_seconds, pos);
                 shared.position_samples.store(pos, Ordering::Relaxed);
+                local.reset_metronome_schedule(pos, output_sample_rate);
+            }
+            EngineCommand::SetMetronomeEnabled(enabled) => {
+                let pos = shared.position_samples.load(Ordering::Relaxed);
+                local.set_metronome_enabled(enabled, pos, output_sample_rate);
+            }
+            EngineCommand::SetBpm(bpm) => {
+                let pos = shared.position_samples.load(Ordering::Relaxed);
+                local.set_bpm(bpm, pos, output_sample_rate);
+            }
+            EngineCommand::SetTimeSignature(num, den) => {
+                let pos = shared.position_samples.load(Ordering::Relaxed);
+                local.set_time_signature(num, den, pos, output_sample_rate);
             }
             EngineCommand::SetMasterVolume { value } => {
                 shared
@@ -197,6 +306,13 @@ pub fn fill_output_f32(
                 frame[1] = (frame[1] + tone_r).clamp(-1.0, 1.0);
             }
         }
+        for (i, frame) in data.chunks_mut(channels).enumerate() {
+            let click = local.metronome_sample(base_sample + i as u64, runtime.sample_rate);
+            if click != 0.0 {
+                frame[0] = (frame[0] + click * master_vol).clamp(-1.0, 1.0);
+                frame[1] = (frame[1] + click * master_vol).clamp(-1.0, 1.0);
+            }
+        }
         for frame in data.chunks(channels) {
             let l = frame[0];
             let r = frame[1];
@@ -220,8 +336,13 @@ pub fn fill_output_f32(
             } else {
                 (0.0, 0.0)
             };
-            let l = (tone_l + proj_l).clamp(-1.0, 1.0);
-            let r = (tone_r + proj_r).clamp(-1.0, 1.0);
+            let click = if local.playing_local {
+                local.metronome_sample(base_sample + frames, runtime.sample_rate) * master_vol
+            } else {
+                0.0
+            };
+            let l = (tone_l + proj_l + click).clamp(-1.0, 1.0);
+            let r = (tone_r + proj_r + click).clamp(-1.0, 1.0);
             frame[0] = l;
             frame[1] = r;
             for extra in frame.iter_mut().skip(2) {
@@ -245,7 +366,12 @@ pub fn fill_output_f32(
             } else {
                 (0.0, 0.0)
             };
-            let v = (tone + (proj_l + proj_r) * 0.5).clamp(-1.0, 1.0);
+            let click = if local.playing_local {
+                local.metronome_sample(base_sample + frames, runtime.sample_rate) * master_vol
+            } else {
+                0.0
+            };
+            let v = (tone + (proj_l + proj_r) * 0.5 + click).clamp(-1.0, 1.0);
             *sample = v;
             peak_l = peak_l.max(v.abs());
             sum_sq_l += v * v;
