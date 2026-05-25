@@ -1,5 +1,3 @@
-use gpui::rgb;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackType {
     Audio,
@@ -320,7 +318,7 @@ impl TimelineState {
             id: "track-1".to_string(),
             name: "Audio 1".to_string(),
             track_type: TrackType::Audio,
-            color: rgb(0x56C7C9), // Teal
+            color: crate::theme::Colors::track_color_for_index(0),
             volume: volume::db_to_norm(-3.0),
             pan: 0.0,
             muted: false,
@@ -384,7 +382,7 @@ impl TimelineState {
             id: "track-2".to_string(),
             name: "Audio 2".to_string(),
             track_type: TrackType::Audio,
-            color: rgb(0x7EDB9A), // Green
+            color: crate::theme::Colors::track_color_for_index(1),
             volume: volume::db_to_norm(-6.0),
             pan: -0.2,
             muted: false,
@@ -414,7 +412,7 @@ impl TimelineState {
             id: "track-3".to_string(),
             name: "Synth 3".to_string(),
             track_type: TrackType::Midi,
-            color: rgb(0xF2C96D), // Yellow
+            color: crate::theme::Colors::track_color_for_index(2),
             volume: volume::db_to_norm(-1.5),
             pan: 0.3,
             muted: false,
@@ -911,11 +909,7 @@ impl TimelineState {
     }
 
     pub fn track_color_for_index(&self, index: usize) -> gpui::Rgba {
-        const PALETTE: [u32; 12] = [
-            0x56C7C9, 0x7EDB9A, 0xF2C96D, 0xF27E77, 0xA99CFF, 0x6EB7E8, 0xE89B61, 0xD982B6,
-            0xA8D36F, 0x9CAFE8, 0xC49A6C, 0x71D6B5,
-        ];
-        gpui::rgb(PALETTE[index % PALETTE.len()])
+        crate::theme::Colors::track_color_for_index(index)
     }
 
     pub fn create_track(&mut self, options: CreateTrackOptions) -> String {

@@ -87,7 +87,7 @@ pub fn combo_box_menu<T: Copy + PartialEq + 'static>(
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_card())
         .shadow(vec![gpui::BoxShadow {
-            color: gpui::rgba(0x00000080).into(),
+            color: Colors::surface_overlay().into(),
             offset: gpui::point(px(0.0), px(10.0)),
             blur_radius: px(28.0),
             spread_radius: px(0.0),

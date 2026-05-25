@@ -164,7 +164,7 @@ pub fn waveform_canvas(
                     } else {
                         Colors::border_subtle()
                     })
-                    .bg(gpui::rgba(0x00000042))
+                    .bg(Colors::with_alpha(Colors::surface_base(), 0.6))
                     .px(px(6.0))
                     .py(px(2.0))
                     .text_size(px(9.0))

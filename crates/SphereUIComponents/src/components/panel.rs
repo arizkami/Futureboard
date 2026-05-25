@@ -1,4 +1,4 @@
-use gpui::{div, px, rgba, IntoElement, ParentElement, Styled};
+use gpui::{div, px, IntoElement, ParentElement, Styled};
 
 use crate::components::timeline::timeline_state::{volume, TrackState, TrackType};
 use crate::theme::Colors;
@@ -96,7 +96,7 @@ fn section_label(text: &'static str) -> impl IntoElement {
     div()
         .text_size(px(8.5))
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(rgba(0xDCE8F066_u32))
+        .text_color(Colors::text_faint())
         .child(text)
 }
 
@@ -124,9 +124,9 @@ fn kv_row(key: &'static str, value: String) -> impl IntoElement {
 
 fn bool_badge(label: &'static str, active: bool, accent: gpui::Rgba) -> impl IntoElement {
     let (bg, fg) = if active {
-        (accent, gpui::rgb(0x101216).into())
+        (accent, Colors::text_inverse().into())
     } else {
-        (rgba(0xFFFFFF0D_u32), Colors::text_secondary())
+        (Colors::with_alpha(Colors::text_primary(), 0.05), Colors::text_secondary())
     };
     div()
         .flex()
@@ -197,9 +197,9 @@ fn track_inspector(track: &TrackState) -> impl IntoElement {
                 .flex_row()
                 .gap(px(4.0))
                 .pt(px(2.0))
-                .child(bool_badge("M", track.muted, gpui::rgb(0xF3C969)))
-                .child(bool_badge("S", track.solo, gpui::rgb(0x7BD88F)))
-                .child(bool_badge("R", track.armed, gpui::rgb(0xF06A61)))
+                .child(bool_badge("M", track.muted, Colors::accent_warning()))
+                .child(bool_badge("S", track.solo, Colors::accent_success()))
+                .child(bool_badge("R", track.armed, Colors::accent_danger()))
                 .child(bool_badge(
                     "I",
                     track.input_monitor,

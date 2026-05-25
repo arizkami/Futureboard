@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    div, px, rgba, svg, App, InteractiveElement, IntoElement, ParentElement,
+    div, px, svg, App, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window,
 };
 
@@ -103,7 +103,7 @@ pub fn project_switcher_popover(
 
 fn panel_shadow() -> Vec<gpui::BoxShadow> {
     vec![gpui::BoxShadow {
-        color: rgba(0x0000008C_u32).into(),
+        color: Colors::surface_overlay().into(),
         offset: gpui::point(px(0.0), px(12.0)),
         blur_radius: px(40.0),
         spread_radius: px(0.0),

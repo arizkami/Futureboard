@@ -1,6 +1,6 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, rgba, svg, AppContext, InteractiveElement, IntoElement, ParentElement, Render,
+    div, px, svg, AppContext, InteractiveElement, IntoElement, ParentElement, Render,
     StatefulInteractiveElement, Styled, Window,
 };
 

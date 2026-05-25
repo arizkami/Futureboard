@@ -317,4 +317,13 @@ impl Colors {
             a: alpha,
         }
     }
+
+    pub const TRACK_COLORS: [u32; 12] = [
+        0x56C7C9, 0x7EDB9A, 0xF2C96D, 0xF27E77, 0xA99CFF, 0x6EB7E8, 0xE89B61, 0xD982B6, 0xA8D36F,
+        0x9CAFE8, 0xC49A6C, 0x71D6B5,
+    ];
+
+    pub fn track_color_for_index(index: usize) -> Rgba {
+        rgb(Self::TRACK_COLORS[index % Self::TRACK_COLORS.len()])
+    }
 }

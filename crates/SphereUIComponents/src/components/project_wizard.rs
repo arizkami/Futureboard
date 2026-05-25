@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, rgba, size, svg, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement,
+    div, px, size, svg, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement,
     IntoElement, KeyDownEvent, MouseButton, ParentElement, Point, Render,
     StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBackgroundAppearance,
     WindowBounds, WindowControlArea, WindowDecorations, WindowHandle, WindowKind, WindowOptions,

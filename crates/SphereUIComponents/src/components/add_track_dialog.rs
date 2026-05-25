@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, rgba, svg, App, InteractiveElement, IntoElement, ParentElement,
+    div, px, svg, App, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window,
 };
 
@@ -155,7 +155,7 @@ impl AddTrackDialogState {
             selected_kind: AddTrackKind::Audio,
             track_name: format!("Audio Track {}", next_number),
             count: 1,
-            color_index: track_count % TRACK_COLORS.len(),
+            color_index: track_count % Colors::TRACK_COLORS.len(),
             channel_count: 2,
             volume: 0.8,
             pan: 0.0,
@@ -187,13 +187,8 @@ pub struct AddTrackDialogCallbacks {
     pub on_monitor: Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
 }
 
-const TRACK_COLORS: [u32; 12] = [
-    0x56C7C9, 0x7EDB9A, 0xF2C96D, 0xF27E77, 0xA99CFF, 0x6EB7E8, 0xE89B61, 0xD982B6, 0xA8D36F,
-    0x9CAFE8, 0xC49A6C, 0x71D6B5,
-];
-
 pub fn track_color(index: usize) -> gpui::Rgba {
-    gpui::rgb(TRACK_COLORS[index % TRACK_COLORS.len()])
+    Colors::track_color_for_index(index)
 }
 
 fn option_supported(kind: AddTrackKind, state: &AddTrackDialogState) -> bool {
@@ -854,7 +849,7 @@ pub fn add_track_dialog(
                                 .gap(px(12.0))
                                 .child({
                                     let mut swatches = div().flex().flex_row().gap(px(5.0));
-                                    for i in 0..TRACK_COLORS.len() {
+                                    for i in 0..Colors::TRACK_COLORS.len() {
                                         let cb = callbacks.on_color_index.clone();
                                         let active = i == state.color_index;
                                         let color = track_color(i);

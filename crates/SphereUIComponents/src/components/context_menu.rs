@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, px, rgba, svg, App, InteractiveElement, IntoElement, ParentElement,
+    div, px, svg, App, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window,
 };
 
@@ -170,7 +170,7 @@ fn panel_height_for_entries(entries: &[ContextMenuEntry]) -> f32 {
 
 fn panel_shadow() -> Vec<gpui::BoxShadow> {
     vec![gpui::BoxShadow {
-        color: rgba(0x00000085_u32).into(),
+        color: Colors::surface_overlay().into(),
         offset: gpui::point(px(0.0), px(12.0)),
         blur_radius: px(36.0),
         spread_radius: px(0.0),

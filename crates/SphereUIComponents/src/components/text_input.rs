@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, rgba, App, ClipboardItem, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
+    div, px, App, ClipboardItem, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
     MouseButton, ParentElement, Styled, Window,
 };
 
@@ -531,7 +531,7 @@ pub fn text_field_with_callbacks(
         })
         .when(focused, |this| {
             this.shadow(vec![gpui::BoxShadow {
-                color: rgba(0x72D7D724_u32).into(),
+                color: Colors::with_alpha(Colors::border_focus(), 0.15).into(),
                 offset: gpui::point(px(0.0), px(0.0)),
                 blur_radius: px(0.0),
                 spread_radius: px(1.0),
@@ -562,7 +562,7 @@ fn text_segment(text: String, selected: bool) -> impl IntoElement {
         .overflow_hidden()
         .truncate()
         .rounded_sm()
-        .when(selected, |d| d.bg(rgba(0x5FCED040_u32)).px(px(2.0)))
+        .when(selected, |d| d.bg(Colors::with_alpha(Colors::accent_primary(), 0.25)).px(px(2.0)))
         .text_size(px(12.0))
         .text_color(Colors::text_primary())
         .child(text)
