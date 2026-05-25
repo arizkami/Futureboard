@@ -122,7 +122,7 @@ pub fn timeline_ruler(
                                         .w(px(12.0))
                                         .h(px(12.0))
                                         .text_color(if state.snap_to_grid {
-                                            gpui::rgb(0x101216)
+                                            Colors::text_inverse()
                                         } else {
                                             Colors::text_secondary()
                                         }),
@@ -193,10 +193,10 @@ pub fn timeline_ruler(
                             .bottom_0()
                             .left(px(lx))
                             .w(px(width))
-                            .bg(gpui::rgba(0x7bd88f14))
+                            .bg(Colors::with_alpha(Colors::status_success(), 0.08))
                             .border_l(px(1.0))
                             .border_r(px(1.0))
-                            .border_color(gpui::rgb(0x7bd88f)),
+                            .border_color(Colors::status_success()),
                     )
                 } else {
                     None
@@ -221,12 +221,7 @@ pub fn timeline_ruler(
                         .bottom_0()
                         .w(px(1.0))
                         .h(px(tick_h))
-                        .bg(gpui::Rgba {
-                            r: 1.0,
-                            g: 1.0,
-                            b: 1.0,
-                            a: tick_alpha,
-                        })
+                        .bg(Colors::with_alpha(Colors::text_primary(), tick_alpha))
                 }))
                 // Labels: emitted as siblings of the ticks (not children of a
                 // 1 px-wide tick div, which previously made labels wrap one

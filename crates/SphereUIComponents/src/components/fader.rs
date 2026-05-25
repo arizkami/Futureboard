@@ -12,9 +12,11 @@
 //! which lays out as a fraction of parent height.
 
 use gpui::{
-    div, px, relative, rgba, App, AppContext, DragMoveEvent, Empty, InteractiveElement,
+    div, px, relative, App, AppContext, DragMoveEvent, Empty, InteractiveElement,
     IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
 };
+
+use crate::theme::Colors;
 
 /// Minimum recommended rail travel height. The fader will still render at
 /// smaller heights, but below this the dB labels start to crowd.
@@ -69,9 +71,9 @@ pub fn db_scale_column() -> gpui::Div {
                 .mt(-px(4.0))
                 .text_size(px(7.5))
                 .text_color(if db == 0.0 {
-                    rgba(0xFFFFFF59_u32)
+                    Colors::with_alpha(Colors::text_primary(), 0.7)
                 } else {
-                    rgba(0xFFFFFF2E_u32)
+                    Colors::with_alpha(Colors::text_muted(), 0.4)
                 })
                 .child(label),
         );
@@ -80,32 +82,9 @@ pub fn db_scale_column() -> gpui::Div {
 }
 
 /// Render the vertical rail + ticks + thumb at `value_norm`.
-///
-/// Geometry contract:
-/// * column is 24 px wide; rail centerline at x = 12 px.
-/// * the rail itself is 2 px wide and inset so its center sits on x = 12.
-/// * the thumb is 22 px wide and centered on x = 12 (`left = 1`).
-/// * ticks straddle x = 12.
-/// * column uses `h_full` and the thumb position is driven by a flex-spacer
-///   pair so the thumb tracks the rail at any container height.
 fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
     let value = value_norm.clamp(0.0, 1.0);
 
-    // Thumb position lives in the column's normal flex flow — NOT an absolute
-    // wrapper with `top:0 bottom:0`, because Taffy/GPUI does not stretch an
-    // absolutely-positioned element to its parent's height the way CSS does;
-    // such a wrapper collapses to its content (the 10 px thumb), and the
-    // flex_basis spacers then resolve against 10 px and round to zero, which
-    // pins the thumb at the top of the rail regardless of value.
-    //
-    // Instead the rail column itself is the flex container. The background
-    // rail and tick marks are absolute layers on top; the two spacers and the
-    // thumb are real flex children, so they compute against the column's
-    // actual `h_full` height. Spacer basis fractions sum to 1.0 (= parent
-    // height); the 10 px thumb overflows by 10 px and the default
-    // `flex_shrink: 1` shrinks the two spacers in proportion to their basis,
-    // landing the thumb center at `(1 - norm) * (H - 10) + 5` — the rail's
-    // usable range from `thumb_h/2` to `H - thumb_h/2`.
     let mut thumb_accent = accent;
     thumb_accent.a = 0.9;
 
@@ -128,9 +107,9 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
             .bottom(px(FADER_THUMB_HEIGHT / 2.0))
             .left(px(RAIL_CENTER_X - RAIL_W / 2.0))
             .w(px(RAIL_W))
-            .bg(rgba(0xFFFFFF14_u32))
+            .bg(Colors::fader_rail())
             .border(px(1.0))
-            .border_color(rgba(0x00000038_u32))
+            .border_color(Colors::with_alpha(Colors::surface_canvas(), 0.5))
             .rounded_full(),
     );
 
@@ -147,9 +126,9 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
                 .h(px(1.0))
                 .w(px(w))
                 .bg(if db == 0.0 {
-                    rgba(0xFFFFFF59_u32)
+                    Colors::with_alpha(Colors::fader_tick(), 0.7)
                 } else {
-                    rgba(0xFFFFFF1F_u32)
+                    Colors::with_alpha(Colors::fader_tick(), 0.3)
                 }),
         );
     }
@@ -162,9 +141,9 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
                 .w(px(THUMB_W))
                 .h(px(FADER_THUMB_HEIGHT))
                 .rounded_sm()
-                .bg(rgba(0x1F262FFF_u32))
+                .bg(Colors::surface_input())
                 .border(px(1.0))
-                .border_color(rgba(0xFFFFFF66_u32))
+                .border_color(Colors::with_alpha(Colors::text_primary(), 0.4))
                 .relative()
                 .child(
                     div()
@@ -173,7 +152,7 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
                         .left(px(1.0))
                         .right(px(1.0))
                         .h(px(1.0))
-                        .bg(rgba(0xFFFFFF26_u32)),
+                        .bg(Colors::with_alpha(Colors::text_primary(), 0.15)),
                 )
                 .child(
                     div()
@@ -192,9 +171,9 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
 /// the value reads as a proper integrated control.
 pub fn db_value_pill(db_text: impl Into<gpui::SharedString>, highlight: bool) -> impl IntoElement {
     let border = if highlight {
-        rgba(0xFFFFFF3A_u32)
+        Colors::with_alpha(Colors::border_default(), 0.5)
     } else {
-        rgba(0xFFFFFF1F_u32)
+        Colors::with_alpha(Colors::border_subtle(), 0.5)
     };
 
     div()
@@ -207,20 +186,20 @@ pub fn db_value_pill(db_text: impl Into<gpui::SharedString>, highlight: bool) ->
         .h(px(18.0))
         .px(px(6.0))
         .rounded_sm()
-        .bg(rgba(0x0000003A_u32))
+        .bg(Colors::with_alpha(Colors::surface_canvas(), 0.6))
         .border(px(1.0))
         .border_color(border)
         .child(
             div()
                 .text_size(px(10.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(rgba(0xEEF2F5D9_u32))
+                .text_color(Colors::text_primary())
                 .child(db_text.into()),
         )
         .child(
             div()
                 .text_size(px(7.5))
-                .text_color(rgba(0xFFFFFF47_u32))
+                .text_color(Colors::text_muted())
                 .child("dB"),
         )
 }

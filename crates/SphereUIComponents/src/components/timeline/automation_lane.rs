@@ -36,7 +36,7 @@ pub fn automation_lane(
         .flex_row()
         .h(px(40.0))
         .w_full()
-        .bg(gpui::rgba(0x0000001C)) // dark panel
+        .bg(Colors::surface_panel_alt()) // dark panel
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .child(

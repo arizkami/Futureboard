@@ -19,6 +19,7 @@ use gpui::{
 
 use crate::assets;
 use crate::components::file_browser::{BrowserNodeKind, BrowserVisibleNode, FileBrowserState};
+use crate::components::text_input::{text_field_with_callbacks, TextInputCallbacks, TextInputState, TextInputContextCb};
 use crate::theme::Colors;
 
 pub const SIDEBAR_WIDTH: f32 = 272.0;
@@ -82,6 +83,9 @@ impl Render for BrowserDragPreview {
 pub fn sidebar(
     state: &FileBrowserState,
     scroll: UniformListScrollHandle,
+    search_input: &TextInputState,
+    search_focused: bool,
+    on_search_context_menu: TextInputContextCb,
     on_toggle: ToggleNodeCb,
     on_select: SelectEntryCb,
     on_activate_file: ActivateFileCb,
@@ -108,6 +112,24 @@ pub fn sidebar(
                 .text_size(px(9.0))
                 .text_color(Colors::text_faint())
                 .child(format!("{} items", state.visible_node_count())),
+        );
+
+    // Search bar above content
+    let search_callbacks = TextInputCallbacks {
+        on_context_menu: Some(on_search_context_menu),
+    };
+    let search_container = div()
+        .px(px(8.0))
+        .py(px(5.0))
+        .border_b(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_panel())
+        .child(
+            text_field_with_callbacks(
+                search_input,
+                search_focused,
+                search_callbacks,
+            )
         );
 
     let selected_label = state
@@ -145,15 +167,6 @@ pub fn sidebar(
         );
 
     // ── Row virtualization ──────────────────────────────────────────
-    // GPUI's `uniform_list` only constructs elements for the visible
-    // index range, then lays them out at a fixed item height. With
-    // hundreds of expanded browser nodes, this is the difference
-    // between O(N) per-frame allocation/layout and O(visible_rows).
-    //
-    // The render closure is `'static + Fn`, so `nodes` and every
-    // callback must be `'static`. We share them via `Arc` clones —
-    // `Arc::clone` is one atomic increment, far cheaper than
-    // re-allocating each row each frame.
     let nodes = Arc::new(state.visible_nodes());
     let count = nodes.len();
     crate::perf::count("browser_rows", count as u64);
@@ -189,9 +202,7 @@ pub fn sidebar(
     .px(px(2.0))
     .py(px(3.0));
 
-    // Custom scrollbar thumb. Reads through the uniform list's
-    // base scroll handle so it tracks the same offset GPUI is using
-    // internally.
+    // Custom scrollbar thumb
     let thumb = scrollbar_thumb(scroll_for_thumb);
 
     let listing = div()
@@ -200,11 +211,6 @@ pub fn sidebar(
         .relative()
         .child(listing_scroll)
         .child(thumb);
-
-    // Per-directory errors render as inline rows inside the tree
-    // (`placeholder_row` in file_browser.rs). No top-level error banner
-    // is needed now that the browser has no single "current_dir".
-    let error_banner: Option<gpui::AnyElement> = None;
 
     div()
         .flex()
@@ -215,8 +221,8 @@ pub fn sidebar(
         .border_r(px(1.0))
         .border_color(Colors::border_subtle())
         .child(header)
+        .child(search_container)
         .child(path_row)
-        .children(error_banner)
         .child(listing)
 }
 
@@ -238,49 +244,65 @@ fn tree_row(
     let expandable = node.expandable;
     let expanded = node.expanded;
     let selected = node.selected;
-    let is_section = node.kind == BrowserNodeKind::Section;
-    // Sections are *categories*, not filesystem folders. Keep the two
-    // concepts visually and behaviorally separate.
     let is_folder = node.kind == BrowserNodeKind::Folder;
     let is_file = node.kind == BrowserNodeKind::File;
     let is_audio = node.is_audio();
     let is_midi = node.is_midi();
     let depth = node.depth as f32;
+    let extension = node.extension.clone();
 
-    // Uniform row height across all kinds so row boundaries, indent
-    // guides, and the selection bar line up regardless of node type.
+    // Uniform row height
     let row_height = TREE_ROW_HEIGHT;
 
-    // Sections never paint a selection background — they are toggle-only
-    // category headers, not selectable assets. This avoids the "merged
-    // / wrong highlight" effect when clicking a section.
-    let bg = if selected && !is_section {
+    // Sections and project folders paint a background differently
+    let bg = if selected {
         Colors::accent_soft()
-    } else if is_section {
-        gpui::rgba(0xFFFFFF06).into()
     } else {
         gpui::transparent_black().into()
     };
 
-    let text_color = if selected && !is_section {
+    let text_color = if selected {
         Colors::text_primary()
-    } else if is_section {
+    } else if is_folder {
         Colors::text_secondary()
-    } else if is_audio || is_midi || is_folder {
+    } else if is_audio || is_midi {
         Colors::text_muted()
     } else {
         Colors::text_faint()
     };
 
-    let icon_path = if is_section || is_folder {
-        assets::ICON_FOLDER_PATH
+    let icon_path = if is_folder && depth == 0.0 {
+        match label.as_str() {
+            "Audio Files" => assets::ICON_MUSIC_PATH,
+            "Plug-ins" => assets::ICON_PLUG_PATH,
+            "Instruments" => assets::ICON_CPU_PATH,
+            "Projects" => assets::ICON_SAVE_PATH,
+            "Samples" => assets::ICON_SHARE_PATH,
+            "User Library" => assets::ICON_FOLDER_PATH,
+            s if s.starts_with("PROJECT:") => assets::ICON_FOLDER_PATH,
+            _ => assets::ICON_FOLDER_PATH,
+        }
+    } else if is_folder {
+        if expanded {
+            assets::ICON_FOLDER_OPEN_PATH
+        } else {
+            assets::ICON_FOLDER_PATH
+        }
     } else {
-        assets::ICON_FILE_PATH
+        if is_audio {
+            assets::ICON_MUSIC_PATH
+        } else if is_midi {
+            assets::ICON_FILE_PATH
+        } else if extension == "fbproj" {
+            assets::ICON_SAVE_PATH
+        } else if extension == "vst3" {
+            assets::ICON_PLUG_PATH
+        } else {
+            assets::ICON_FILE_PATH
+        }
     };
 
-    let icon_color = if is_section {
-        Colors::accent_primary()
-    } else if selected {
+    let icon_color = if selected {
         Colors::accent_primary()
     } else if is_folder {
         Colors::text_muted()
@@ -288,13 +310,15 @@ fn tree_row(
         Colors::status_success()
     } else if is_midi {
         Colors::status_warning()
+    } else if extension == "fbproj" {
+        Colors::accent_primary()
+    } else if extension == "vst3" {
+        Colors::status_warning()
     } else {
         Colors::text_faint()
     };
 
-    // Depth indent guides — thin vertical bars at each parent level, so the
-    // user can scan the hierarchy at a glance. Skipped for section/depth-0
-    // rows (they own the visual heading).
+    // Depth indent guides
     let mut indent_guides = Vec::new();
     if depth > 0.0 {
         for level in 0..(node.depth) {
@@ -306,13 +330,12 @@ fn tree_row(
                     .bottom(px(0.0))
                     .left(px(x))
                     .w(px(1.0))
-                    .bg(gpui::rgba(0xFFFFFF0A)),
+                    .bg(Colors::divider()),
             );
         }
     }
 
-    // Disclosure cell is rendered for every row so file and folder labels
-    // line up. Only expandable rows get a visible arrow.
+    // Disclosure cell
     let disclosure = div()
         .flex()
         .items_center()
@@ -321,8 +344,8 @@ fn tree_row(
         .h_full()
         .child(disclosure_icon(expandable, expanded));
 
-    let row_label_size = if is_section { 10.0 } else { 11.0 };
-    let label_weight = if is_section {
+    let row_label_size = if depth == 0.0 { 10.0 } else { 11.0 };
+    let label_weight = if depth == 0.0 {
         gpui::FontWeight::BOLD
     } else if is_folder {
         gpui::FontWeight::MEDIUM
@@ -330,9 +353,8 @@ fn tree_row(
         gpui::FontWeight::NORMAL
     };
 
-    // Section labels render uppercased to match DAW tree conventions; file /
-    // folder labels keep their original casing.
-    let display_label = if is_section {
+    // Section labels render uppercased
+    let display_label = if depth == 0.0 {
         label.to_uppercase()
     } else {
         label.clone()
@@ -353,7 +375,7 @@ fn tree_row(
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| s.bg(Colors::surface_hover()))
         .children(indent_guides)
-        .child(if selected && !is_section {
+        .child(if selected {
             div()
                 .absolute()
                 .left(px(0.0))
@@ -391,31 +413,18 @@ fn tree_row(
                 .child("unavailable")
         }));
 
-    // Click semantics, by node kind:
-    //   - Section: toggle expand only. Never mutates `state.selected` —
-    //     a category header is not a selectable asset, and selecting it
-    //     would paint the section row with `accent_soft` on top of its
-    //     existing band, producing the "merged highlight" artifact.
-    //   - Folder: select + toggle expand on a single click (FL-style).
-    //   - File:   select on single click; double-click on audio/MIDI
-    //             imports it onto the timeline.
+    // Clicks and Toggles
     let toggle_for_click = on_toggle.clone();
     let toggle_id = id.clone();
     let toggle_path = path_for_toggle.clone();
     let select_path = path_for_select.clone();
     row = row.on_click(move |event, w, cx| {
-        if is_section {
-            if expandable {
-                toggle_for_click(&(toggle_id.clone(), toggle_path.clone()), w, cx);
-            }
-            return;
-        }
         if let Some(p) = select_path.as_ref() {
             on_select(p, w, cx);
         }
         if expandable {
             toggle_for_click(&(toggle_id.clone(), toggle_path.clone()), w, cx);
-        } else if is_file && event.click_count() >= 2 && (is_audio || is_midi) {
+        } else if is_file && event.click_count() >= 2 {
             if let Some(p) = path_for_activate.as_ref() {
                 on_activate_file(p, w, cx);
             }
@@ -451,11 +460,6 @@ fn tree_row(
     row
 }
 
-/// Render a subtle vertical scrollbar thumb on the right edge of the
-/// scroll viewport. The thumb is sized as `(viewport_h / content_h)` and
-/// positioned as `(-offset_y / content_h)` — reading the values that
-/// `track_scroll` populated during the previous paint. When the content
-/// fits, the thumb is hidden.
 fn scrollbar_thumb(scroll: ScrollHandle) -> impl IntoElement {
     let viewport_h: f32 = scroll.bounds().size.height.into();
     let max_y: f32 = scroll.max_offset().height.into();
@@ -480,7 +484,7 @@ fn scrollbar_thumb(scroll: ScrollHandle) -> impl IntoElement {
         .w(px(4.0))
         .h(px(thumb_h))
         .rounded_full()
-        .bg(gpui::rgba(0xFFFFFF33))
+        .bg(Colors::with_alpha(Colors::text_primary(), 0.2))
         .into_any_element()
 }
 

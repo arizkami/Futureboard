@@ -1,0 +1,169 @@
+use gpui::prelude::FluentBuilder;
+use gpui::{
+    div, px, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
+    Styled, Window,
+};
+
+use crate::theme::Colors;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FbButtonKind {
+    Default,
+    Primary,
+}
+
+pub fn fb_section_label(label: &'static str) -> impl IntoElement {
+    div()
+        .h(px(14.0))
+        .flex()
+        .items_center()
+        .text_size(px(10.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(Colors::text_faint())
+        .child(label)
+}
+
+pub fn fb_field_label(label: &'static str) -> impl IntoElement {
+    div()
+        .w(px(86.0))
+        .flex_shrink_0()
+        .text_size(px(10.5))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(Colors::text_muted())
+        .child(label)
+}
+
+pub fn fb_form_row(label: &'static str, child: impl IntoElement) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .min_h(px(32.0))
+        .child(fb_field_label(label))
+        .child(div().flex_1().min_w_0().child(child))
+}
+
+pub fn fb_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<String>,
+    kind: FbButtonKind,
+    enabled: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let primary = kind == FbButtonKind::Primary;
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(30.0))
+        .min_w(px(if primary { 112.0 } else { 76.0 }))
+        .px(px(12.0))
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(if primary {
+            Colors::border_accent()
+        } else {
+            Colors::border_subtle()
+        })
+        .bg(if primary && enabled {
+            Colors::accent_primary()
+        } else if primary {
+            Colors::accent_muted()
+        } else {
+            Colors::surface_input()
+        })
+        .opacity(if enabled { 1.0 } else { 0.45 })
+        .text_size(px(11.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(if primary && enabled {
+            Colors::on_accent()
+        } else {
+            Colors::text_secondary()
+        })
+        .when(enabled, |this| {
+            this.cursor(gpui::CursorStyle::PointingHand)
+                .hover(move |s| {
+                    if primary {
+                        s.bg(Colors::accent_primary())
+                    } else {
+                        s.bg(Colors::surface_control_hover())
+                    }
+                })
+                .on_click(on_click)
+        })
+        .child(label.into())
+}
+
+pub fn fb_stepper_button(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(28.0))
+        .h(px(28.0))
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_input())
+        .text_size(px(13.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(Colors::text_secondary())
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| {
+            s.bg(Colors::surface_control_hover())
+                .border_color(Colors::border_strong())
+        })
+        .on_click(on_click)
+        .child(label)
+}
+
+pub fn fb_segmented_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<String>,
+    active: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_1()
+        .h(px(28.0))
+        .min_w(px(44.0))
+        .px(px(8.0))
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(if active {
+            Colors::border_accent()
+        } else {
+            Colors::border_subtle()
+        })
+        .bg(if active {
+            Colors::accent_muted()
+        } else {
+            Colors::surface_input()
+        })
+        .text_size(px(10.5))
+        .font_weight(if active {
+            gpui::FontWeight::SEMIBOLD
+        } else {
+            gpui::FontWeight::NORMAL
+        })
+        .text_color(if active {
+            Colors::text_primary()
+        } else {
+            Colors::text_secondary()
+        })
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .on_click(on_click)
+        .child(label.into())
+}

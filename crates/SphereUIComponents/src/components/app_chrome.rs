@@ -1,20 +1,22 @@
 use std::sync::Arc;
 
-use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, rgba, svg, App, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    StatefulInteractiveElement, Styled, Window, WindowControlArea,
+    div, px, rgba, svg, App, InteractiveElement, IntoElement, MouseButton, ParentElement, Styled,
+    Window, WindowControlArea,
 };
 
 use crate::assets;
-use crate::components::icon_button;
-use crate::menu::MenuManifest;
+use crate::components::menu_bar;
+use crate::components::title_bar::{
+    chrome_button, draggable_spacer, section_separator, window_control_button, CHROME_PAD_X,
+    CHROME_TITLE_SIZE, TITLEBAR_HEIGHT,
+};
 use crate::theme::Colors;
 
 /// Click handler for top-level menu buttons. Receives `(menu_id, anchor_x)`
 /// — anchor_x is the click X position which the dropdown overlay uses to
 /// align itself under the clicked label.
-pub type MenuOpenCb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
+pub type MenuOpenCb = menu_bar::MenuOpenCb;
 pub type ChromeActionCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 pub type ProjectOpenCb = Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>;
 
@@ -41,76 +43,8 @@ pub struct TransportChromeState {
     pub on_metronome_toggle: ChromeActionCb,
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-fn divider() -> impl IntoElement {
-    div()
-        .w(px(1.0))
-        .h(px(28.0))
-        .bg(Colors::border_subtle())
-        .mx(px(2.0))
-}
-
-// ── Left section ──────────────────────────────────────────────────────────────
-
 fn menu_area(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> impl IntoElement {
-    // Top-level labels are sourced from the generated menu manifest (which
-    // is itself derived from `packages/shared/src/menu/menuItems.ts`). The
-    // fallback inside `MenuManifest::load` keeps the strip populated even
-    // when the JSON fails to parse, so this function never produces an
-    // empty menu bar.
-    let manifest = MenuManifest::load();
-    let open_id_owned = open_menu_id.map(|s| s.to_string());
-
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(1.0))
-        .px(px(4.0))
-        .children(manifest.menus.iter().enumerate().map(|(i, menu)| {
-            let is_open = open_id_owned.as_deref() == Some(menu.id.as_str());
-            let menu_id = menu.id.clone();
-            let hover_menu_id = menu.id.clone();
-            let cb = on_open_menu.clone();
-            let hover_cb = on_open_menu.clone();
-            let can_hover_switch = open_id_owned.is_some() && !is_open;
-            let (bg, fg) = if is_open {
-                (Colors::surface_hover(), Colors::text_primary())
-            } else {
-                // Transparent background; hover style supplies the bg.
-                (gpui::transparent_black().into(), Colors::text_muted())
-            };
-
-            div()
-                .px(px(7.0))
-                .py(px(3.0))
-                .rounded_md()
-                .text_color(fg)
-                .text_size(px(11.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .bg(bg)
-                .hover(|s| {
-                    s.bg(Colors::surface_hover())
-                        .text_color(Colors::text_primary())
-                })
-                .id(("top-menu", i))
-                .cursor(gpui::CursorStyle::PointingHand)
-                .on_mouse_down(gpui::MouseButton::Left, move |event, w, cx| {
-                    let click_x: f32 = event.position.x.into();
-                    cb(&(menu_id.clone(), click_x), w, cx);
-                })
-                .when(can_hover_switch, |this| {
-                    this.on_hover(move |hovered, window, cx| {
-                        if *hovered {
-                            let x: f32 = window.mouse_position().x.into();
-                            hover_cb(&(hover_menu_id.clone(), x), window, cx);
-                        }
-                    })
-                })
-                .occlude()
-                .child(menu.label.clone())
-        }))
+    menu_bar::menu_bar(open_menu_id, on_open_menu)
 }
 
 fn project_title(state: ProjectChromeState) -> impl IntoElement {
@@ -120,12 +54,12 @@ fn project_title(state: ProjectChromeState) -> impl IntoElement {
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(4.0))
-        .h(px(28.0))
-        .px(px(7.0))
+        .gap(px(6.0))
+        .h(px(24.0))
+        .px(px(8.0))
         .rounded_md()
         .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|s| s.bg(Colors::surface_hover()))
+        .hover(|s| s.bg(Colors::surface_control_hover()))
         .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
             let x: f32 = event.position.x.into();
             on_open(&x, window, cx);
@@ -134,14 +68,20 @@ fn project_title(state: ProjectChromeState) -> impl IntoElement {
         .child(
             div()
                 .text_color(Colors::text_secondary())
-                .text_size(px(12.0))
-                .font_weight(gpui::FontWeight::BOLD)
+                .text_size(px(CHROME_TITLE_SIZE))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .truncate()
                 .child(state.name),
         )
         .child(
             div()
-                .text_color(Colors::text_muted())
-                .text_size(px(8.0))
+                .flex_none()
+                .text_color(if state.is_dirty {
+                    Colors::status_warning()
+                } else {
+                    Colors::text_faint()
+                })
+                .text_size(px(9.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .child(status),
         )
@@ -183,12 +123,10 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
         .gap(px(1.0))
         // Skip back
         .child(
-            icon_button(
+            chrome_button(
                 Some(assets::ICON_SKIP_BACK_PATH),
                 "<<",
-                px(28.0),
-                px(28.0),
-                px(14.0),
+                false,
                 Colors::text_muted(),
             )
             .cursor(gpui::CursorStyle::PointingHand)
@@ -199,28 +137,19 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
         )
         // Play
         .child(
-            icon_button(
-                Some(assets::ICON_PLAY_PATH),
-                ">",
-                px(28.0),
-                px(28.0),
-                px(14.0),
-                play_color,
-            )
-            .cursor(gpui::CursorStyle::PointingHand)
-            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                on_play(&(), window, cx);
-            })
-            .occlude(),
+            chrome_button(Some(assets::ICON_PLAY_PATH), ">", state.playing, play_color)
+                .cursor(gpui::CursorStyle::PointingHand)
+                .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                    on_play(&(), window, cx);
+                })
+                .occlude(),
         )
         // Stop
         .child(
-            icon_button(
+            chrome_button(
                 Some(assets::ICON_SQUARE_PATH),
                 "[]",
-                px(28.0),
-                px(28.0),
-                px(14.0),
+                false,
                 Colors::text_muted(),
             )
             .cursor(gpui::CursorStyle::PointingHand)
@@ -231,24 +160,20 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
         )
         // Record
         .child(
-            icon_button(
+            chrome_button(
                 Some(assets::ICON_CIRCLE_PATH),
                 "REC",
-                px(28.0),
-                px(28.0),
-                px(14.0),
+                state.recording,
                 record_color,
             )
             .opacity(0.38),
         )
         // Loop
         .child(
-            icon_button(
+            chrome_button(
                 Some(assets::ICON_REPEAT2_PATH),
                 "LOOP",
-                px(28.0),
-                px(28.0),
-                px(14.0),
+                state.loop_enabled,
                 loop_color,
             )
             .cursor(gpui::CursorStyle::PointingHand)
@@ -259,12 +184,10 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
         )
         // Metronome
         .child(
-            icon_button(
+            chrome_button(
                 Some(assets::ICON_TIMER_PATH),
                 "MET",
-                px(28.0),
-                px(28.0),
-                px(14.0),
+                state.metronome_enabled,
                 metronome_color,
             )
             .cursor(gpui::CursorStyle::PointingHand)
@@ -273,21 +196,21 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
             })
             .occlude(),
         )
-        .child(divider())
+        .child(section_separator())
         // Position display
         .child(
             div()
-                .w(px(84.0))
-                .h(px(28.0))
+                .w(px(78.0))
+                .h(px(24.0))
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_color(Colors::text_primary())
-                .text_size(px(13.0))
+                .text_size(px(12.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(state.position_label),
         )
-        .child(divider())
+        .child(section_separator())
         // BPM
         .child(
             div()
@@ -299,19 +222,19 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
                 .child(
                     div()
                         .text_color(Colors::text_muted())
-                        .text_size(px(8.0))
+                        .text_size(px(9.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .child("BPM"),
                 )
                 .child(
                     div()
                         .w(px(32.0))
-                        .h(px(20.0))
+                        .h(px(19.0))
                         .flex()
                         .items_center()
                         .justify_center()
                         .rounded_md()
-                        .bg(Colors::surface_raised())
+                        .bg(Colors::surface_input())
                         .text_color(Colors::text_primary())
                         .text_size(px(11.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -329,12 +252,12 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
                 .child(
                     div()
                         .w(px(18.0))
-                        .h(px(20.0))
+                        .h(px(19.0))
                         .flex()
                         .items_center()
                         .justify_center()
                         .rounded_md()
-                        .bg(Colors::surface_raised())
+                        .bg(Colors::surface_input())
                         .text_color(Colors::text_primary())
                         .text_size(px(11.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -355,12 +278,12 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
                 .child(
                     div()
                         .w(px(18.0))
-                        .h(px(20.0))
+                        .h(px(19.0))
                         .flex()
                         .items_center()
                         .justify_center()
                         .rounded_md()
-                        .bg(Colors::surface_raised())
+                        .bg(Colors::surface_input())
                         .text_color(Colors::text_primary())
                         .text_size(px(11.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -383,30 +306,24 @@ fn panel_toggles() -> impl IntoElement {
         .gap(px(2.0))
         .px(px(2.0))
         // Browser
-        .child(icon_button(
+        .child(chrome_button(
             Some(assets::ICON_FOLDER_OPEN_PATH),
             "BROWSER",
-            px(28.0),
-            px(28.0),
-            px(14.0),
+            false,
             Colors::text_muted(),
         ))
         // Mixer
-        .child(icon_button(
+        .child(chrome_button(
             Some(assets::ICON_PANEL_BOTTOM_PATH),
             "MIXER",
-            px(28.0),
-            px(28.0),
-            px(14.0),
+            false,
             Colors::text_muted(),
         ))
         // Inspector
-        .child(icon_button(
+        .child(chrome_button(
             Some(assets::ICON_PANEL_RIGHT_PATH),
             "INSPECT",
-            px(28.0),
-            px(28.0),
-            px(14.0),
+            false,
             Colors::text_muted(),
         ))
 }
@@ -419,53 +336,47 @@ fn utility_buttons() -> impl IntoElement {
         .gap(px(2.0))
         .px(px(2.0))
         // Import audio
-        .child(icon_button(
+        .child(chrome_button(
             Some(assets::ICON_FOLDER_PATH),
             "IMPORT",
-            px(28.0),
-            px(28.0),
-            px(14.0),
+            false,
             Colors::text_muted(),
         ))
         // Save
-        .child(icon_button(
+        .child(chrome_button(
             Some(assets::ICON_SAVE_PATH),
             "SAVE",
-            px(28.0),
-            px(28.0),
-            px(14.0),
+            false,
             Colors::text_muted(),
         ))
         // Share
-        .child(icon_button(
+        .child(chrome_button(
             Some(assets::ICON_SHARE_PATH),
             "SHARE",
-            px(28.0),
-            px(28.0),
-            px(14.0),
+            false,
             Colors::text_muted(),
         ))
 }
 
 fn report_bug_button() -> impl IntoElement {
-    let amber_bg = rgba(0xFBBF2412_u32); // rgba(251,191,36, 0.07)
-    let amber_text = rgba(0xFBBF24B3_u32); // rgba(251,191,36, 0.70)
-    let amber_border = rgba(0xFBBF2438_u32); // rgba(251,191,36, 0.22)
+    let amber_bg = Colors::with_alpha(Colors::status_warning(), 0.07);
+    let amber_text = Colors::with_alpha(Colors::status_warning(), 0.70);
+    let amber_border = Colors::with_alpha(Colors::status_warning(), 0.22);
 
     div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(4.0))
-        .h(px(28.0))
+        .h(px(24.0))
         .px(px(8.0))
         .rounded_md()
         .bg(amber_bg)
         .border_1()
         .border_color(amber_border)
         .hover(|s| {
-            s.bg(rgba(0xFBBF2424_u32))
-                .border_color(rgba(0xFBBF2466_u32))
+            s.bg(Colors::with_alpha(Colors::status_warning(), 0.14))
+                .border_color(Colors::with_alpha(Colors::status_warning(), 0.40))
         })
         .child(
             svg()
@@ -497,42 +408,21 @@ fn window_controls(window: &gpui::Window) -> impl IntoElement {
         .flex_row()
         .items_center()
         .h_full()
-        .child(
-            icon_button(
-                Some(assets::ICON_MINIMIZE_PATH),
-                "-",
-                px(32.0),
-                px(32.0),
-                px(16.0),
-                Colors::text_muted(),
-            )
-            .window_control_area(WindowControlArea::Min)
-            .occlude(),
-        )
-        .child(
-            icon_button(
-                Some(max_path),
-                max_fallback,
-                px(32.0),
-                px(32.0),
-                px(16.0),
-                Colors::text_muted(),
-            )
-            .window_control_area(WindowControlArea::Max)
-            .occlude(),
-        )
-        .child(
-            icon_button(
-                Some(assets::ICON_X_PATH),
-                "X",
-                px(32.0),
-                px(32.0),
-                px(16.0),
-                Colors::text_muted(),
-            )
-            .window_control_area(WindowControlArea::Close)
-            .occlude(),
-        )
+        .child(window_control_button(
+            WindowControlArea::Min,
+            assets::ICON_MINIMIZE_PATH,
+            "-",
+        ))
+        .child(window_control_button(
+            WindowControlArea::Max,
+            max_path,
+            max_fallback,
+        ))
+        .child(window_control_button(
+            WindowControlArea::Close,
+            assets::ICON_X_PATH,
+            "X",
+        ))
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -548,9 +438,9 @@ pub fn app_chrome(
         .flex()
         .flex_row()
         .items_center()
-        .h(px(36.0))
+        .h(px(TITLEBAR_HEIGHT))
         .w_full()
-        .bg(Colors::surface_panel())
+        .bg(Colors::surface_titlebar())
         .border_b_1()
         .border_color(Colors::border_subtle())
         // Windows: NCHITTEST callback returns `HTCAPTION` for hitboxes
@@ -570,7 +460,7 @@ pub fn app_chrome(
         })
         // ── Left: menus + project ─────────────────────────────────────────────
         .child(menu_area(open_menu_id, on_open_menu))
-        .child(divider())
+        .child(section_separator())
         .child(project_title(project))
         // ── Drag region spacer ────────────────────────────────────────────────
         // Carry both drag mechanisms on the spacer too — Windows reads
@@ -579,33 +469,25 @@ pub fn app_chrome(
         // exact same band makes resolution deterministic even if a
         // future sibling adds an `occlude()` that drifts into the
         // central spacer.
-        .child(
-            div()
-                .flex_1()
-                .h_full()
-                .window_control_area(WindowControlArea::Drag)
-                .on_mouse_down(MouseButton::Left, |_, window, _cx| {
-                    window.start_window_move();
-                }),
-        )
+        .child(draggable_spacer())
         // ── Right: transport controls ─────────────────────────────────────────
         .child(transport_controls(transport))
-        .child(divider())
+        .child(section_separator())
         // Panel toggles: Browser | Mixer | Inspector
         .child(panel_toggles())
-        .child(divider())
+        .child(section_separator())
         // Utility: Import | Save | Share
         .child(utility_buttons())
-        .child(divider())
+        .child(section_separator())
         // Report bug
         .child(
             div()
                 .flex()
                 .items_center()
-                .px(px(4.0))
+                .px(px(CHROME_PAD_X))
                 .child(report_bug_button()),
         )
-        .child(divider())
+        .child(section_separator())
         // Window controls (min / max / close)
         .child(window_controls(window))
 }

@@ -76,7 +76,7 @@ fn midi_note(width: f32, delay: f32, note_y: f32) -> impl IntoElement {
         .rounded_sm()
         .bg(Colors::accent_primary())
         .border(px(1.0))
-        .border_color(gpui::rgb(0x8AE9EB))
+        .border_color(Colors::with_alpha(Colors::accent_primary(), 0.8))
 }
 
 fn editor_panel() -> impl IntoElement {
@@ -369,7 +369,7 @@ pub fn bottom_panel(
                 .px(px(8.0))
                 .border_b(px(1.0))
                 .border_color(Colors::border_subtle())
-                .bg(gpui::rgb(0x0F1318))
+                .bg(Colors::surface_panel_alt())
                 .child(tab_button(
                     "Mixer",
                     assets::ICON_SLIDERS_HORIZONTAL_PATH,

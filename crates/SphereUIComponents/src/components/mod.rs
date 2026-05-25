@@ -1,12 +1,15 @@
 pub mod add_track_dialog;
 mod app_chrome;
 mod bottom_panel;
+pub mod combo_box;
 pub mod context_menu;
+pub mod controls;
 pub mod fader;
 pub mod file_browser;
 mod icon;
 mod icon_button;
 pub mod knob;
+pub mod menu_bar;
 pub mod menu_dropdown;
 pub mod mixer_panel;
 pub mod panel;
@@ -17,21 +20,28 @@ pub mod slider;
 mod status_bar;
 pub mod text_input;
 pub mod timeline;
+pub mod title_bar;
 
 pub use add_track_dialog::{
     add_track_dialog, AddTrackDialogCallbacks, AddTrackDialogState, AddTrackKind,
 };
 pub use app_chrome::{app_chrome, ProjectChromeState, TransportChromeState};
 pub use bottom_panel::{bottom_panel, BottomPanelResizeDrag, BottomPanelState, BottomTab};
+pub use combo_box::{combo_box_menu, combo_box_trigger, ComboBoxOption};
+pub use controls::{
+    fb_button, fb_field_label, fb_form_row, fb_section_label, fb_segmented_button,
+    fb_stepper_button, FbButtonKind,
+};
 pub use fader::fader;
 pub use icon::icon;
 pub use icon_button::icon_button;
 pub use knob::knob;
+pub use menu_bar::{menu_bar, menu_label_button};
 pub use mixer_panel::mixer_panel;
 pub use panel::right_panel;
 pub use project_wizard::{
-    project_wizard, ProjectTemplate, ProjectWizardCallbacks, ProjectWizardResult,
-    ProjectWizardState,
+    open_project_wizard_window, ProjectCreateCallback, ProjectTemplate, ProjectWizardResult,
+    ProjectWizardState, ProjectWizardWindow,
 };
 pub use sidebar::sidebar;
 pub use slider::slider;

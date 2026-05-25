@@ -145,9 +145,9 @@ pub fn midi_clip(
         .child(
             div()
                 .h(px(14.0))
-                .bg(gpui::rgba(0x0000003A)) // dark bar
+                .bg(Colors::surface_panel_alt()) // dark bar
                 .border_t(px(1.0))
-                .border_color(gpui::rgba(0xFFFFFF0F))
+                .border_color(Colors::divider())
                 .px(px(6.0))
                 .flex()
                 .items_center()

@@ -7,6 +7,10 @@ use gpui::{
 };
 
 use crate::assets;
+use crate::components::text_input::{
+    text_field_with_callbacks, TextInputCallbacks, TextInputState,
+};
+use crate::components::title_bar::TITLEBAR_HEIGHT;
 use crate::theme::Colors;
 
 pub type ProjectSwitcherCommandCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
@@ -53,11 +57,14 @@ impl Default for ProjectSwitcherState {
 const PANEL_WIDTH: f32 = 288.0;
 const PANEL_MAX_HEIGHT: f32 = 430.0;
 const EDGE_GAP: f32 = 8.0;
-const TOP_OFFSET: f32 = 40.0;
-const ROW_HEIGHT: f32 = 38.0;
+const TOP_OFFSET: f32 = TITLEBAR_HEIGHT + 4.0;
+const ROW_HEIGHT: f32 = 34.0;
 
 pub fn project_switcher_popover(
     state: &ProjectSwitcherState,
+    search_input: &TextInputState,
+    search_focused: bool,
+    search_callbacks: TextInputCallbacks,
     viewport_width: f32,
     _viewport_height: f32,
     on_command: ProjectSwitcherCommandCb,
@@ -84,7 +91,14 @@ pub fn project_switcher_popover(
                     on_close(&(), w, cx)
                 }),
         )
-        .child(panel(state, left, on_command))
+        .child(panel(
+            state,
+            search_input,
+            search_focused,
+            search_callbacks,
+            left,
+            on_command,
+        ))
 }
 
 fn panel_shadow() -> Vec<gpui::BoxShadow> {
@@ -98,6 +112,9 @@ fn panel_shadow() -> Vec<gpui::BoxShadow> {
 
 fn panel(
     state: &ProjectSwitcherState,
+    search_input: &TextInputState,
+    search_focused: bool,
+    search_callbacks: TextInputCallbacks,
     left: f32,
     on_command: ProjectSwitcherCommandCb,
 ) -> impl IntoElement {
@@ -111,16 +128,16 @@ fn panel(
         .top(px(TOP_OFFSET))
         .w(px(PANEL_WIDTH))
         .max_h(px(PANEL_MAX_HEIGHT))
-        .rounded_lg()
+        .rounded_md()
         .border(px(1.0))
         .border_color(Colors::border_subtle())
-        .bg(Colors::surface_panel())
+        .bg(Colors::surface_card())
         .shadow(panel_shadow())
         .occlude()
         .flex()
         .flex_col()
         .child(header_row(state))
-        .child(search_row(&query))
+        .child(search_row(search_input, search_focused, search_callbacks))
         .child(
             div()
                 .flex_1()
@@ -189,7 +206,7 @@ fn header_row(state: &ProjectSwitcherState) -> impl IntoElement {
         "Saved"
     };
     div()
-        .h(px(34.0))
+        .h(px(32.0))
         .flex()
         .flex_row()
         .items_center()
@@ -199,8 +216,8 @@ fn header_row(state: &ProjectSwitcherState) -> impl IntoElement {
         .border_color(Colors::border_subtle())
         .child(
             div()
-                .w(px(20.0))
-                .h(px(20.0))
+                .w(px(18.0))
+                .h(px(18.0))
                 .rounded_md()
                 .flex()
                 .items_center()
@@ -219,7 +236,7 @@ fn header_row(state: &ProjectSwitcherState) -> impl IntoElement {
                 .flex()
                 .items_center()
                 .gap(px(5.0))
-                .bg(Colors::surface_raised())
+                .bg(Colors::surface_input())
                 .child(
                     div()
                         .min_w(px(0.0))
@@ -243,63 +260,30 @@ fn header_row(state: &ProjectSwitcherState) -> impl IntoElement {
                 .flex_none()
                 .text_size(px(9.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(Colors::text_muted())
+                .text_color(if state.current_project.is_dirty {
+                    Colors::status_warning()
+                } else {
+                    Colors::text_muted()
+                })
                 .child(status),
         )
 }
 
-fn search_row(query: &str) -> impl IntoElement {
+fn search_row(
+    search_input: &TextInputState,
+    search_focused: bool,
+    callbacks: TextInputCallbacks,
+) -> impl IntoElement {
     div()
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .px(px(8.0))
-        .py(px(6.0))
-        .child(
-            div()
-                .h(px(25.0))
-                .w_full()
-                .rounded_md()
-                .border(px(1.0))
-                .border_color(Colors::border_subtle())
-                .bg(Colors::surface_input())
-                .px(px(8.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .w(px(9.0))
-                        .h(px(9.0))
-                        .rounded_full()
-                        .border(px(1.0))
-                        .border_color(Colors::text_faint()),
-                )
-                .child(
-                    div()
-                        .min_w(px(0.0))
-                        .flex_1()
-                        .truncate()
-                        .text_size(px(11.0))
-                        .text_color(if query.is_empty() {
-                            Colors::text_faint()
-                        } else {
-                            Colors::text_primary()
-                        })
-                        .child(if query.is_empty() {
-                            "Search projects...".to_string()
-                        } else {
-                            query.to_string()
-                        }),
-                )
-                .children((!query.is_empty()).then(|| {
-                    svg()
-                        .path(assets::ICON_X_PATH)
-                        .w(px(10.0))
-                        .h(px(10.0))
-                        .text_color(Colors::text_faint())
-                })),
-        )
+        .py(px(5.0))
+        .child(text_field_with_callbacks(
+            search_input,
+            search_focused,
+            callbacks,
+        ))
 }
 
 fn section_label(label: &'static str) -> impl IntoElement {
@@ -314,7 +298,7 @@ fn section_label(label: &'static str) -> impl IntoElement {
 }
 
 fn divider() -> impl IntoElement {
-    div().my(px(4.0)).h(px(1.0)).bg(Colors::border_subtle())
+    div().my(px(3.0)).h(px(1.0)).bg(Colors::border_subtle())
 }
 
 fn project_row(
@@ -337,7 +321,7 @@ fn project_row(
         .items_center()
         .gap(px(6.0))
         .bg(if selected {
-            Colors::surface_hover()
+            Colors::surface_control_hover()
         } else {
             gpui::transparent_black().into()
         })
@@ -388,7 +372,7 @@ fn project_row(
     if !disabled {
         row = row
             .cursor(gpui::CursorStyle::PointingHand)
-            .hover(|s| s.bg(Colors::surface_hover()))
+            .hover(|s| s.bg(Colors::surface_control_hover()))
             .on_click(move |_, w, cx| on_command(&command, w, cx));
     }
 

@@ -1,6 +1,6 @@
 use gpui::{
-    div, px, AppContext, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, Styled, UniformListScrollHandle, Window,
+    div, px, AppContext, Bounds, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
+    KeyDownEvent, ParentElement, Render, Styled, UniformListScrollHandle, Window, WindowHandle,
 };
 
 use std::{
@@ -19,9 +19,11 @@ use crate::components::file_browser::{read_directory, FileBrowserState};
 use crate::components::mixer_panel::MixerCallbacks;
 use crate::components::project_switcher::ProjectSwitcherState;
 use crate::components::project_wizard::{
-    ProjectTemplate, ProjectWizardCallbacks, ProjectWizardResult, ProjectWizardState,
+    open_project_wizard_window, ProjectCreateCallback, ProjectWizardResult, ProjectWizardWindow,
 };
-use crate::components::text_input::{TextInputAction, TextInputState};
+use crate::components::text_input::{
+    text_input_context_entries, TextInputAction, TextInputCallbacks, TextInputState,
+};
 use crate::components::timeline::timeline::TimelineContextTarget;
 use crate::components::timeline::timeline_state::{
     self, ClipType, CreateTrackOptions, TimelineState, TrackState, TrackType,
@@ -67,6 +69,20 @@ pub enum OpenPopover {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextMenuTarget {
+    AddTrackName,
+    ProjectSwitcherSearch,
+    BrowserSearch,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextContextMenu {
+    target: TextMenuTarget,
+    x: f32,
+    y: f32,
+}
+
 #[derive(Debug, Clone)]
 pub enum ContextTarget {
     TimelineEmpty,
@@ -87,7 +103,11 @@ pub struct StudioLayout {
     browser_scroll: UniformListScrollHandle,
     menu_bar: MenuBarUiState,
     project_switcher: ProjectSwitcherState,
+    project_switcher_search_input: TextInputState,
+    browser_search_input: TextInputState,
     add_track_dialog: AddTrackDialogState,
+    add_track_name_input: TextInputState,
+    text_context_menu: Option<TextContextMenu>,
     open_popover: Option<OpenPopover>,
     audio_engine: Option<DAUx::AudioEngine>,
     audio_running: bool,
@@ -120,11 +140,8 @@ pub struct StudioLayout {
     project_folder: Option<PathBuf>,
     /// Persistent recent-projects list backed by `~/.config/Futureboard/recent.json`.
     recent_projects: RecentProjectsStore,
-    /// State for the New Project wizard overlay.
-    project_wizard: ProjectWizardState,
-    /// Text inputs for the project wizard (project name and BPM).
-    wizard_name_input: TextInputState,
-    wizard_bpm_input: TextInputState,
+    /// External borderless New Project utility window, if it is currently alive.
+    project_wizard_window: Option<WindowHandle<ProjectWizardWindow>>,
 }
 
 /// Rolling UI repaint diagnostics.
@@ -329,7 +346,20 @@ impl StudioLayout {
             browser_scroll: UniformListScrollHandle::new(),
             menu_bar: MenuBarUiState::default(),
             project_switcher: ProjectSwitcherState::default(),
+            project_switcher_search_input: TextInputState::new(
+                "project-switcher-search-input",
+                cx.focus_handle(),
+            )
+            .with_placeholder("Search projects..."),
+            browser_search_input: TextInputState::new(
+                "browser-search-input",
+                cx.focus_handle(),
+            )
+            .with_placeholder("Search..."),
             add_track_dialog: AddTrackDialogState::closed(),
+            add_track_name_input: TextInputState::new("add-track-name-input", cx.focus_handle())
+                .with_placeholder("Track name"),
+            text_context_menu: None,
             open_popover: None,
             audio_engine,
             audio_running: initial_audio_running,
@@ -347,10 +377,7 @@ impl StudioLayout {
             project_path: None,
             project_folder: None,
             recent_projects: RecentProjectsStore::load(),
-            project_wizard: ProjectWizardState::closed(),
-            wizard_name_input: TextInputState::new("wizard-name", cx.focus_handle())
-                .with_placeholder("Project name"),
-            wizard_bpm_input: TextInputState::new("wizard-bpm", cx.focus_handle()),
+            project_wizard_window: None,
         }
     }
 }
@@ -715,6 +742,15 @@ impl StudioLayout {
     /// and then ignored — this is the contract that lets future menu
     /// entries appear in the chrome without crashing the dispatcher.
     fn dispatch_command_id(&mut self, command_id: &str, cx: &mut Context<Self>) {
+        self.dispatch_command_id_from_bounds(command_id, None, cx);
+    }
+
+    fn dispatch_command_id_from_bounds(
+        &mut self,
+        command_id: &str,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
         let normalized = normalize_command_id(command_id);
         let command_id = normalized.as_str();
         if let Some(command) = transport_command_from_id(command_id) {
@@ -724,13 +760,119 @@ impl StudioLayout {
         match command_id {
             "noop" => {}
 
+            "browser:import" => {
+                let path = match &self.open_popover {
+                    Some(OpenPopover::Context { target: ContextTarget::Browser(path), .. }) => path.clone(),
+                    _ => None,
+                };
+                if let Some(path) = path {
+                    let ext = path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_ascii_lowercase())
+                        .unwrap_or_default();
+                    if is_supported_audio_ext(&ext) {
+                        let timeline = self.timeline.clone();
+                        let layout = cx.entity().clone();
+                        let path_for_decode = path.clone();
+                        let timeline_for_decode = timeline.clone();
+                        timeline.update(cx, |t, cx| {
+                            let path_key = path.to_string_lossy().to_string();
+                            let name = path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "Imported Audio".to_string());
+                            t.state.import_audio_to_selected_or_new_track(path_key, name);
+                            cx.notify();
+                        });
+                        let _ = layout.update(cx, |this, cx| {
+                            this.mark_dirty();
+                            this.mark_engine_media_dirty();
+                            this.sync_audio_project(cx, false);
+                        });
+                        let path_key = path_for_decode.to_string_lossy().to_string();
+                        let owner = layout.clone();
+                        let _ = layout.update(cx, move |_layout, cx| {
+                            Self::spawn_timeline_audio_import_jobs(
+                                cx,
+                                owner,
+                                timeline_for_decode,
+                                path_for_decode,
+                                path_key,
+                            );
+                        });
+                    }
+                }
+            }
+            "browser:reveal" => {
+                let path = match &self.open_popover {
+                    Some(OpenPopover::Context { target: ContextTarget::Browser(path), .. }) => path.clone(),
+                    _ => None,
+                };
+                if let Some(path) = path {
+                    reveal_path(&path);
+                }
+            }
+            "browser:refresh" => {
+                let path = match &self.open_popover {
+                    Some(OpenPopover::Context { target: ContextTarget::Browser(path), .. }) => path.clone(),
+                    _ => None,
+                };
+                if let Some(path) = path {
+                    self.file_browser.mark_loading(path.clone());
+                    Self::spawn_directory_load(cx, path);
+                } else {
+                    let pending = self.file_browser.expanded_paths.clone();
+                    for p in pending {
+                        self.file_browser.mark_loading(p.clone());
+                        Self::spawn_directory_load(cx, p);
+                    }
+                }
+            }
+            "browser:copy-path" => {
+                let path = match &self.open_popover {
+                    Some(OpenPopover::Context { target: ContextTarget::Browser(path), .. }) => path.clone(),
+                    _ => None,
+                };
+                if let Some(path) = path {
+                    let path_str = path.to_string_lossy().to_string();
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(path_str));
+                }
+            }
+            "browser:open" => {
+                let path = match &self.open_popover {
+                    Some(OpenPopover::Context { target: ContextTarget::Browser(path), .. }) => path.clone(),
+                    _ => None,
+                };
+                if let Some(path) = path {
+                    let id = path.to_string_lossy().to_string();
+                    let expanded = self.file_browser.toggle_node(&id, Some(&path));
+                    if expanded {
+                        let pending = self.file_browser.paths_needing_load();
+                        for p in pending {
+                            self.file_browser.mark_loading(p.clone());
+                            Self::spawn_directory_load(cx, p);
+                        }
+                    }
+                }
+            }
+            "browser:new-folder" => {
+                eprintln!("[browser] TODO: new folder action");
+            }
+            "browser:rename" => {
+                eprintln!("[browser] TODO: rename action");
+            }
+
             // ── View / zoom ──────────────────────────────────────────────
             "view:zoom-in" => self.zoom_timeline_by(cx, 1.25),
             "view:zoom-out" => self.zoom_timeline_by(cx, 0.8),
             "view:reset-zoom" => self.reset_timeline_zoom(cx),
 
             // ── Project / track / edit commands available in native shell ─
-            "project:new" | "project:new-from-template" => self.open_project_wizard(cx),
+            "project:new" | "project:new-from-template" => {
+                self.open_project_wizard(owner_bounds, cx)
+            }
             "project:open" => self.cmd_open_project(cx),
             "project:save" => self.cmd_save_project(cx),
             "project:save-as" => self.cmd_save_project_as(cx),
@@ -788,6 +930,7 @@ impl StudioLayout {
     fn reset_project(&mut self, cx: &mut Context<Self>) {
         self.project_path = None;
         self.project_folder = None;
+        self.file_browser.set_project_folder(None);
         self.project_switcher = ProjectSwitcherState::default();
         let _ = self.timeline.update(cx, |timeline, cx| {
             timeline.state = TimelineState::default();
@@ -797,27 +940,53 @@ impl StudioLayout {
 
     // ── Project wizard ────────────────────────────────────────────────────────
 
-    fn open_project_wizard(&mut self, _cx: &mut Context<Self>) {
-        self.project_wizard = ProjectWizardState::open();
-        self.wizard_name_input.set_value("Untitled Project");
-        self.wizard_name_input.select_all();
-        self.wizard_bpm_input
-            .set_value(format!("{:.0}", self.project_wizard.bpm()).as_str());
+    fn open_project_wizard(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.project_wizard_window.clone() {
+            if handle
+                .update(cx, |_wizard, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.project_wizard_window = None;
+        }
+
+        let owner = cx.entity().clone();
+        let on_create: ProjectCreateCallback = Arc::new(move |result, cx| {
+            owner
+                .update(cx, |this, cx| this.on_project_created(&result, cx))
+                .map_err(|error| format!("Unable to update the main studio window: {error}"))
+        });
+        let bounds = owner_bounds.unwrap_or_else(|| Bounds {
+            origin: gpui::Point::default(),
+            size: gpui::size(px(1400.0), px(900.0)),
+        });
+
+        match open_project_wizard_window(bounds, on_create, cx) {
+            Ok(handle) => self.project_wizard_window = Some(handle),
+            Err(error) => eprintln!("[project] failed to open project wizard window: {error}"),
+        }
     }
 
-    fn close_project_wizard(&mut self) {
-        self.project_wizard = ProjectWizardState::closed();
-    }
-
-    fn on_project_created(&mut self, result: &ProjectWizardResult, cx: &mut Context<Self>) {
-        self.close_project_wizard();
-
+    fn on_project_created(
+        &mut self,
+        result: &ProjectWizardResult,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let safe_name = crate::project::io::sanitize_project_name(&result.name);
+        let target_folder = result.location.join(&safe_name);
+        if target_folder.exists() {
+            return Err("A project with this name already exists at that location.".to_string());
+        }
         let folder = match crate::project::io::create_project_folder(&result.location, &result.name)
         {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("[project] failed to create folder: {e}");
-                return;
+                return Err(format!("Failed to create project folder: {e}"));
             }
         };
         let project_file = folder.join(format!(
@@ -874,12 +1043,12 @@ impl StudioLayout {
         project.name = result.name.clone();
         project.settings.sample_rate = result.sample_rate;
 
-        if let Err(e) = save_project(&mut project, &project_file) {
-            eprintln!("[project] initial save failed: {e}");
-        }
+        save_project(&mut project, &project_file)
+            .map_err(|e| format!("Failed to save initial project file: {e}"))?;
 
         self.project_path = Some(project_file.clone());
-        self.project_folder = Some(folder);
+        self.project_folder = Some(folder.clone());
+        self.file_browser.set_project_folder(Some(folder));
         self.project_switcher.current_project.name = result.name.clone();
         self.project_switcher.current_project.path = Some(project_file.clone());
         self.project_switcher.current_project.is_dirty = false;
@@ -889,6 +1058,7 @@ impl StudioLayout {
             .push(&result.name, project_file, now_secs());
         self.sync_recent_to_switcher();
         cx.notify();
+        Ok(())
     }
 
     // ── Save / load ───────────────────────────────────────────────────────────
@@ -1033,6 +1203,7 @@ impl StudioLayout {
                 });
                 self.project_path = Some(path.clone());
                 self.project_folder = path.parent().map(|p| p.to_path_buf());
+                self.file_browser.set_project_folder(self.project_folder.clone());
                 self.project_switcher.current_project.name = project.name.clone();
                 self.project_switcher.current_project.path = Some(path.clone());
                 self.project_switcher.current_project.is_dirty = false;
@@ -1160,8 +1331,12 @@ impl StudioLayout {
         let mut dialog = AddTrackDialogState::open_for(track_count, has_master_track);
         dialog.selected_kind = kind;
         dialog.track_name = format!("{} {}", kind.label(), dialog.next_number);
+        self.add_track_name_input
+            .set_value(dialog.track_name.clone());
+        self.add_track_name_input.select_all();
         self.add_track_dialog = dialog;
         self.open_popover = None;
+        self.text_context_menu = None;
         self.menu_bar.open_menu_id = None;
         self.menu_bar.submenu_path.clear();
         cx.notify();
@@ -1169,6 +1344,7 @@ impl StudioLayout {
 
     fn close_add_track_dialog(&mut self, cx: &mut Context<Self>) {
         self.add_track_dialog.is_open = false;
+        self.text_context_menu = None;
         cx.notify();
     }
 
@@ -1179,6 +1355,9 @@ impl StudioLayout {
         self.add_track_dialog.selected_kind = kind;
         self.add_track_dialog.track_name =
             format!("{} {}", kind.label(), self.add_track_dialog.next_number);
+        self.add_track_name_input
+            .set_value(self.add_track_dialog.track_name.clone());
+        self.add_track_name_input.select_all();
         self.add_track_dialog.channel_count = if kind == AddTrackKind::Midi { 0 } else { 2 };
         self.add_track_dialog.arm_track = false;
         self.add_track_dialog.monitor_mode = "off";
@@ -1189,6 +1368,7 @@ impl StudioLayout {
         if !self.add_track_dialog.is_open || !self.add_track_dialog.is_valid() {
             return;
         }
+        self.add_track_dialog.track_name = self.add_track_name_input.value.clone();
         let dialog = self.add_track_dialog.clone();
         let Some(track_type) = dialog.selected_kind.native_track_type() else {
             return;
@@ -1339,6 +1519,7 @@ impl StudioLayout {
     fn handle_project_switcher_key(
         &mut self,
         event: &KeyDownEvent,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if !self.project_switcher.is_open {
@@ -1348,14 +1529,16 @@ impl StudioLayout {
             return true;
         }
         let key = event.keystroke.key.as_str();
+        if self.text_context_menu.take().is_some() && key == "escape" {
+            cx.notify();
+            return true;
+        }
+
+        let search_focused = self.project_switcher_search_input.is_focused(window);
         match key {
             "escape" => {
                 self.project_switcher.is_open = false;
-                true
-            }
-            "backspace" => {
-                self.project_switcher.query.pop();
-                self.project_switcher.selected_index = 0;
+                self.text_context_menu = None;
                 true
             }
             "arrow_down" | "down" => {
@@ -1377,17 +1560,132 @@ impl StudioLayout {
                 true
             }
             _ => {
-                let no_mods = {
-                    let mods = event.keystroke.modifiers;
-                    !mods.control && !mods.alt && !mods.platform && !mods.function
-                };
-                if no_mods && key.chars().count() == 1 {
-                    self.project_switcher.query.push_str(key);
-                    self.project_switcher.selected_index = 0;
-                    true
-                } else {
-                    false
+                if search_focused || is_text_input_key(event) {
+                    let action = self
+                        .project_switcher_search_input
+                        .handle_key_with_clipboard(event, Some(cx));
+                    self.sync_text_input_target(TextMenuTarget::ProjectSwitcherSearch);
+                    return !matches!(action, TextInputAction::Pass);
                 }
+                false
+            }
+        }
+    }
+
+    fn handle_browser_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let search_focused = self.browser_search_input.is_focused(window);
+        if !search_focused {
+            return false;
+        }
+        if event.is_held {
+            return true;
+        }
+        let key = event.keystroke.key.as_str();
+        if self.text_context_menu.take().is_some() && key == "escape" {
+            cx.notify();
+            return true;
+        }
+
+        match key {
+            "arrow_down" | "down" => {
+                self.file_browser.select_next();
+                cx.notify();
+                true
+            }
+            "arrow_up" | "up" => {
+                self.file_browser.select_previous();
+                cx.notify();
+                true
+            }
+            "arrow_left" | "left" => {
+                self.file_browser.collapse_selected_or_parent();
+                let pending = self.file_browser.paths_needing_load();
+                for p in pending {
+                    self.file_browser.mark_loading(p.clone());
+                    Self::spawn_directory_load(cx, p);
+                }
+                cx.notify();
+                true
+            }
+            "arrow_right" | "right" => {
+                self.file_browser.expand_selected();
+                let pending = self.file_browser.paths_needing_load();
+                for p in pending {
+                    self.file_browser.mark_loading(p.clone());
+                    Self::spawn_directory_load(cx, p);
+                }
+                cx.notify();
+                true
+            }
+            "enter" | "numpad_enter" => {
+                if let Some(selected_path) = self.file_browser.selected.clone() {
+                    if selected_path.is_dir() {
+                        let id = selected_path.to_string_lossy().to_string();
+                        let expanded = self.file_browser.toggle_node(&id, Some(&selected_path));
+                        if expanded {
+                            let pending = self.file_browser.paths_needing_load();
+                            for p in pending {
+                                self.file_browser.mark_loading(p.clone());
+                                Self::spawn_directory_load(cx, p);
+                            }
+                        }
+                    } else {
+                        let ext = selected_path
+                            .extension()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_ascii_lowercase())
+                            .unwrap_or_default();
+                        if is_supported_audio_ext(&ext) {
+                            let timeline = self.timeline.clone();
+                            let layout = cx.entity().clone();
+                            let path = selected_path.clone();
+                            let path_for_decode = path.clone();
+                            let timeline_for_decode = timeline.clone();
+                            timeline.update(cx, |t, cx| {
+                                let path_key = path.to_string_lossy().to_string();
+                                let name = path
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| "Imported Audio".to_string());
+                                t.state.import_audio_to_selected_or_new_track(path_key, name);
+                                cx.notify();
+                            });
+                            let _ = layout.update(cx, |this, cx| {
+                                this.mark_dirty();
+                                this.mark_engine_media_dirty();
+                                this.sync_audio_project(cx, false);
+                            });
+                            let path_key = path_for_decode.to_string_lossy().to_string();
+                            let owner = layout.clone();
+                            let _ = layout.update(cx, move |_layout, cx| {
+                                Self::spawn_timeline_audio_import_jobs(
+                                    cx,
+                                    owner,
+                                    timeline_for_decode,
+                                    path_for_decode,
+                                    path_key,
+                                );
+                            });
+                        }
+                    }
+                }
+                true
+            }
+            _ => {
+                if search_focused || is_text_input_key(event) {
+                    let action = self
+                        .browser_search_input
+                        .handle_key_with_clipboard(event, Some(cx));
+                    self.sync_text_input_target(TextMenuTarget::BrowserSearch);
+                    return !matches!(action, TextInputAction::Pass);
+                }
+                false
             }
         }
     }
@@ -1395,10 +1693,27 @@ impl StudioLayout {
     fn handle_add_track_dialog_key(
         &mut self,
         event: &KeyDownEvent,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if !self.add_track_dialog.is_open {
             return false;
+        }
+        if event.keystroke.key.as_str() == "escape" && self.text_context_menu.take().is_some() {
+            cx.notify();
+            return true;
+        }
+        if self.add_track_name_input.is_focused(window) {
+            let action = self
+                .add_track_name_input
+                .handle_key_with_clipboard(event, Some(cx));
+            self.add_track_dialog.track_name = self.add_track_name_input.value.clone();
+            match action {
+                TextInputAction::Submit => self.confirm_add_track_dialog(cx),
+                TextInputAction::Cancel => self.close_add_track_dialog(cx),
+                TextInputAction::Consumed | TextInputAction::Pass => cx.notify(),
+            }
+            return !matches!(action, TextInputAction::Pass);
         }
         let key = event.keystroke.key.as_str();
         let no_mods = {
@@ -1408,14 +1723,6 @@ impl StudioLayout {
         match key {
             "escape" => self.close_add_track_dialog(cx),
             "enter" | "numpad_enter" => self.confirm_add_track_dialog(cx),
-            "backspace" if no_mods => {
-                self.add_track_dialog.track_name.pop();
-                cx.notify();
-            }
-            "delete" if no_mods => {
-                self.add_track_dialog.track_name.clear();
-                cx.notify();
-            }
             "arrow_up" | "up" if no_mods => {
                 self.add_track_dialog.count = (self.add_track_dialog.count + 1).min(32);
                 cx.notify();
@@ -1424,17 +1731,46 @@ impl StudioLayout {
                 self.add_track_dialog.count = self.add_track_dialog.count.saturating_sub(1).max(1);
                 cx.notify();
             }
-            _ if no_mods && key == "space" => {
-                self.add_track_dialog.track_name.push(' ');
-                cx.notify();
-            }
-            _ if no_mods && key.chars().count() == 1 => {
-                self.add_track_dialog.track_name.push_str(key);
-                cx.notify();
-            }
-            _ => {}
+            _ => return false,
         }
         true
+    }
+
+    fn text_input_mut(&mut self, target: TextMenuTarget) -> &mut TextInputState {
+        match target {
+            TextMenuTarget::AddTrackName => &mut self.add_track_name_input,
+            TextMenuTarget::ProjectSwitcherSearch => &mut self.project_switcher_search_input,
+            TextMenuTarget::BrowserSearch => &mut self.browser_search_input,
+        }
+    }
+
+    fn text_input(&self, target: TextMenuTarget) -> &TextInputState {
+        match target {
+            TextMenuTarget::AddTrackName => &self.add_track_name_input,
+            TextMenuTarget::ProjectSwitcherSearch => &self.project_switcher_search_input,
+            TextMenuTarget::BrowserSearch => &self.browser_search_input,
+        }
+    }
+
+    fn sync_text_input_target(&mut self, target: TextMenuTarget) {
+        match target {
+            TextMenuTarget::AddTrackName => {
+                self.add_track_dialog.track_name = self.add_track_name_input.value.clone();
+            }
+            TextMenuTarget::ProjectSwitcherSearch => {
+                self.project_switcher.query = self.project_switcher_search_input.value.clone();
+                self.project_switcher.selected_index = 0;
+            }
+            TextMenuTarget::BrowserSearch => {
+                self.file_browser.set_filter(&self.browser_search_input.value);
+            }
+        }
+    }
+
+    fn text_input_has_focus(&self, window: &Window) -> bool {
+        self.add_track_name_input.is_focused(window)
+            || self.project_switcher_search_input.is_focused(window)
+            || self.browser_search_input.is_focused(window)
     }
 
     fn context_entries(
@@ -1486,19 +1822,48 @@ impl StudioLayout {
                     ContextMenuEntry::checked_item("Arm", "track:arm", armed),
                 ]
             }
-            ContextTarget::Browser(path) => vec![
-                ContextMenuEntry::item("Import to Timeline", "browser:import"),
-                ContextMenuEntry::disabled_item(
-                    if path.is_some() {
-                        "Reveal in Explorer/Finder"
+            ContextTarget::Browser(path_opt) => {
+                let mut entries = Vec::new();
+                if let Some(path) = path_opt {
+                    if path.is_dir() {
+                        let is_drive = path.parent().is_none();
+                        if is_drive {
+                            entries.push(ContextMenuEntry::item("Open Folder", "browser:reveal"));
+                            entries.push(ContextMenuEntry::item("Refresh", "browser:refresh"));
+                        } else {
+                            entries.push(ContextMenuEntry::item("Open", "browser:open"));
+                            entries.push(ContextMenuEntry::item("Reveal in Explorer/Finder", "browser:reveal"));
+                            entries.push(ContextMenuEntry::item("Refresh", "browser:refresh"));
+                            entries.push(ContextMenuEntry::disabled_item("New Folder", "browser:new-folder"));
+                            entries.push(ContextMenuEntry::disabled_item("Rename", "browser:rename"));
+                            entries.push(ContextMenuEntry::item("Copy Path", "browser:copy-path"));
+                        }
                     } else {
-                        "No file selected"
-                    },
-                    "browser:reveal",
-                ),
-                ContextMenuEntry::Separator,
-                ContextMenuEntry::item("Refresh", "browser:refresh"),
-            ],
+                        let ext = path
+                            .extension()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_ascii_lowercase())
+                            .unwrap_or_default();
+                        
+                        if is_supported_audio_ext(&ext) {
+                            entries.push(ContextMenuEntry::item("Import to Timeline", "browser:import"));
+                            entries.push(ContextMenuEntry::item("Reveal in Explorer/Finder", "browser:reveal"));
+                            entries.push(ContextMenuEntry::item("Copy Path", "browser:copy-path"));
+                            entries.push(ContextMenuEntry::disabled_item("Rename", "browser:rename"));
+                        } else if ext == "fbproj" {
+                            entries.push(ContextMenuEntry::item("Open Project", "project:open"));
+                            entries.push(ContextMenuEntry::item("Reveal in Explorer/Finder", "browser:reveal"));
+                            entries.push(ContextMenuEntry::item("Copy Path", "browser:copy-path"));
+                        } else {
+                            entries.push(ContextMenuEntry::item("Reveal in Explorer/Finder", "browser:reveal"));
+                            entries.push(ContextMenuEntry::item("Copy Path", "browser:copy-path"));
+                        }
+                    }
+                } else {
+                    entries.push(ContextMenuEntry::disabled_item("No file selected", "noop"));
+                }
+                entries
+            }
             ContextTarget::Mixer(_) => vec![
                 ContextMenuEntry::item("Reset Volume", "mixer:reset-volume"),
                 ContextMenuEntry::item("Reset Pan", "mixer:reset-pan"),
@@ -2122,6 +2487,27 @@ impl Render for StudioLayout {
         crate::perf::count("tracks", tracks.len() as u64);
 
         // ── File browser callbacks ──────────────────────────────────────
+        let on_browser_search_context: std::sync::Arc<
+            dyn Fn(&(f32, f32), &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |(x, y): &(f32, f32), _w, cx| {
+                let x = *x;
+                let y = *y;
+                let _ = this.update(cx, |this, cx| {
+                    this.menu_bar.open_menu_id = None;
+                    this.menu_bar.submenu_path.clear();
+                    this.project_switcher.is_open = false;
+                    this.text_context_menu = Some(TextContextMenu {
+                        target: TextMenuTarget::BrowserSearch,
+                        x,
+                        y,
+                    });
+                    cx.notify();
+                });
+            })
+        };
+
         let on_browser_toggle: std::sync::Arc<
             dyn Fn(&(String, Option<PathBuf>), &mut Window, &mut gpui::App) + 'static,
         > = {
@@ -2355,10 +2741,10 @@ impl Render for StudioLayout {
             dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
         > = {
             let this = cx.entity().clone();
-            std::sync::Arc::new(move |command: &String, _w, cx| {
+            std::sync::Arc::new(move |command: &String, w, cx| {
                 let command = command.clone();
                 let _ = this.update(cx, |this, cx| {
-                    this.dispatch_command_id(&command, cx);
+                    this.dispatch_command_id_from_bounds(&command, Some(w.bounds()), cx);
                     this.open_popover = None;
                     this.project_switcher.is_open = false;
                     cx.notify();
@@ -2367,16 +2753,19 @@ impl Render for StudioLayout {
         };
         let on_project_open: std::sync::Arc<dyn Fn(&f32, &mut Window, &mut gpui::App) + 'static> = {
             let this = cx.entity().clone();
-            std::sync::Arc::new(move |anchor_x: &f32, _w, cx| {
+            std::sync::Arc::new(move |anchor_x: &f32, w, cx| {
                 let anchor_x = *anchor_x;
                 let _ = this.update(cx, |this, cx| {
                     this.menu_bar.open_menu_id = None;
                     this.menu_bar.submenu_path.clear();
                     this.open_popover = None;
+                    this.text_context_menu = None;
                     this.project_switcher.is_open = !this.project_switcher.is_open;
                     this.project_switcher.anchor_x = anchor_x;
                     if this.project_switcher.is_open {
                         this.project_switcher.query.clear();
+                        this.project_switcher_search_input.set_value("");
+                        this.project_switcher_search_input.focus_handle.focus(w);
                         this.project_switcher.selected_index = 0;
                     }
                     cx.notify();
@@ -2411,6 +2800,7 @@ impl Render for StudioLayout {
                 let _ = this.update(cx, |this, cx| {
                     this.open_popover = None;
                     this.project_switcher.is_open = false;
+                    this.text_context_menu = None;
                     cx.notify();
                 });
             })
@@ -2419,10 +2809,10 @@ impl Render for StudioLayout {
             dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
         > = {
             let this = cx.entity().clone();
-            std::sync::Arc::new(move |command: &String, _w, cx| {
+            std::sync::Arc::new(move |command: &String, w, cx| {
                 let command = command.clone();
                 let _ = this.update(cx, |this, cx| {
-                    this.dispatch_command_id(&command, cx);
+                    this.dispatch_command_id_from_bounds(&command, Some(w.bounds()), cx);
                     this.open_popover = None;
                     this.project_switcher.is_open = false;
                     cx.notify();
@@ -2430,9 +2820,29 @@ impl Render for StudioLayout {
             })
         };
         let popover_overlay = if self.project_switcher.is_open {
+            let search_context_callbacks = TextInputCallbacks {
+                on_context_menu: Some(Arc::new({
+                    let this = cx.entity().clone();
+                    move |(x, y): &(f32, f32), _w, cx| {
+                        let x = *x;
+                        let y = *y;
+                        let _ = this.update(cx, |this, cx| {
+                            this.text_context_menu = Some(TextContextMenu {
+                                target: TextMenuTarget::ProjectSwitcherSearch,
+                                x,
+                                y,
+                            });
+                            cx.notify();
+                        });
+                    }
+                })),
+            };
             Some(
                 components::project_switcher::project_switcher_popover(
                     &self.project_switcher,
+                    &self.project_switcher_search_input,
+                    self.project_switcher_search_input.is_focused(window),
+                    search_context_callbacks,
                     viewport_width,
                     viewport_height,
                     on_popover_command.clone(),
@@ -2457,8 +2867,60 @@ impl Render for StudioLayout {
                 None => None,
             }
         };
+        let text_context_overlay = self.text_context_menu.map(|menu| {
+            let clipboard_has_text = cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .is_some_and(|text| !text.is_empty());
+            let entries =
+                text_input_context_entries(self.text_input(menu.target), clipboard_has_text);
+            let command_target = cx.entity().clone();
+            let close_target = cx.entity().clone();
+            components::context_menu::context_menu_overlay(
+                entries,
+                menu.x,
+                menu.y,
+                viewport_width,
+                viewport_height,
+                Arc::new(move |command: &String, _window, cx| {
+                    let command = command.clone();
+                    let _ = command_target.update(cx, |this, cx| {
+                        if let Some(menu) = this.text_context_menu {
+                            let input = this.text_input_mut(menu.target);
+                            let _ = input.apply_context_command(&command, cx);
+                            this.sync_text_input_target(menu.target);
+                        }
+                        this.text_context_menu = None;
+                        cx.notify();
+                    });
+                }),
+                Arc::new(move |_: &(), _window, cx| {
+                    let _ = close_target.update(cx, |this, cx| {
+                        this.text_context_menu = None;
+                        cx.notify();
+                    });
+                }),
+            )
+        });
         let add_track_overlay = if self.add_track_dialog.is_open {
             let target = cx.entity().clone();
+            let track_name_callbacks = TextInputCallbacks {
+                on_context_menu: Some(Arc::new({
+                    let target = target.clone();
+                    move |(x, y): &(f32, f32), _w, cx| {
+                        let x = *x;
+                        let y = *y;
+                        let _ = target.update(cx, |this, cx| {
+                            this.text_context_menu = Some(TextContextMenu {
+                                target: TextMenuTarget::AddTrackName,
+                                x,
+                                y,
+                            });
+                            cx.notify();
+                        });
+                    }
+                })),
+            };
             let callbacks = AddTrackDialogCallbacks {
                 on_close: Arc::new({
                     let target = target.clone();
@@ -2535,116 +2997,12 @@ impl Render for StudioLayout {
                     }
                 }),
             };
-            Some(add_track_dialog(&self.add_track_dialog, callbacks).into_any_element())
-        } else {
-            None
-        };
-
-        let wizard_overlay = if self.project_wizard.is_open {
-            let name_focused = self.wizard_name_input.focus_handle.is_focused(window);
-            let bpm_focused = self.wizard_bpm_input.focus_handle.is_focused(window);
-            let name_input = self.wizard_name_input.clone();
-            let bpm_input = self.wizard_bpm_input.clone();
-            let target = cx.entity().clone();
-            let callbacks = ProjectWizardCallbacks {
-                on_close: Arc::new({
-                    let target = target.clone();
-                    move |_, _, cx| {
-                        let _ = target.update(cx, |this, _cx| this.close_project_wizard());
-                    }
-                }),
-                on_create: Arc::new({
-                    let target = target.clone();
-                    move |result: &ProjectWizardResult, _, cx| {
-                        let result = result.clone();
-                        let _ = target.update(cx, |this, cx| {
-                            this.on_project_created(&result, cx);
-                        });
-                    }
-                }),
-                on_template: Arc::new({
-                    let target = target.clone();
-                    move |tmpl: &ProjectTemplate, _, cx| {
-                        let tmpl = *tmpl;
-                        let _ = target.update(cx, |this, cx| {
-                            this.project_wizard.apply_template(tmpl);
-                            cx.notify();
-                        });
-                    }
-                }),
-                on_bpm_step: Arc::new({
-                    let target = target.clone();
-                    move |delta: &i32, _, cx| {
-                        let delta = *delta;
-                        let _ = target.update(cx, |this, cx| {
-                            let current = this.project_wizard.bpm() as f32;
-                            let new_bpm = (current + delta as f32).clamp(20.0, 999.0);
-                            let text = format!("{:.0}", new_bpm);
-                            this.project_wizard.bpm_text = text.clone();
-                            this.wizard_bpm_input.set_value(text);
-                            cx.notify();
-                        });
-                    }
-                }),
-                on_time_sig_num: Arc::new({
-                    let target = target.clone();
-                    move |n: &u32, _, cx| {
-                        let n = *n;
-                        let _ = target.update(cx, |this, cx| {
-                            this.project_wizard.time_sig_num = n;
-                            cx.notify();
-                        });
-                    }
-                }),
-                on_time_sig_den: Arc::new({
-                    let target = target.clone();
-                    move |d: &u32, _, cx| {
-                        let d = *d;
-                        let _ = target.update(cx, |this, cx| {
-                            this.project_wizard.time_sig_den = d;
-                            cx.notify();
-                        });
-                    }
-                }),
-                on_sample_rate: Arc::new({
-                    let target = target.clone();
-                    move |sr: &u32, _, cx| {
-                        let sr = *sr;
-                        let _ = target.update(cx, |this, cx| {
-                            this.project_wizard.sample_rate = sr;
-                            cx.notify();
-                        });
-                    }
-                }),
-                on_browse_location: Arc::new({
-                    let target = target.clone();
-                    move |_, _window, cx| {
-                        let current = target.read(cx).project_wizard.location.clone();
-                        let fut = rfd::AsyncFileDialog::new()
-                            .set_title("Choose Project Location")
-                            .set_directory(&current)
-                            .pick_folder();
-                        let target2 = target.clone();
-                        cx.spawn(async move |cx| {
-                            if let Some(handle) = fut.await {
-                                let path = handle.path().to_path_buf();
-                                let _ = target2.update(cx, |this, cx| {
-                                    this.project_wizard.location = path;
-                                    cx.notify();
-                                });
-                            }
-                        })
-                        .detach();
-                    }
-                }),
-            };
             Some(
-                components::project_wizard(
-                    &self.project_wizard,
-                    &name_input,
-                    name_focused,
-                    &bpm_input,
-                    bpm_focused,
+                add_track_dialog(
+                    &self.add_track_dialog,
+                    &self.add_track_name_input,
+                    self.add_track_name_input.is_focused(window),
+                    track_name_callbacks,
                     callbacks,
                 )
                 .into_any_element(),
@@ -2691,56 +3049,20 @@ impl Render for StudioLayout {
             .bg(Colors::surface_base())
             .font_family(theme::FONT_FAMILY)
             .capture_key_down(move |event, window, cx| {
-                // ── Wizard text input routing ─────────────────────────────
-                // When the wizard is open and a text field has focus, route
-                // keys to it before any global shortcut handling so that
-                // spacebar doesn't start playback, letters don't trigger
-                // commands, etc.
-                // Check focus BEFORE the mutable update borrow (requires &Window).
-                let (wizard_open, name_focused, bpm_focused) = {
-                    let layout = shortcut_target.read(cx);
-                    let open = layout.project_wizard.is_open;
-                    let nf = layout.wizard_name_input.focus_handle.is_focused(window);
-                    let bf = layout.wizard_bpm_input.focus_handle.is_focused(window);
-                    (open, nf, bf)
-                };
-                let wizard_consumed = if wizard_open && (name_focused || bpm_focused) {
-                    shortcut_target.update(cx, |this, cx| {
-                        let input = if name_focused {
-                            &mut this.wizard_name_input
-                        } else {
-                            &mut this.wizard_bpm_input
-                        };
-                        let action = input.handle_key(event);
-                        // Keep wizard state in sync so result()/is_valid() see current text.
-                        this.project_wizard.name = this.wizard_name_input.value.clone();
-                        this.project_wizard.bpm_text = this.wizard_bpm_input.value.clone();
-                        match action {
-                            TextInputAction::Cancel => {
-                                this.close_project_wizard();
-                            }
-                            TextInputAction::Submit | TextInputAction::Consumed => {}
-                            TextInputAction::Pass => {}
-                        }
-                        cx.notify();
-                        action != TextInputAction::Pass
-                    })
-                } else {
-                    false
-                };
-                if wizard_consumed {
-                    return;
-                }
-
                 let handled = shortcut_target.update(cx, |this, cx| {
-                    let handled = this.handle_add_track_dialog_key(event, cx)
-                        || this.handle_project_switcher_key(event, cx);
+                    let handled = this.handle_add_track_dialog_key(event, window, cx)
+                        || this.handle_project_switcher_key(event, window, cx)
+                        || this.handle_browser_key(event, window, cx);
                     if handled {
                         cx.notify();
                     }
                     handled
                 });
                 if handled {
+                    return;
+                }
+                if shortcut_target.read(cx).text_input_has_focus(window) && is_text_input_key(event)
+                {
                     return;
                 }
                 if event.keystroke.key.as_str() == "escape" {
@@ -2754,15 +3076,15 @@ impl Render for StudioLayout {
                         this.menu_bar.open_menu_id = None;
                         this.menu_bar.submenu_path.clear();
                         this.open_popover = None;
+                        this.text_context_menu = None;
                         this.project_switcher.is_open = false;
-                        this.project_wizard.is_open = false;
                         cx.notify();
                     });
                     return;
                 }
                 if let Some(command_id) = Self::shortcut_command_id(event) {
                     let _ = shortcut_target.update(cx, |this, cx| {
-                        this.dispatch_command_id(command_id, cx);
+                        this.dispatch_command_id_from_bounds(command_id, Some(window.bounds()), cx);
                         cx.notify();
                     });
                 }
@@ -2794,6 +3116,9 @@ impl Render for StudioLayout {
                         components::sidebar(
                             &file_browser,
                             browser_scroll,
+                            &self.browser_search_input,
+                            self.browser_search_input.is_focused(window),
+                            on_browser_search_context,
                             on_browser_toggle,
                             on_browser_select,
                             on_browser_activate,
@@ -2837,7 +3162,7 @@ impl Render for StudioLayout {
             .children(dropdown_overlay)
             .children(popover_overlay)
             .children(add_track_overlay)
-            .children(wizard_overlay)
+            .children(text_context_overlay)
     }
 }
 
@@ -2989,6 +3314,29 @@ fn transport_command_from_id(command_id: &str) -> Option<TransportCommand> {
     }
 }
 
+fn is_text_input_key(event: &KeyDownEvent) -> bool {
+    let key = event.keystroke.key.as_str();
+    let mods = event.keystroke.modifiers;
+    if (mods.control || mods.platform) && !mods.alt && !mods.function {
+        return matches!(key, "a" | "A" | "c" | "C" | "v" | "V" | "x" | "X");
+    }
+    if mods.control || mods.alt || mods.platform || mods.function {
+        return false;
+    }
+    matches!(
+        key,
+        "backspace"
+            | "delete"
+            | "left"
+            | "arrow_left"
+            | "right"
+            | "arrow_right"
+            | "home"
+            | "end"
+            | "space"
+    ) || key.chars().count() == 1
+}
+
 fn normalize_command_id(command_id: &str) -> String {
     command_id.trim().replace('.', ":").replace('_', "-")
 }
@@ -3064,4 +3412,37 @@ fn find_clip_summary<'a>(
         }
     }
     None
+}
+
+fn reveal_path(path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    {
+        if path.is_file() {
+            let _ = std::process::Command::new("explorer")
+                .arg(format!("/select,\"{}\"", path.display()))
+                .spawn();
+        } else {
+            let _ = std::process::Command::new("explorer")
+                .arg(format!("\"{}\"", path.display()))
+                .spawn();
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg(if path.is_file() { "-R" } else { "" })
+            .arg(path)
+            .spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let parent = if path.is_file() {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        };
+        let _ = std::process::Command::new("xdg-open")
+            .arg(parent)
+            .spawn();
+    }
 }

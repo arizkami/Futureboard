@@ -14,9 +14,9 @@
 //!
 //! GPUI has no first-class SVG-path primitive for runtime arc generation, so
 //! the arc is approximated by densely packing 2 px accent dots along the
-//! parametric arc. At step ≤ 4° the dots overlap visually and read as a
-//! continuous stroke, which matches the web component's look at the sizes
-//! the mixer uses.
+//!   parametric arc. At step ≤ 4° the dots overlap visually and read as a
+//!   continuous stroke, which matches the web component's look at the sizes
+//!   the mixer uses.
 //!
 //! Interaction (also copied from the web component):
 //! * vertical drag: (startY − currentY) / 150 × range. Up = positive.
@@ -28,7 +28,7 @@
 use std::f32::consts::PI;
 
 use gpui::{
-    div, px, rgba, App, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement,
+    div, px, App, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement,
     ParentElement, Render, StatefulInteractiveElement, Styled, Window,
 };
 
@@ -200,8 +200,6 @@ fn render_knob(
     }
 
     // ── Disk children: body strokes drawn via two stacked rounded divs ──
-    // GPUI lacks a Canvas/Path primitive here, so the dark body is one
-    // bordered circle div and the rim/arc/dots live on top of it.
     let body = div()
         .absolute()
         .left(px(0.0))
@@ -209,9 +207,9 @@ fn render_knob(
         .w(px(size))
         .h(px(size))
         .rounded_full()
-        .bg(rgba(0x17191DFF_u32))
+        .bg(Colors::knob_bg())
         .border(px(1.5))
-        .border_color(rgba(0x3A424CFF_u32));
+        .border_color(Colors::border_strong());
 
     // Center tick at 12 o'clock for bipolar knobs (#56616e, 1.5 px wide).
     let center_tick = if bipolar {
@@ -223,7 +221,7 @@ fn render_knob(
                 .w(px(1.5))
                 .h(px(3.0))
                 .rounded_sm()
-                .bg(rgba(0x56616EFF_u32)),
+                .bg(Colors::text_muted()),
         )
     } else {
         None
@@ -247,7 +245,7 @@ fn render_knob(
         .w(px(5.0))
         .h(px(5.0))
         .rounded_full()
-        .bg(rgba(0x56616EFF_u32));
+        .bg(Colors::text_muted());
 
     let disk = div()
         .id(gpui::ElementId::Name(id.clone()))

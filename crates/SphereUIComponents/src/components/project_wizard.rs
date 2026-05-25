@@ -1,17 +1,109 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, rgba, svg, App, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, Window,
+    div, px, rgba, size, svg, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement,
+    IntoElement, KeyDownEvent, MouseButton, ParentElement, Point, Render,
+    StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowDecorations, WindowHandle, WindowKind, WindowOptions,
 };
 
 use crate::assets;
-use crate::components::text_input::{text_field, TextInputState};
-use crate::theme::Colors;
+use crate::components::combo_box::{combo_box_menu, combo_box_trigger, ComboBoxOption};
+use crate::components::context_menu::context_menu_overlay;
+use crate::components::controls::{
+    fb_button, fb_form_row, fb_section_label, fb_stepper_button, FbButtonKind,
+};
+use crate::components::text_input::{
+    text_field_with_callbacks, text_input_context_entries, TextInputAction, TextInputCallbacks,
+    TextInputState,
+};
+use crate::theme::{self, Colors};
 
-// ── Template presets ──────────────────────────────────────────────────────────
+const WIZARD_WIDTH: f32 = 900.0;
+const WIZARD_HEIGHT: f32 = 620.0;
+const SETTINGS_COMBO_LEFT: f32 = 682.0;
+const SETTINGS_COMBO_WIDTH: f32 = 170.0;
+const TIME_SIG_MENU_TOP: f32 = 181.0;
+const BEAT_GRID_MENU_TOP: f32 = 227.0;
+const SAMPLE_RATE_MENU_TOP: f32 = 273.0;
+
+const TIME_SIGNATURE_OPTIONS: &[ComboBoxOption<(u32, u32)>] = &[
+    ComboBoxOption {
+        label: "4/4",
+        value: (4, 4),
+    },
+    ComboBoxOption {
+        label: "3/4",
+        value: (3, 4),
+    },
+    ComboBoxOption {
+        label: "2/4",
+        value: (2, 4),
+    },
+    ComboBoxOption {
+        label: "6/8",
+        value: (6, 8),
+    },
+    ComboBoxOption {
+        label: "7/8",
+        value: (7, 8),
+    },
+    ComboBoxOption {
+        label: "12/8",
+        value: (12, 8),
+    },
+];
+
+const BEAT_GRID_OPTIONS: &[ComboBoxOption<u32>] = &[
+    ComboBoxOption {
+        label: "1/4",
+        value: 4,
+    },
+    ComboBoxOption {
+        label: "1/8",
+        value: 8,
+    },
+    ComboBoxOption {
+        label: "1/16",
+        value: 16,
+    },
+    ComboBoxOption {
+        label: "1/32",
+        value: 32,
+    },
+];
+
+const SAMPLE_RATE_OPTIONS: &[ComboBoxOption<u32>] = &[
+    ComboBoxOption {
+        label: "44.1 kHz",
+        value: 44100,
+    },
+    ComboBoxOption {
+        label: "48 kHz",
+        value: 48000,
+    },
+    ComboBoxOption {
+        label: "88.2 kHz",
+        value: 88200,
+    },
+    ComboBoxOption {
+        label: "96 kHz",
+        value: 96000,
+    },
+    ComboBoxOption {
+        label: "192 kHz",
+        value: 192000,
+    },
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WizardCombo {
+    TimeSignature,
+    BeatGrid,
+    SampleRate,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectTemplate {
@@ -33,13 +125,23 @@ impl ProjectTemplate {
         }
     }
 
-    pub fn subtitle(self) -> &'static str {
+    pub fn description(self) -> &'static str {
         match self {
-            Self::Empty => "Blank canvas",
-            Self::Recording => "4 audio tracks",
-            Self::BeatMaking => "4 MIDI tracks",
-            Self::Mixing => "8 audio tracks",
-            Self::Scoring => "8 MIDI tracks",
+            Self::Empty => "A clean session with the master bus ready.",
+            Self::Recording => "Audio tracks, monitoring, and record-ready routing.",
+            Self::BeatMaking => "MIDI lanes for drums, bass, keys, and texture.",
+            Self::Mixing => "Audio channels organized for edit and mix work.",
+            Self::Scoring => "MIDI-first layout for cues and arrangement sketches.",
+        }
+    }
+
+    pub fn metadata(self) -> &'static str {
+        match self {
+            Self::Empty => "No tracks | 120 BPM",
+            Self::Recording => "4 audio | 120 BPM",
+            Self::BeatMaking => "4 MIDI | 140 BPM",
+            Self::Mixing => "8 audio | 120 BPM",
+            Self::Scoring => "8 MIDI | 120 BPM",
         }
     }
 
@@ -90,8 +192,6 @@ impl ProjectTemplate {
     }
 }
 
-// ── Result ────────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct ProjectWizardResult {
     pub name: String,
@@ -103,19 +203,18 @@ pub struct ProjectWizardResult {
     pub sample_rate: u32,
 }
 
-// ── State ─────────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct ProjectWizardState {
     pub is_open: bool,
     pub name: String,
     pub location: PathBuf,
     pub template: ProjectTemplate,
-    /// String form for the BPM text input.
     pub bpm_text: String,
     pub time_sig_num: u32,
     pub time_sig_den: u32,
     pub sample_rate: u32,
+    pub beat_value: u32,
+    pub error: Option<String>,
 }
 
 impl ProjectWizardState {
@@ -129,6 +228,8 @@ impl ProjectWizardState {
             time_sig_num: 4,
             time_sig_den: 4,
             sample_rate: 48000,
+            beat_value: 4,
+            error: None,
         }
     }
 
@@ -146,13 +247,10 @@ impl ProjectWizardState {
             .clamp(20.0, 300.0)
     }
 
-    pub fn is_valid(&self) -> bool {
-        !self.name.trim().is_empty() && self.bpm() >= 20.0
-    }
-
     pub fn apply_template(&mut self, t: ProjectTemplate) {
         self.template = t;
-        self.bpm_text = t.default_bpm().to_string();
+        self.bpm_text = format!("{:.0}", t.default_bpm());
+        self.error = None;
     }
 
     pub fn result(&self) -> ProjectWizardResult {
@@ -166,602 +264,1030 @@ impl ProjectWizardState {
             sample_rate: self.sample_rate,
         }
     }
+
+    pub fn validation_error(&self) -> Option<String> {
+        validate_project_result(&self.result())
+    }
 }
 
-// ── Callbacks ─────────────────────────────────────────────────────────────────
+pub type ProjectCreateCallback =
+    Arc<dyn Fn(ProjectWizardResult, &mut App) -> Result<(), String> + 'static>;
 
-pub struct ProjectWizardCallbacks {
-    pub on_close: Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>,
-    pub on_create: Arc<dyn Fn(&ProjectWizardResult, &mut Window, &mut App) + 'static>,
-    pub on_template: Arc<dyn Fn(&ProjectTemplate, &mut Window, &mut App) + 'static>,
-    /// Stepper delta: +1 or −1 (or ±5 for shift+click in the future).
-    pub on_bpm_step: Arc<dyn Fn(&i32, &mut Window, &mut App) + 'static>,
-    pub on_time_sig_num: Arc<dyn Fn(&u32, &mut Window, &mut App) + 'static>,
-    pub on_time_sig_den: Arc<dyn Fn(&u32, &mut Window, &mut App) + 'static>,
-    pub on_sample_rate: Arc<dyn Fn(&u32, &mut Window, &mut App) + 'static>,
-    pub on_browse_location: Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>,
+pub struct ProjectWizardWindow {
+    state: ProjectWizardState,
+    name_input: TextInputState,
+    location_input: TextInputState,
+    bpm_input: TextInputState,
+    focus_handle: FocusHandle,
+    open_combo: Option<WizardCombo>,
+    text_menu: Option<WizardTextMenu>,
+    on_create: ProjectCreateCallback,
 }
 
-// ── Sub-components ────────────────────────────────────────────────────────────
-
-fn section_label(text: &'static str) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .mb(px(8.0))
-        .child(
-            div()
-                .text_size(px(9.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(rgba(0x4A556680))
-                .child(text),
-        )
-        .child(div().flex_1().h(px(1.0)).bg(rgba(0xFFFFFF08)))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WizardTextTarget {
+    Name,
+    Location,
+    Bpm,
 }
 
-fn field_row(label: &'static str, child: impl IntoElement) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(10.0))
-        .h(px(32.0))
-        .child(
-            div()
-                .w(px(84.0))
-                .flex_shrink_0()
-                .text_size(px(10.5))
-                .text_color(rgba(0x8090A8CC))
-                .child(label),
-        )
-        .child(child)
+#[derive(Clone, Copy, Debug)]
+struct WizardTextMenu {
+    target: WizardTextTarget,
+    x: f32,
+    y: f32,
+}
+
+impl ProjectWizardWindow {
+    pub fn new(on_create: ProjectCreateCallback, cx: &mut Context<Self>) -> Self {
+        let mut state = ProjectWizardState::open();
+        let mut name_input =
+            TextInputState::new("wizard-project-name", cx.focus_handle()).with_placeholder("Name");
+        name_input.set_value(state.name.clone());
+        name_input.select_all();
+
+        let mut location_input = TextInputState::new("wizard-project-location", cx.focus_handle())
+            .with_placeholder("~/Documents/Futureboard Studio/Projects");
+        location_input.set_value(state.location.to_string_lossy().to_string());
+
+        let mut bpm_input =
+            TextInputState::new("wizard-project-bpm", cx.focus_handle()).with_placeholder("120");
+        bpm_input.set_value(state.bpm_text.clone());
+
+        state.error = state.validation_error();
+        Self {
+            state,
+            name_input,
+            location_input,
+            bpm_input,
+            focus_handle: cx.focus_handle(),
+            open_combo: None,
+            text_menu: None,
+            on_create,
+        }
+    }
+
+    fn sync_inputs_to_state(&mut self) {
+        self.state.name = self.name_input.value.clone();
+        self.state.location = PathBuf::from(self.location_input.value.trim());
+        self.state.bpm_text = self.bpm_input.value.clone();
+        self.state.error = self.state.validation_error();
+    }
+
+    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_inputs_to_state();
+        if let Some(error) = self.state.validation_error() {
+            self.state.error = Some(error);
+            cx.notify();
+            return;
+        }
+
+        match (self.on_create)(self.state.result(), cx) {
+            Ok(()) => window.remove_window(),
+            Err(error) => {
+                self.state.error = Some(error);
+                cx.notify();
+            }
+        }
+    }
+
+    fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.keystroke.key.as_str() == "escape" && self.text_menu.take().is_some() {
+            cx.notify();
+            return;
+        }
+
+        let name_focused = self.name_input.is_focused(window);
+        let location_focused = self.location_input.is_focused(window);
+        let bpm_focused = self.bpm_input.is_focused(window);
+
+        if name_focused || location_focused || bpm_focused {
+            let action = if name_focused {
+                self.name_input.handle_key_with_clipboard(event, Some(cx))
+            } else if location_focused {
+                self.location_input
+                    .handle_key_with_clipboard(event, Some(cx))
+            } else {
+                self.bpm_input.handle_key_with_clipboard(event, Some(cx))
+            };
+            self.sync_inputs_to_state();
+            match action {
+                TextInputAction::Submit => self.submit(window, cx),
+                TextInputAction::Cancel => window.remove_window(),
+                TextInputAction::Consumed | TextInputAction::Pass => cx.notify(),
+            }
+            return;
+        }
+
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                if self.open_combo.take().is_some() {
+                    cx.notify();
+                } else {
+                    window.remove_window();
+                }
+            }
+            "enter" | "numpad_enter" => self.submit(window, cx),
+            _ => {}
+        }
+    }
+
+    fn text_input_mut(&mut self, target: WizardTextTarget) -> &mut TextInputState {
+        match target {
+            WizardTextTarget::Name => &mut self.name_input,
+            WizardTextTarget::Location => &mut self.location_input,
+            WizardTextTarget::Bpm => &mut self.bpm_input,
+        }
+    }
+
+    fn text_input(&self, target: WizardTextTarget) -> &TextInputState {
+        match target {
+            WizardTextTarget::Name => &self.name_input,
+            WizardTextTarget::Location => &self.location_input,
+            WizardTextTarget::Bpm => &self.bpm_input,
+        }
+    }
+}
+
+pub fn open_project_wizard_window(
+    owner_bounds: Bounds<gpui::Pixels>,
+    on_create: ProjectCreateCallback,
+    cx: &mut App,
+) -> Result<WindowHandle<ProjectWizardWindow>, String> {
+    let parent_x: f32 = owner_bounds.origin.x.into();
+    let parent_y: f32 = owner_bounds.origin.y.into();
+    let parent_w: f32 = owner_bounds.size.width.into();
+    let parent_h: f32 = owner_bounds.size.height.into();
+    let origin = Point {
+        x: px(parent_x + ((parent_w - WIZARD_WIDTH) / 2.0).max(24.0)),
+        y: px(parent_y + ((parent_h - WIZARD_HEIGHT) / 2.0).max(24.0)),
+    };
+
+    cx.open_window(
+        WindowOptions {
+            titlebar: Some(TitlebarOptions {
+                title: None,
+                appears_transparent: true,
+                traffic_light_position: None,
+            }),
+            window_bounds: Some(WindowBounds::Windowed(Bounds {
+                origin,
+                size: size(px(WIZARD_WIDTH), px(WIZARD_HEIGHT)),
+            })),
+            focus: true,
+            show: true,
+            kind: WindowKind::Floating,
+            is_movable: true,
+            is_resizable: false,
+            is_minimizable: false,
+            window_background: WindowBackgroundAppearance::Transparent,
+            window_decorations: Some(WindowDecorations::Client),
+            window_min_size: Some(size(px(WIZARD_WIDTH), px(WIZARD_HEIGHT))),
+            ..Default::default()
+        },
+        |_window, cx| cx.new(|cx| ProjectWizardWindow::new(on_create, cx)),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn validate_project_result(result: &ProjectWizardResult) -> Option<String> {
+    let name = result.name.trim();
+    if name.is_empty() {
+        return Some("Project name is required.".to_string());
+    }
+    if result.location.as_os_str().is_empty() {
+        return Some("Choose a project location.".to_string());
+    }
+    if !is_path_usable(&result.location) {
+        return Some("Project location is not a valid folder path.".to_string());
+    }
+    if result.bpm < 20.0 || result.bpm > 300.0 {
+        return Some("Tempo must be between 20 and 300 BPM.".to_string());
+    }
+
+    let folder = result
+        .location
+        .join(crate::project::sanitize_project_name(name));
+    if folder.exists() {
+        return Some("A project with this name already exists at that location.".to_string());
+    }
+    None
+}
+
+fn is_path_usable(path: &Path) -> bool {
+    !path
+        .components()
+        .any(|component| component.as_os_str().is_empty())
+}
+
+fn icon(path: &'static str, size_px: f32, color: gpui::Rgba) -> impl IntoElement {
+    svg()
+        .path(path)
+        .w(px(size_px))
+        .h(px(size_px))
+        .text_color(color)
+}
+
+fn section_label(label: &'static str) -> impl IntoElement {
+    fb_section_label(label)
 }
 
 fn template_card(
     tmpl: ProjectTemplate,
     active: bool,
+    disabled: bool,
     index: usize,
-    cb: Arc<dyn Fn(&ProjectTemplate, &mut Window, &mut App) + 'static>,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let border = if active {
-        rgba(0x5FCED0B0)
-    } else {
-        rgba(0xFFFFFF0F)
-    };
     let bg = if active {
-        rgba(0x0D2030FF)
+        Colors::accent_muted()
     } else {
-        rgba(0x12161EFF)
+        Colors::surface_card()
     };
-    let icon_color = if active {
-        Colors::accent_primary()
+    let border = if active {
+        Colors::border_accent()
     } else {
-        rgba(0x5A6A8080)
-    };
-    let name_color = if active {
-        Colors::text_primary()
-    } else {
-        rgba(0xB0C0D0CC)
+        Colors::border_subtle()
     };
 
     div()
-        .id(("wizard-tmpl", index))
+        .id(("project-template", index))
+        .relative()
         .flex()
         .flex_col()
-        .items_start()
         .justify_between()
-        .flex_1()
-        .h(px(78.0))
-        .rounded_lg()
+        .gap(px(9.0))
+        .h(px(94.0))
+        .rounded_md()
         .border(px(1.0))
         .border_color(border)
         .bg(bg)
-        .px(px(10.0))
-        .py(px(10.0))
-        .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|s| s.bg(rgba(0x16202EFF)).border_color(rgba(0xFFFFFF1E)))
-        .on_click(move |_, window, cx| cb(&tmpl, window, cx))
-        // Top: icon
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(26.0))
-                .h(px(26.0))
-                .rounded_md()
-                .bg(if active {
-                    rgba(0x5FCED018)
-                } else {
-                    rgba(0xFFFFFF08)
+        .px(px(12.0))
+        .py(px(11.0))
+        .opacity(if disabled { 0.42 } else { 1.0 })
+        .when(!disabled, |this| {
+            this.cursor(gpui::CursorStyle::PointingHand)
+                .hover(|s| {
+                    s.bg(Colors::surface_control_hover())
+                        .border_color(Colors::border_strong())
                 })
-                .child(
-                    svg()
-                        .path(tmpl.icon_path())
-                        .w(px(13.0))
-                        .h(px(13.0))
-                        .text_color(icon_color),
-                ),
-        )
-        // Bottom: name + subtitle
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(1.0))
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(name_color)
-                        .child(tmpl.label()),
-                )
-                .child(
-                    div()
-                        .text_size(px(9.0))
-                        .text_color(rgba(0x4A556660))
-                        .child(tmpl.subtitle()),
-                ),
-        )
-}
-
-fn seg_button(
-    label: &'static str,
-    active: bool,
-    id: impl Into<gpui::ElementId>,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_center()
-        .h(px(26.0))
-        .px(px(9.0))
-        .min_w(px(28.0))
-        .rounded_md()
-        .border(px(1.0))
-        .border_color(if active {
-            rgba(0x5FCED080)
-        } else {
-            rgba(0xFFFFFF10)
+                .on_click(on_click)
         })
-        .bg(if active {
-            rgba(0x5FCED018)
-        } else {
-            rgba(0x0E1117FF)
-        })
-        .text_size(px(10.5))
-        .font_weight(if active {
-            gpui::FontWeight::SEMIBOLD
-        } else {
-            gpui::FontWeight::NORMAL
-        })
-        .text_color(if active {
-            Colors::text_primary()
-        } else {
-            rgba(0x7080A0AA)
-        })
-        .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|s| s.bg(rgba(0x1A2030FF)).border_color(rgba(0xFFFFFF1A)))
-        .on_click(on_click)
-        .child(label)
-}
-
-fn stepper_btn(
-    label: &'static str,
-    id: &'static str,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(px(24.0))
-        .h(px(26.0))
-        .rounded_md()
-        .border(px(1.0))
-        .border_color(rgba(0xFFFFFF10))
-        .bg(rgba(0x0E1117FF))
-        .text_size(px(13.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(rgba(0x7080A0CC))
-        .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|s| s.bg(rgba(0x1A2030FF)).border_color(rgba(0xFFFFFF18)))
-        .on_click(on_click)
-        .child(label)
-}
-
-// ── Main ──────────────────────────────────────────────────────────────────────
-
-/// Render the New Project wizard overlay.
-///
-/// `name_input` and `bpm_input` are the live text-input states from `StudioLayout`.
-/// `name_focused` / `bpm_focused` are `focus_handle.is_focused(cx)` computed
-/// by the caller.
-pub fn project_wizard(
-    state: &ProjectWizardState,
-    name_input: &TextInputState,
-    name_focused: bool,
-    bpm_input: &TextInputState,
-    bpm_focused: bool,
-    callbacks: ProjectWizardCallbacks,
-) -> impl IntoElement {
-    let close_backdrop = callbacks.on_close.clone();
-    let close_btn = callbacks.on_close.clone();
-    let create_cb = callbacks.on_create.clone();
-    let result = state.result();
-    let can_create = state.is_valid();
-
-    // ── Template row ──────────────────────────────────────────────────────────
-    let template_row = {
-        let mut row = div().flex().flex_row().gap(px(5.0));
-        for (i, tmpl) in ProjectTemplate::all().into_iter().enumerate() {
-            let active = state.template == tmpl;
-            let cb = callbacks.on_template.clone();
-            row = row.child(template_card(tmpl, active, i, cb));
-        }
-        row
-    };
-
-    // ── Time sig presets ──────────────────────────────────────────────────────
-    // Common numerators
-    let numerators: &[u32] = &[2, 3, 4, 5, 6, 7, 8];
-    let denominators: &[u32] = &[4, 8, 16];
-    let sample_rates: &[(u32, &str)] = &[
-        (44100, "44.1 kHz"),
-        (48000, "48 kHz"),
-        (88200, "88.2 kHz"),
-        (96000, "96 kHz"),
-    ];
-
-    let num_row = {
-        let mut row = div().flex().flex_row().gap(px(3.0));
-        for &n in numerators {
-            let cb = callbacks.on_time_sig_num.clone();
-            let active = state.time_sig_num == n;
-            row = row.child(seg_button(
-                Box::leak(n.to_string().into_boxed_str()),
-                active,
-                ("wizard-tsn", n),
-                move |_, w, cx| cb(&n, w, cx),
-            ));
-        }
-        row
-    };
-    let den_row = {
-        let mut row = div().flex().flex_row().gap(px(3.0));
-        for &d in denominators {
-            let cb = callbacks.on_time_sig_den.clone();
-            let active = state.time_sig_den == d;
-            row = row.child(seg_button(
-                Box::leak(d.to_string().into_boxed_str()),
-                active,
-                ("wizard-tsd", d),
-                move |_, w, cx| cb(&d, w, cx),
-            ));
-        }
-        row
-    };
-    let rate_row = {
-        let mut row = div().flex().flex_row().gap(px(3.0));
-        for &(sr, label) in sample_rates {
-            let cb = callbacks.on_sample_rate.clone();
-            let active = state.sample_rate == sr;
-            row = row.child(seg_button(
-                label,
-                active,
-                ("wizard-sr", sr),
-                move |_, w, cx| cb(&sr, w, cx),
-            ));
-        }
-        row
-    };
-
-    // ── BPM stepper ───────────────────────────────────────────────────────────
-    let bpm_dec = callbacks.on_bpm_step.clone();
-    let bpm_inc = callbacks.on_bpm_step.clone();
-
-    div()
-        .absolute()
-        .top_0()
-        .bottom_0()
-        .left_0()
-        .right_0()
-        .flex()
-        .items_start()
-        .justify_center()
-        .pt(px(44.0))
-        .px(px(18.0))
-        .pb(px(32.0))
-        .id("project-wizard-overlay")
-        .bg(rgba(0x00000055))
-        .occlude()
-        .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-            close_backdrop(&(), window, cx);
+        .when(active, |this| {
+            this.shadow_sm().child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(2.0))
+                    .bg(Colors::with_alpha(Colors::accent_primary(), 0.44)),
+            )
         })
         .child(
             div()
                 .flex()
-                .flex_col()
-                .w(px(560.0))
-                .max_w(px(560.0))
-                .overflow_hidden()
-                .rounded_xl()
-                .border(px(1.0))
-                .border_color(rgba(0xFFFFFF14))
-                .bg(rgba(0x161B24FF))
-                .shadow_xl()
-                .on_mouse_down(gpui::MouseButton::Left, |_, _w, cx| cx.stop_propagation())
-                // ── Title bar ─────────────────────────────────────────────
+                .flex_row()
+                .items_center()
+                .gap(px(9.0))
                 .child(
                     div()
                         .flex()
-                        .flex_row()
                         .items_center()
-                        .justify_between()
-                        .h(px(42.0))
-                        .px(px(18.0))
-                        .border_b(px(1.0))
-                        .border_color(rgba(0xFFFFFF0A))
+                        .justify_center()
+                        .w(px(28.0))
+                        .h(px(28.0))
+                        .rounded_md()
+                        .bg(if active {
+                            Colors::accent_muted()
+                        } else {
+                            Colors::surface_input()
+                        })
+                        .child(icon(
+                            tmpl.icon_path(),
+                            13.0,
+                            if active {
+                                Colors::accent_primary()
+                            } else {
+                                Colors::text_secondary()
+                            },
+                        )),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.0))
                         .child(
                             div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .w(px(22.0))
-                                        .h(px(22.0))
-                                        .rounded_md()
-                                        .bg(rgba(0x5FCED018))
-                                        .child(
-                                            svg()
-                                                .path(assets::ICON_FOLDER_PATH)
-                                                .w(px(11.0))
-                                                .h(px(11.0))
-                                                .text_color(Colors::accent_primary()),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(Colors::text_primary())
-                                        .child("New Project"),
-                                ),
+                                .text_size(px(12.5))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(Colors::text_primary())
+                                .truncate()
+                                .child(tmpl.label()),
                         )
                         .child(
                             div()
-                                .id("wizard-close")
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .w(px(22.0))
-                                .h(px(22.0))
-                                .rounded_md()
-                                .cursor(gpui::CursorStyle::PointingHand)
-                                .hover(|s| s.bg(rgba(0xFFFFFF0F)))
-                                .on_click(move |_, w, cx| close_btn(&(), w, cx))
-                                .child(
-                                    svg()
-                                        .path(assets::ICON_X_PATH)
-                                        .w(px(12.0))
-                                        .h(px(12.0))
-                                        .text_color(rgba(0x6070808C)),
-                                ),
+                                .text_size(px(9.5))
+                                .text_color(Colors::text_muted())
+                                .line_clamp(2)
+                                .child(tmpl.description()),
                         ),
-                )
-                // ── Body ──────────────────────────────────────────────────
-                .child(
-                    div()
+                ),
+        )
+        .child(
+            div()
+                .h(px(18.0))
+                .flex()
+                .items_center()
+                .rounded_md()
+                .bg(if active {
+                    Colors::accent_muted()
+                } else {
+                    Colors::surface_input()
+                })
+                .px(px(7.0))
+                .text_size(px(9.5))
+                .text_color(if active {
+                    Colors::accent_primary()
+                } else {
+                    Colors::text_faint()
+                })
+                .child(tmpl.metadata()),
+        )
+}
+
+fn action_button(
+    id: &'static str,
+    label: &'static str,
+    primary: bool,
+    enabled: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    fb_button(
+        id,
+        label,
+        if primary {
+            FbButtonKind::Primary
+        } else {
+            FbButtonKind::Default
+        },
+        enabled,
+        on_click,
+    )
+}
+
+fn stepper_button(
+    id: &'static str,
+    label: &'static str,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    fb_stepper_button(id, label, on_click)
+}
+
+fn settings_row(label: &'static str, child: impl IntoElement) -> impl IntoElement {
+    fb_form_row(label, child)
+}
+
+fn time_signature_label(num: u32, den: u32) -> String {
+    format!("{num}/{den}")
+}
+
+fn beat_grid_label(value: u32) -> String {
+    format!("1/{value}")
+}
+
+fn sample_rate_label(value: u32) -> String {
+    SAMPLE_RATE_OPTIONS
+        .iter()
+        .find(|option| option.value == value)
+        .map(|option| option.label.to_string())
+        .unwrap_or_else(|| format!("{} kHz", value as f32 / 1000.0))
+}
+
+fn summary_line(label: &'static str, value: impl Into<String>) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(10.0))
+                .text_color(Colors::text_faint())
+                .child(label),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_size(px(10.5))
+                .text_color(Colors::text_primary())
+                .child(value.into()),
+        )
+}
+
+fn compact_path(path: &Path) -> String {
+    let text = path.to_string_lossy().to_string();
+    let max_chars = 36;
+    if text.chars().count() <= max_chars {
+        text
+    } else {
+        let tail: String = text
+            .chars()
+            .rev()
+            .take(max_chars - 3)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("...{tail}")
+    }
+}
+
+impl Render for ProjectWizardWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if window.focused(cx).is_none() {
+            self.name_input.focus_handle.focus(window);
+        }
+
+        let target = cx.entity().clone();
+        let name_focused = self.name_input.is_focused(window);
+        let location_focused = self.location_input.is_focused(window);
+        let bpm_focused = self.bpm_input.is_focused(window);
+        let can_create = self.state.validation_error().is_none();
+        let validation_message = self
+            .state
+            .error
+            .clone()
+            .or_else(|| self.state.validation_error());
+
+        let template_grid = {
+            let mut grid = div().grid().grid_cols(2).gap(px(9.0)).child(template_card(
+                ProjectTemplate::Empty,
+                self.state.template == ProjectTemplate::Empty,
+                false,
+                0,
+                {
+                    let target = target.clone();
+                    move |_, _, cx| {
+                        let _ = target.update(cx, |this, cx| {
+                            this.state.apply_template(ProjectTemplate::Empty);
+                            this.bpm_input.set_value(this.state.bpm_text.clone());
+                            cx.notify();
+                        });
+                    }
+                },
+            ));
+
+            for (index, tmpl) in ProjectTemplate::all().into_iter().enumerate().skip(1) {
+                let target = target.clone();
+                grid = grid.child(template_card(
+                    tmpl,
+                    self.state.template == tmpl,
+                    false,
+                    index,
+                    move |_, _, cx| {
+                        let tmpl = tmpl;
+                        let _ = target.update(cx, |this, cx| {
+                            this.state.apply_template(tmpl);
+                            this.bpm_input.set_value(this.state.bpm_text.clone());
+                            cx.notify();
+                        });
+                    },
+                ));
+            }
+            grid
+        };
+
+        let time_signature_row = combo_box_trigger(
+            "project-time-signature-combo",
+            time_signature_label(self.state.time_sig_num, self.state.time_sig_den),
+            self.open_combo == Some(WizardCombo::TimeSignature),
+            {
+                let target = target.clone();
+                move |_, _, cx| {
+                    let _ = target.update(cx, |this, cx| {
+                        this.open_combo = if this.open_combo == Some(WizardCombo::TimeSignature) {
+                            None
+                        } else {
+                            Some(WizardCombo::TimeSignature)
+                        };
+                        cx.notify();
+                    });
+                }
+            },
+        );
+
+        let beat_value_row = combo_box_trigger(
+            "project-beat-grid-combo",
+            beat_grid_label(self.state.beat_value),
+            self.open_combo == Some(WizardCombo::BeatGrid),
+            {
+                let target = target.clone();
+                move |_, _, cx| {
+                    let _ = target.update(cx, |this, cx| {
+                        this.open_combo = if this.open_combo == Some(WizardCombo::BeatGrid) {
+                            None
+                        } else {
+                            Some(WizardCombo::BeatGrid)
+                        };
+                        cx.notify();
+                    });
+                }
+            },
+        );
+
+        let sample_rate_row = combo_box_trigger(
+            "project-sample-rate-combo",
+            sample_rate_label(self.state.sample_rate),
+            self.open_combo == Some(WizardCombo::SampleRate),
+            {
+                let target = target.clone();
+                move |_, _, cx| {
+                    let _ = target.update(cx, |this, cx| {
+                        this.open_combo = if this.open_combo == Some(WizardCombo::SampleRate) {
+                            None
+                        } else {
+                            Some(WizardCombo::SampleRate)
+                        };
+                        cx.notify();
+                    });
+                }
+            },
+        );
+
+        let combo_overlay = self.open_combo.map(|open_combo| {
+            let close_target = target.clone();
+            div()
+                .absolute()
+                .inset_0()
+                .id("project-wizard-combo-overlay")
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    let _ = close_target.update(cx, |this, cx| {
+                        this.open_combo = None;
+                        cx.notify();
+                    });
+                })
+                .child(match open_combo {
+                    WizardCombo::TimeSignature => {
+                        let select_target = target.clone();
+                        combo_box_menu(
+                            "project-time-signature-menu",
+                            SETTINGS_COMBO_LEFT,
+                            TIME_SIG_MENU_TOP,
+                            SETTINGS_COMBO_WIDTH,
+                            (self.state.time_sig_num, self.state.time_sig_den),
+                            TIME_SIGNATURE_OPTIONS,
+                            Arc::new(move |(num, den), _, cx| {
+                                let _ = select_target.update(cx, |this, cx| {
+                                    this.state.time_sig_num = num;
+                                    this.state.time_sig_den = den;
+                                    this.state.error = None;
+                                    this.open_combo = None;
+                                    cx.notify();
+                                });
+                            }),
+                        )
+                        .into_any_element()
+                    }
+                    WizardCombo::BeatGrid => {
+                        let select_target = target.clone();
+                        combo_box_menu(
+                            "project-beat-grid-menu",
+                            SETTINGS_COMBO_LEFT,
+                            BEAT_GRID_MENU_TOP,
+                            SETTINGS_COMBO_WIDTH,
+                            self.state.beat_value,
+                            BEAT_GRID_OPTIONS,
+                            Arc::new(move |value, _, cx| {
+                                let _ = select_target.update(cx, |this, cx| {
+                                    this.state.beat_value = value;
+                                    this.state.error = None;
+                                    cx.notify();
+                                    this.open_combo = None;
+                                });
+                            }),
+                        )
+                        .into_any_element()
+                    }
+                    WizardCombo::SampleRate => {
+                        let select_target = target.clone();
+                        combo_box_menu(
+                            "project-sample-rate-menu",
+                            SETTINGS_COMBO_LEFT,
+                            SAMPLE_RATE_MENU_TOP,
+                            SETTINGS_COMBO_WIDTH,
+                            self.state.sample_rate,
+                            SAMPLE_RATE_OPTIONS,
+                            Arc::new(move |value, _, cx| {
+                                let _ = select_target.update(cx, |this, cx| {
+                                    this.state.sample_rate = value;
+                                    this.state.error = None;
+                                    this.open_combo = None;
+                                    cx.notify();
+                                });
+                            }),
+                        )
+                        .into_any_element()
+                    }
+                })
+        });
+
+        let text_input_callbacks = |text_target: WizardTextTarget| TextInputCallbacks {
+            on_context_menu: Some(Arc::new({
+                let target = target.clone();
+                move |(x, y): &(f32, f32), _window, cx| {
+                    let x = *x;
+                    let y = *y;
+                    let _ = target.update(cx, |this, cx| {
+                        this.open_combo = None;
+                        this.text_menu = Some(WizardTextMenu {
+                            target: text_target,
+                            x,
+                            y,
+                        });
+                        cx.notify();
+                    });
+                }
+            })),
+        };
+
+        let text_menu_overlay = self.text_menu.map(|menu| {
+            let clipboard_has_text = cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .is_some_and(|text| !text.is_empty());
+            let entries =
+                text_input_context_entries(self.text_input(menu.target), clipboard_has_text);
+            let command_target = target.clone();
+            let close_target = target.clone();
+            context_menu_overlay(
+                entries,
+                menu.x,
+                menu.y,
+                WIZARD_WIDTH,
+                WIZARD_HEIGHT,
+                Arc::new(move |command: &String, _window, cx| {
+                    let command = command.clone();
+                    let _ = command_target.update(cx, |this, cx| {
+                        if let Some(menu) = this.text_menu {
+                            let input = this.text_input_mut(menu.target);
+                            let _ = input.apply_context_command(&command, cx);
+                            this.sync_inputs_to_state();
+                        }
+                        this.text_menu = None;
+                        cx.notify();
+                    });
+                }),
+                Arc::new(move |_: &(), _window, cx| {
+                    let _ = close_target.update(cx, |this, cx| {
+                        this.text_menu = None;
+                        cx.notify();
+                    });
+                }),
+            )
+        });
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .relative()
+            .font_family(theme::FONT_FAMILY)
+            .bg(Colors::surface_window())
+            .overflow_hidden()
+            .capture_key_down({
+                let target = target.clone();
+                move |event, window, cx| {
+                    let _ = target.update(cx, |this, cx| this.handle_key(event, window, cx));
+                }
+            })
+            .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
+            .child(
+                div()
+                    .window_control_area(WindowControlArea::Drag)
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(32.0))
+                    .pl(px(11.0))
+                    .border_b(px(1.0))
+                    .border_color(Colors::border_subtle())
+                    .bg(Colors::surface_titlebar())
+                    .child(
+                        div()
                         .flex()
-                        .flex_col()
-                        .gap(px(18.0))
-                        .px(px(18.0))
-                        .py(px(16.0))
-                        // ── PROJECT DETAILS ───────────────────────────────
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(section_label("PROJECT DETAILS"))
-                                .child(field_row("Name", text_field(name_input, name_focused)))
-                                .child({
-                                    let browse = callbacks.on_browse_location.clone();
-                                    field_row(
+                        .items_center()
+                            .h_full()
+                            .text_size(px(11.5))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(Colors::text_primary())
+                            .child("New Project"),
+                    )
+                    .child(
+                        div()
+                            .window_control_area(WindowControlArea::Close)
+                            .id("project-wizard-close")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(32.0))
+                            .h(px(32.0))
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .hover(|s| s.bg(Colors::surface_control_hover()))
+                            .on_click(|_, window, _| window.remove_window())
+                            .child(icon(assets::ICON_X_PATH, 12.0, Colors::text_faint())),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h_0()
+                    .gap(px(16.0))
+                    .p(px(16.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(14.0))
+                            .w(px(540.0))
+                            .min_w(px(540.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.0))
+                                    .child(section_label("PROJECT"))
+                                    .child(fb_form_row(
+                                        "Name",
+                                        text_field_with_callbacks(
+                                            &self.name_input,
+                                            name_focused,
+                                            text_input_callbacks(WizardTextTarget::Name),
+                                        ),
+                                    ))
+                                    .child(fb_form_row(
                                         "Location",
                                         div()
                                             .flex()
                                             .flex_row()
-                                            .flex_1()
-                                            .gap(px(6.0))
+                                            .gap(px(8.0))
                                             .child(
                                                 div()
                                                     .flex_1()
-                                                    .h(px(28.0))
-                                                    .rounded_md()
-                                                    .border(px(1.0))
-                                                    .border_color(rgba(0xFFFFFF1A))
-                                                    .bg(rgba(0x0E1117FF))
-                                                    .px(px(10.0))
-                                                    .flex()
-                                                    .items_center()
-                                                    .overflow_hidden()
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(10.5))
-                                                            .text_color(rgba(0x6878908C))
-                                                            .child(
-                                                                state
-                                                                    .location
-                                                                    .to_string_lossy()
-                                                                    .to_string(),
-                                                            ),
-                                                    ),
+                                                    .min_w_0()
+                                                    .child(text_field_with_callbacks(
+                                                        &self.location_input,
+                                                        location_focused,
+                                                        text_input_callbacks(
+                                                            WizardTextTarget::Location,
+                                                        ),
+                                                    )),
                                             )
                                             .child(
+                                                div().w(px(84.0)).child(action_button(
+                                                        "project-wizard-browse",
+                                                        "Browse",
+                                                        false,
+                                                        true,
+                                                        {
+                                                        let target = target.clone();
+                                                        move |_, _, cx| {
+                                                            let current =
+                                                                target.read(cx).state.location.clone();
+                                                            let fut = rfd::AsyncFileDialog::new()
+                                                                .set_title("Choose Project Location")
+                                                                .set_directory(&current)
+                                                                .pick_folder();
+                                                            let target2 = target.clone();
+                                                            cx.spawn(async move |cx| {
+                                                                if let Some(handle) = fut.await {
+                                                                    let path = handle
+                                                                        .path()
+                                                                        .to_path_buf();
+                                                                    let _ = target2.update(
+                                                                        cx,
+                                                                        |this, cx| {
+                                                                            this.state.location =
+                                                                                path.clone();
+                                                                            this.location_input
+                                                                                .set_value(path
+                                                                                    .to_string_lossy()
+                                                                                    .to_string());
+                                                                            this.sync_inputs_to_state();
+                                                                            cx.notify();
+                                                                        },
+                                                                    );
+                                                                }
+                                                            })
+                                                            .detach();
+                                                        }
+                                                        },
+                                                    )
+                                                )
+                                                    .into_any_element(),
+                                            ),
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(9.0))
+                                    .child(section_label("TEMPLATE"))
+                                    .child(template_grid),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .rounded_md()
+                            .border(px(1.0))
+                            .border_color(Colors::border_subtle())
+                            .bg(Colors::surface_card())
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(14.0))
+                                    .p(px(14.0))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(3.0))
+                                            .child(section_label("SESSION SETTINGS"))
+                                            .child(
                                                 div()
-                                                    .id("wizard-browse")
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .h(px(28.0))
-                                                    .px(px(12.0))
-                                                    .rounded_md()
-                                                    .border(px(1.0))
-                                                    .border_color(rgba(0xFFFFFF10))
-                                                    .bg(rgba(0x0E1117FF))
-                                                    .text_size(px(11.0))
-                                                    .text_color(rgba(0x8090A8CC))
-                                                    .cursor(gpui::CursorStyle::PointingHand)
-                                                    .hover(|s| s.bg(rgba(0x1A2030FF)))
-                                                    .on_click(move |_, w, cx| browse(&(), w, cx))
-                                                    .child("Browse…"),
+                                                    .text_size(px(10.0))
+                                                    .text_color(Colors::text_faint())
+                                                    .child("Timing and format for the new session"),
                                             ),
                                     )
-                                }),
-                        )
-                        // ── TEMPLATE ──────────────────────────────────────
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(section_label("TEMPLATE"))
-                                .child(template_row),
-                        )
-                        // ── SETTINGS ─────────────────────────────────────
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(section_label("SETTINGS"))
-                                // BPM row
-                                .child(field_row(
-                                    "Tempo",
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(5.0))
-                                        .child(
-                                            div()
-                                                .w(px(68.0))
-                                                .child(text_field(bpm_input, bpm_focused)),
-                                        )
-                                        .child(stepper_btn(
-                                            "−",
-                                            "wizard-bpm-dec",
-                                            move |_, w, cx| {
-                                                bpm_dec(&-1, w, cx);
-                                            },
-                                        ))
-                                        .child(stepper_btn(
-                                            "+",
-                                            "wizard-bpm-inc",
-                                            move |_, w, cx| {
-                                                bpm_inc(&1, w, cx);
-                                            },
-                                        ))
-                                        .child(
-                                            div()
-                                                .text_size(px(10.0))
-                                                .text_color(rgba(0x4A556660))
-                                                .ml(px(4.0))
-                                                .child("BPM"),
+                                    .child(settings_row(
+                                        "Tempo",
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .child(div().w(px(76.0)).child(
+                                                text_field_with_callbacks(
+                                                    &self.bpm_input,
+                                                    bpm_focused,
+                                                    text_input_callbacks(WizardTextTarget::Bpm),
+                                                ),
+                                            ))
+                                            .child({
+                                                let target = target.clone();
+                                                stepper_button("project-tempo-down", "-", move |_, _, cx| {
+                                                    let _ = target.update(cx, |this, cx| {
+                                                        let bpm = (this.state.bpm() - 1.0).clamp(20.0, 300.0);
+                                                        this.state.bpm_text = format!("{:.0}", bpm);
+                                                        this.bpm_input.set_value(this.state.bpm_text.clone());
+                                                        this.sync_inputs_to_state();
+                                                        cx.notify();
+                                                    });
+                                                })
+                                            })
+                                            .child({
+                                                let target = target.clone();
+                                                stepper_button("project-tempo-up", "+", move |_, _, cx| {
+                                                    let _ = target.update(cx, |this, cx| {
+                                                        let bpm = (this.state.bpm() + 1.0).clamp(20.0, 300.0);
+                                                        this.state.bpm_text = format!("{:.0}", bpm);
+                                                        this.bpm_input.set_value(this.state.bpm_text.clone());
+                                                        this.sync_inputs_to_state();
+                                                        cx.notify();
+                                                    });
+                                                })
+                                            })
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.5))
+                                                    .text_color(Colors::text_muted())
+                                                    .child("BPM"),
+                                            ),
+                                    ))
+                                    .child(settings_row("Time Signature", time_signature_row))
+                                    .child(settings_row("Beat / Grid", beat_value_row))
+                                    .child(settings_row("Sample Rate", sample_rate_row)),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(9.0))
+                                    .mx(px(14.0))
+                                    .mb(px(14.0))
+                                    .rounded_lg()
+                                    .border(px(1.0))
+                                    .border_color(Colors::border_subtle())
+                                    .bg(Colors::surface_input())
+                                    .p(px(12.0))
+                                    .child(section_label("SUMMARY"))
+                                    .child(summary_line(
+                                        "Template",
+                                        self.state.template.label().to_string(),
+                                    ))
+                                    .child(summary_line(
+                                        "Tracks",
+                                        format!(
+                                            "{} audio / {} MIDI",
+                                            self.state.template.audio_tracks(),
+                                            self.state.template.midi_tracks()
                                         ),
-                                ))
-                                // Time Sig numerator
-                                .child(field_row("Time Sig", num_row))
-                                // Time Sig denominator
-                                .child(field_row("Beat Value", den_row))
-                                // Sample Rate
-                                .child(field_row("Sample Rate", rate_row)),
-                        ),
-                )
-                // ── Footer ────────────────────────────────────────────────
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .border_t(px(1.0))
-                        .border_color(rgba(0xFFFFFF0A))
-                        .px(px(18.0))
-                        .py(px(13.0))
-                        // Cancel
-                        .child(
-                            div()
-                                .id("wizard-cancel")
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .h(px(30.0))
-                                .px(px(16.0))
-                                .rounded_md()
-                                .border(px(1.0))
-                                .border_color(rgba(0xFFFFFF10))
-                                .text_size(px(11.5))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(rgba(0x8090A8CC))
-                                .cursor(gpui::CursorStyle::PointingHand)
-                                .hover(|s| s.bg(rgba(0x1A2030FF)))
-                                .on_click({
-                                    let cb = callbacks.on_close.clone();
-                                    move |_, w, cx| cb(&(), w, cx)
-                                })
-                                .child("Cancel"),
-                        )
-                        // Create Project (primary)
-                        .child(
-                            div()
-                                .id("wizard-create")
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .h(px(30.0))
-                                .px(px(16.0))
-                                .rounded_md()
-                                .bg(if can_create {
-                                    Colors::accent_primary()
-                                } else {
-                                    rgba(0x5FCED030)
-                                })
-                                .text_size(px(11.5))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(if can_create {
-                                    gpui::rgb(0x0A1018)
-                                } else {
-                                    rgba(0x5FCED060)
-                                })
-                                .when(can_create, |d| {
-                                    d.cursor(gpui::CursorStyle::PointingHand)
-                                        .hover(|s| s.bg(gpui::rgb(0x7ADBDD)))
-                                        .on_click(move |_, w, cx| create_cb(&result, w, cx))
-                                })
-                                .child(
-                                    svg()
-                                        .path(assets::ICON_PLUS_PATH)
-                                        .w(px(11.0))
-                                        .h(px(11.0))
-                                        .text_color(if can_create {
-                                            gpui::rgb(0x0A1018)
-                                        } else {
-                                            rgba(0x5FCED060)
-                                        }),
-                                )
-                                .child("Create Project"),
-                        ),
-                ),
-        )
+                                    ))
+                                    .child(summary_line(
+                                        "Format",
+                                        format!(
+                                            "{:.0} BPM, {}/{}, {} kHz",
+                                            self.state.bpm(),
+                                            self.state.time_sig_num,
+                                            self.state.time_sig_den,
+                                            self.state.sample_rate as f32 / 1000.0
+                                        ),
+                                    ))
+                                    .child(summary_line(
+                                        "Location",
+                                        compact_path(&self.state.location),
+                                    ))
+                                    .child(summary_line(
+                                        "Project",
+                                        self.state.name.trim().to_string(),
+                                    )),
+                            )
+                            .children(validation_message.map(|message| {
+                                div()
+                                    .mx(px(14.0))
+                                    .mb(px(14.0))
+                                    .rounded_md()
+                                    .border(px(1.0))
+                                    .border_color(Colors::with_alpha(Colors::status_warning(), 0.33))
+                                    .bg(Colors::with_alpha(Colors::status_warning(), 0.06))
+                                    .px(px(10.0))
+                                    .py(px(8.0))
+                                    .text_size(px(10.5))
+                                    .text_color(Colors::status_warning())
+                                    .child(message)
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(54.0))
+                    .px(px(16.0))
+                                    .border_t(px(1.0))
+                                    .border_color(Colors::border_subtle())
+                                    .bg(Colors::surface_panel())
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(Colors::text_muted())
+                            .child("Creates a local Futureboard binary project folder."),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(action_button(
+                                "project-wizard-cancel",
+                                "Cancel",
+                                false,
+                                true,
+                                |_, window, _| window.remove_window(),
+                            ))
+                            .child(action_button(
+                                "project-wizard-create",
+                                "Create Project",
+                                true,
+                                can_create,
+                                {
+                                    let target = target.clone();
+                                    move |_, window, cx| {
+                                        let _ = target.update(cx, |this, cx| this.submit(window, cx));
+                                    }
+                                },
+                            )),
+                    ),
+            )
+            .children(combo_overlay)
+            .children(text_menu_overlay)
+    }
 }

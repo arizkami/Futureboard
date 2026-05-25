@@ -69,9 +69,9 @@ pub fn slider(
                 .right_0()
                 .top(px(7.0))
                 .h(px(6.0))
-                .bg(gpui::rgba(0xFFFFFF0F))
+                .bg(Colors::divider())
                 .border(px(1.0))
-                .border_color(gpui::rgba(0x00000040))
+                .border_color(Colors::with_alpha(Colors::surface_canvas(), 0.25))
                 .rounded_full(),
         )
         // Fill bar

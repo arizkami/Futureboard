@@ -1,6 +1,7 @@
 #[cfg(feature = "gpu-renderer")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::theme::Colors;
 use gpui::IntoElement;
 #[cfg(feature = "gpu-renderer")]
 use gpui::{canvas, fill, point, px, size, Bounds, Pixels, Styled};
@@ -60,12 +61,7 @@ pub fn timeline_surface(
                     let bar_bounds = local_bounds(bounds, x, 0.0, bar_w.round(), grid_height);
                     window.paint_quad(fill(
                         bar_bounds,
-                        gpui::Rgba {
-                            r: 1.0,
-                            g: 1.0,
-                            b: 1.0,
-                            a: 0.022,
-                        },
+                        Colors::with_alpha(Colors::text_primary(), 0.022),
                     ));
                 }
 
@@ -78,12 +74,7 @@ pub fn timeline_surface(
                     let line_bounds = local_bounds(bounds, line.x, 0.0, 1.0, grid_height);
                     window.paint_quad(fill(
                         line_bounds,
-                        gpui::Rgba {
-                            r: 1.0,
-                            g: 1.0,
-                            b: 1.0,
-                            a: alpha,
-                        },
+                        Colors::with_alpha(Colors::text_primary(), alpha),
                     ));
                 }
             });

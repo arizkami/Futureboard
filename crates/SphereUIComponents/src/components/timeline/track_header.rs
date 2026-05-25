@@ -115,9 +115,9 @@ fn pill_button(
         btn = btn.bg(active_bg).text_color(active_fg);
     } else {
         btn = btn
-            .bg(rgba(0xFFFFFF0D_u32))
+            .bg(Colors::with_alpha(Colors::text_primary(), 0.05))
             .text_color(Colors::text_secondary())
-            .hover(|s| s.bg(rgba(0xFFFFFF18_u32)));
+            .hover(|s| s.bg(Colors::surface_hover()));
     }
 
     if let Some(path) = icon {
@@ -149,11 +149,11 @@ pub fn track_header(
     let is_drop_target =
         state.drag_target_index == Some(index) || state.drag_target_index == Some(index + 1);
     let header_bg = if is_dragging {
-        rgba(0xFFFFFF12_u32)
+        Colors::with_alpha(Colors::text_primary(), 0.07)
     } else if is_selected {
         Colors::surface_raised()
     } else if is_drop_target && state.dragging_track_id.is_some() {
-        rgba(0xFFFFFF0D_u32)
+        Colors::with_alpha(Colors::text_primary(), 0.05)
     } else {
         Colors::surface_panel()
     };
@@ -283,7 +283,7 @@ pub fn track_header(
                                         .rounded_sm()
                                         .id(("track-drag-handle", id_num))
                                         .cursor(gpui::CursorStyle::PointingHand)
-                                        .hover(|s| s.bg(rgba(0xFFFFFF12_u32)))
+                                        .hover(|s| s.bg(Colors::surface_hover()))
                                         .on_drag(
                                             TrackDragItem {
                                                 track_id: drag_track_id,
@@ -347,16 +347,16 @@ pub fn track_header(
                                 .px(px(3.0))
                                 .py(px(2.0))
                                 .rounded_md()
-                                .bg(rgba(0x0000003A_u32))
+                                .bg(Colors::surface_panel_alt())
                                 .border(px(1.0))
-                                .border_color(rgba(0xFFFFFF0F_u32))
+                                .border_color(Colors::divider())
                                 .child(pill_button(
                                     ("mute-btn", id_num).into(),
                                     "M",
                                     None,
                                     track.muted,
-                                    gpui::rgb(0xF3C969),
-                                    gpui::rgb(0x101216),
+                                    Colors::accent_warning(),
+                                    Colors::text_inverse(),
                                     on_mute,
                                 ))
                                 .child(pill_button(
@@ -364,8 +364,8 @@ pub fn track_header(
                                     "S",
                                     None,
                                     track.solo,
-                                    gpui::rgb(0x7BD88F),
-                                    gpui::rgb(0x101216),
+                                    Colors::accent_success(),
+                                    Colors::text_inverse(),
                                     on_solo,
                                 ))
                                 .child(pill_button(
@@ -373,8 +373,8 @@ pub fn track_header(
                                     "R",
                                     None,
                                     track.armed,
-                                    gpui::rgb(0xF06A61),
-                                    gpui::rgb(0x101216),
+                                    Colors::accent_danger(),
+                                    Colors::text_inverse(),
                                     on_arm,
                                 ))
                                 .child(pill_button(
@@ -383,7 +383,7 @@ pub fn track_header(
                                     None,
                                     track.input_monitor,
                                     Colors::accent_primary(),
-                                    gpui::rgb(0x101216),
+                                    Colors::text_inverse(),
                                     on_input,
                                 ))
                                 .child(pill_button(
@@ -391,7 +391,7 @@ pub fn track_header(
                                     "",
                                     Some(assets::ICON_X_PATH),
                                     false,
-                                    rgba(0xFFFFFF0D_u32),
+                                    Colors::with_alpha(Colors::text_primary(), 0.05),
                                     Colors::text_secondary(),
                                     on_delete,
                                 )),
@@ -408,9 +408,9 @@ pub fn track_header(
                         .px(px(8.0))
                         .py(px(4.0))
                         .rounded_md()
-                        .bg(rgba(0x0000002A_u32))
+                        .bg(Colors::with_alpha(Colors::surface_canvas(), 0.16))
                         .border(px(1.0))
-                        .border_color(rgba(0xFFFFFF09_u32))
+                        .border_color(Colors::with_alpha(Colors::text_primary(), 0.03))
                         // Real horizontal slider
                         .child(slider(
                             format!("track-vol-{}", track.id),
@@ -426,7 +426,7 @@ pub fn track_header(
                                 c.a = 0.55;
                                 c
                             } else {
-                                rgba(0xFFFFFF1F_u32)
+                                Colors::border_default()
                             };
                             div()
                                 .flex()
@@ -436,7 +436,7 @@ pub fn track_header(
                                 .px(px(5.0))
                                 .h(px(14.0))
                                 .rounded_sm()
-                                .bg(rgba(0x0000004A_u32))
+                                .bg(Colors::with_alpha(Colors::surface_canvas(), 0.3))
                                 .border(px(1.0))
                                 .border_color(border)
                                 .text_size(px(9.0))

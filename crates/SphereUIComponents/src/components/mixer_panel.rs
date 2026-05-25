@@ -85,13 +85,13 @@ fn mixer_sub_header(track_count: usize) -> impl IntoElement {
         .h(px(30.0))
         .px(px(10.0))
         .border_b(px(1.0))
-        .border_color(rgba(0xFFFFFF0F_u32))
+        .border_color(Colors::divider())
         .child(
             svg()
                 .path(assets::ICON_SLIDERS_HORIZONTAL_PATH)
                 .w(px(14.0))
                 .h(px(14.0))
-                .text_color(rgba(0xFFFFFF47_u32)),
+                .text_color(Colors::text_faint()),
         )
         .child(
             div()
@@ -107,11 +107,11 @@ fn mixer_sub_header(track_count: usize) -> impl IntoElement {
                 .px(px(5.0))
                 .py(px(1.0))
                 .rounded_md()
-                .bg(rgba(0xFFFFFF08_u32))
+                .bg(Colors::slot_bg())
                 .border(px(1.0))
-                .border_color(rgba(0xFFFFFF12_u32))
+                .border_color(Colors::slot_border())
                 .text_size(px(9.0))
-                .text_color(rgba(0xFFFFFF59_u32))
+                .text_color(Colors::with_alpha(Colors::text_primary(), 0.35))
                 .child(format!("{} ch", track_count)),
         )
 }
@@ -147,13 +147,13 @@ fn section_header(label: &'static str, accent: gpui::Rgba) -> impl IntoElement {
                         .path(path)
                         .w(px(9.0))
                         .h(px(9.0))
-                        .text_color(rgba(0xDCE8F066_u32))
+                        .text_color(Colors::text_muted())
                 }))
                 .child(
                     div()
                         .text_size(px(7.5))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(rgba(0xDCE8F066_u32))
+                        .text_color(Colors::text_muted())
                         .child(label),
                 ),
         )
@@ -170,7 +170,7 @@ fn section_header(label: &'static str, accent: gpui::Rgba) -> impl IntoElement {
                         .path(assets::ICON_PLUS_PATH)
                         .w(px(9.0))
                         .h(px(9.0))
-                        .text_color(rgba(0xFFFFFF38_u32)),
+                        .text_color(Colors::text_faint()),
                 ),
         )
 }
@@ -185,9 +185,9 @@ fn empty_slot() -> impl IntoElement {
         .rounded_sm()
         .border(px(1.0))
         .border_dashed()
-        .border_color(rgba(0xFFFFFF0D_u32))
+        .border_color(Colors::slot_border())
         .text_size(px(8.0))
-        .text_color(rgba(0xFFFFFF38_u32))
+        .text_color(Colors::text_faint())
         .child("empty")
 }
 
@@ -219,11 +219,11 @@ fn msri_button(
         btn = btn.bg(active_bg).text_color(active_fg);
     } else {
         btn = btn
-            .bg(rgba(0xFFFFFF0A_u32))
+            .bg(Colors::with_alpha(Colors::text_primary(), 0.04))
             .border(px(1.0))
-            .border_color(rgba(0xFFFFFF17_u32))
-            .text_color(rgba(0xDCE8F085_u32))
-            .hover(|s| s.bg(rgba(0xFFFFFF1A_u32)));
+            .border_color(Colors::with_alpha(Colors::text_primary(), 0.09))
+            .text_color(Colors::with_alpha(Colors::text_secondary(), 0.52))
+            .hover(|s| s.bg(Colors::surface_hover()));
     }
     btn
 }
@@ -263,24 +263,24 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
             ("mix-m-btn", id_num).into(),
             "M",
             track.muted,
-            gpui::rgb(0xF3C969),
-            gpui::rgb(0x101216),
+            Colors::accent_warning(),
+            Colors::text_inverse(),
             on_mute,
         ))
         .child(msri_button(
             ("mix-s-btn", id_num).into(),
             "S",
             track.solo,
-            gpui::rgb(0x7BD88F),
-            gpui::rgb(0x101216),
+            Colors::accent_success(),
+            Colors::text_inverse(),
             on_solo,
         ))
         .child(msri_button(
             ("mix-r-btn", id_num).into(),
             "R",
             track.armed,
-            gpui::rgb(0xF06A61),
-            gpui::rgb(0x101216),
+            Colors::accent_danger(),
+            Colors::text_inverse(),
             on_arm,
         ))
         .child(msri_button(
@@ -288,7 +288,7 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
             "I",
             track.input_monitor,
             Colors::accent_primary(),
-            gpui::rgb(0x101216),
+            Colors::text_inverse(),
             on_input,
         ))
 }
@@ -313,7 +313,7 @@ fn strip_header(track: &TrackState, index: usize) -> impl IntoElement {
         .h(px(SEC_HEADER_H))
         .px(px(5.0))
         .border_b(px(1.0))
-        .border_color(rgba(0xFFFFFF0B_u32))
+        .border_color(Colors::divider())
         .child(div().w(px(2.0)).h(px(20.0)).rounded_full().bg(track.color))
         .child(
             div()
@@ -325,7 +325,7 @@ fn strip_header(track: &TrackState, index: usize) -> impl IntoElement {
                     div()
                         .text_size(px(10.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(rgba(0xFFFFFFCC_u32))
+                        .text_color(Colors::text_primary())
                         .child(track.name.clone()),
                 )
                 .child(
@@ -338,14 +338,14 @@ fn strip_header(track: &TrackState, index: usize) -> impl IntoElement {
                             div()
                                 .text_size(px(7.5))
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(rgba(0xFFFFFF47_u32))
+                                .text_color(Colors::text_faint())
                                 .child(type_label),
                         )
                         .child(
                             div()
                                 .text_size(px(7.5))
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(rgba(0xFFFFFF47_u32))
+                                .text_color(Colors::text_faint())
                                 .child(format!("CH{:02}", index + 1)),
                         ),
                 ),
@@ -358,7 +358,7 @@ fn inserts_section(track: &TrackState, _index: usize) -> impl IntoElement {
         .flex_col()
         .h(px(SEC_INSERTS_H))
         .border_b(px(1.0))
-        .border_color(rgba(0xFFFFFF0B_u32))
+        .border_color(Colors::divider())
         .child(section_header("INSERTS", track.color))
         .child(empty_slot())
 }
@@ -369,7 +369,7 @@ fn sends_section(track: &TrackState) -> impl IntoElement {
         .flex_col()
         .h(px(SEC_SENDS_H))
         .border_b(px(1.0))
-        .border_color(rgba(0xFFFFFF0B_u32))
+        .border_color(Colors::divider())
         .child(section_header("SENDS", track.color))
         .child(empty_slot())
 }
@@ -396,7 +396,7 @@ fn pan_section(
         .h(px(SEC_PAN_H))
         .py(px(4.0))
         .border_b(px(1.0))
-        .border_color(rgba(0xFFFFFF0B_u32))
+        .border_color(Colors::divider())
         .child(knob_bipolar(
             format!("mix-pan-{}", track.id),
             track.pan,
@@ -420,14 +420,14 @@ fn pan_section(
                     div()
                         .text_size(px(7.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(rgba(0xFFFFFF38_u32))
+                        .text_color(Colors::text_faint())
                         .child("L"),
                 )
                 .child(
                     div()
                         .text_size(px(7.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(rgba(0xFFFFFF38_u32))
+                        .text_color(Colors::text_faint())
                         .child("R"),
                 ),
         )
@@ -496,13 +496,13 @@ fn strip_footer(name: &str) -> impl IntoElement {
         .h(px(SEC_FOOTER_H))
         .px(px(4.0))
         .border_t(px(1.0))
-        .border_color(rgba(0xFFFFFF0F_u32))
-        .bg(rgba(0x0000003A_u32))
+        .border_color(Colors::divider())
+        .bg(Colors::surface_panel_alt())
         .child(
             div()
                 .text_size(px(10.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(rgba(0xEEF2F5AD_u32))
+                .text_color(Colors::text_secondary())
                 .child(name.to_string()),
         )
 }
@@ -523,14 +523,14 @@ fn channel_strip(
     };
 
     let strip_bg = if is_selected {
-        rgba(0xFFFFFF14_u32)
+        Colors::with_alpha(Colors::text_primary(), 0.08)
     } else {
-        rgba(0xFFFFFF07_u32)
+        Colors::with_alpha(Colors::text_primary(), 0.03)
     };
     let border_col = if is_selected {
-        rgba(0xFFFFFF26_u32)
+        Colors::with_alpha(Colors::text_primary(), 0.15)
     } else {
-        rgba(0xFFFFFF0A_u32)
+        Colors::with_alpha(Colors::text_primary(), 0.04)
     };
 
     let select_id = track.id.clone();
@@ -594,9 +594,9 @@ fn master_strip(
         .w(px(STRIP_WIDTH))
         .min_h(px(STRIP_MIN_HEIGHT))
         .h_full()
-        .bg(rgba(0x5FCED00C_u32))
+        .bg(Colors::with_alpha(Colors::track_audio(), 0.05))
         .border_l(px(1.0))
-        .border_color(rgba(0xFFFFFF1A_u32))
+        .border_color(Colors::with_alpha(Colors::text_primary(), 0.1))
         .child(div().w_full().h(px(2.0)).bg(accent))
         // Header
         .child(
@@ -608,7 +608,7 @@ fn master_strip(
                 .h(px(SEC_HEADER_H))
                 .px(px(5.0))
                 .border_b(px(1.0))
-                .border_color(rgba(0xFFFFFF0B_u32))
+                .border_color(Colors::divider())
                 .child(div().w(px(2.0)).h(px(20.0)).rounded_full().bg(accent))
                 .child(
                     div()
@@ -618,14 +618,14 @@ fn master_strip(
                             div()
                                 .text_size(px(10.0))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(rgba(0xFFFFFFCC_u32))
+                                .text_color(Colors::text_primary())
                                 .child("Master"),
                         )
                         .child(
                             div()
                                 .text_size(px(7.5))
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(rgba(0xFFFFFF47_u32))
+                                .text_color(Colors::text_faint())
                                 .child("MST·BUS"),
                         ),
                 ),
@@ -636,7 +636,7 @@ fn master_strip(
                 .flex_col()
                 .h(px(SEC_INSERTS_H))
                 .border_b(px(1.0))
-                .border_color(rgba(0xFFFFFF0B_u32))
+                .border_color(Colors::divider())
                 .child(section_header("INSERTS", accent))
                 .child(empty_slot()),
         )
@@ -646,7 +646,7 @@ fn master_strip(
             div()
                 .h(px(SEC_SENDS_H))
                 .border_b(px(1.0))
-                .border_color(rgba(0xFFFFFF0B_u32)),
+                .border_color(Colors::divider()),
         )
         // Master skips pan; show the level pill in this row instead so the
         // overall vertical rhythm matches a normal strip.
@@ -659,7 +659,7 @@ fn master_strip(
                 .gap(px(4.0))
                 .h(px(SEC_PAN_H))
                 .border_b(px(1.0))
-                .border_color(rgba(0xFFFFFF0B_u32))
+                .border_color(Colors::divider())
                 .child({
                     let mut border = accent;
                     border.a = 0.55;
@@ -671,7 +671,7 @@ fn master_strip(
                         .px(px(6.0))
                         .h(px(14.0))
                         .rounded_sm()
-                        .bg(rgba(0x0000004A_u32))
+                        .bg(Colors::with_alpha(Colors::surface_canvas(), 0.3))
                         .border(px(1.0))
                         .border_color(border)
                         .text_size(px(9.0))
@@ -682,7 +682,7 @@ fn master_strip(
                 .child(
                     div()
                         .text_size(px(7.5))
-                        .text_color(rgba(0xFFFFFF38_u32))
+                        .text_color(Colors::text_faint())
                         .child("OUT 1-2"),
                 ),
         )
@@ -744,12 +744,12 @@ fn master_strip(
                         .h(px(16.0))
                         .px(px(6.0))
                         .rounded_sm()
-                        .bg(rgba(0xFFFFFF0A_u32))
+                        .bg(Colors::with_alpha(Colors::text_primary(), 0.04))
                         .border(px(1.0))
-                        .border_color(rgba(0xFFFFFF17_u32))
+                        .border_color(Colors::with_alpha(Colors::text_primary(), 0.09))
                         .text_size(px(8.5))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(rgba(0xDCE8F085_u32))
+                        .text_color(Colors::with_alpha(Colors::text_secondary(), 0.52))
                         .child("OUT 1·2"),
                 ),
         )
@@ -831,7 +831,7 @@ pub fn mixer_panel(
         .flex()
         .flex_col()
         .size_full()
-        .bg(rgba(0x111418FF_u32))
+        .bg(Colors::mixer_bg())
         .child(mixer_sub_header(track_count))
         // Content row: scrollable channels (flex_1) + master block (fixed).
         .child(
@@ -868,7 +868,7 @@ pub fn mixer_panel(
                                             .w(px(left_spacer_w))
                                             .h_full()
                                             .flex_none()
-                                            .bg(rgba(0x111418FF_u32)),
+                                            .bg(Colors::mixer_bg()),
                                     )
                                 })
                                 .children(visible_strips)
@@ -879,13 +879,13 @@ pub fn mixer_panel(
                                             .w(px(right_spacer_w))
                                             .h_full()
                                             .flex_none()
-                                            .bg(rgba(0x111418FF_u32)),
+                                            .bg(Colors::mixer_bg()),
                                     )
                                 }),
                         ),
                 )
                 // Gutter separating channels from the master block.
-                .child(div().w(px(1.0)).h_full().bg(rgba(0xFFFFFF1F_u32)))
+                .child(div().w(px(1.0)).h_full().bg(Colors::border_default()))
                 // Pinned master block
                 .child(master_strip(accent, master, on_master)),
         )

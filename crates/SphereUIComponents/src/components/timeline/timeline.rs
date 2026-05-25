@@ -956,8 +956,8 @@ impl Render for Timeline {
                     .py(px(4.0))
                     .rounded_full()
                     .border(px(1.0))
-                    .border_color(gpui::rgba(0xFFFFFF1A))
-                    .bg(gpui::rgb(0x171b22))
+                    .border_color(Colors::border_default())
+                    .bg(Colors::surface_panel_alt())
                     .shadow_xl()
                     // Zoom Out Button
                     .child(
@@ -971,7 +971,7 @@ impl Render for Timeline {
                             .cursor(gpui::CursorStyle::PointingHand)
                             .text_color(Colors::text_secondary())
                             .id("zoom-out-btn")
-                            .hover(|style| style.bg(gpui::rgba(0xFFFFFF0D)))
+                            .hover(|style| style.bg(Colors::surface_hover()))
                             .on_click(move |_, window, cx| {
                                 on_zoom_out_btn(&(), window, cx);
                             })
@@ -1012,7 +1012,7 @@ impl Render for Timeline {
                             .cursor(gpui::CursorStyle::PointingHand)
                             .text_color(Colors::text_secondary())
                             .id("zoom-in-btn")
-                            .hover(|style| style.bg(gpui::rgba(0xFFFFFF0D)))
+                            .hover(|style| style.bg(Colors::surface_hover()))
                             .on_click(move |_, window, cx| {
                                 on_zoom_in_btn(&(), window, cx);
                             })
@@ -1120,7 +1120,7 @@ fn vertical_scrollbar(
                 .right(px(2.0))
                 .h(px(thumb_h))
                 .rounded_full()
-                .bg(gpui::rgba(0xFFFFFF33)),
+                .bg(Colors::with_alpha(Colors::text_primary(), 0.2)),
         )
         .into_any_element()
 }
@@ -1196,7 +1196,7 @@ fn horizontal_scrollbar(
                 .bottom(px(2.0))
                 .w(px(thumb_w))
                 .rounded_full()
-                .bg(gpui::rgba(0xFFFFFF33)),
+                .bg(Colors::with_alpha(Colors::text_primary(), 0.2)),
         )
         .into_any_element()
 }

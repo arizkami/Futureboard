@@ -16,10 +16,8 @@
 //! * shortcut          = 11 px, `daw-faint`, right aligned
 //! * separator         = 1 px horizontal rule, 4 px vertical margin
 //!
-//! Submenus are click-to-toggle (the web version uses hover, but GPUI's
-//! callback model makes click semantics simpler and click also matches what
-//! every native DAW does). The open submenu path lives in `MenuBarUiState`
-//! and threads through the same dropdown render.
+//! Submenus open on hover and also respond to click. The open submenu path
+//! lives in `MenuBarUiState` and threads through the same dropdown render.
 
 use std::sync::Arc;
 
@@ -29,10 +27,11 @@ use gpui::{
 };
 
 use crate::assets;
+use crate::components::title_bar::TITLEBAR_HEIGHT;
 use crate::menu::{Menu, MenuItem, MenuItemKind};
 use crate::theme::{menu as menu_style, Colors};
 
-pub const TOP_CHROME_HEIGHT: f32 = 36.0;
+pub const TOP_CHROME_HEIGHT: f32 = TITLEBAR_HEIGHT;
 
 const MENU_PANEL_EDGE_GAP: f32 = 4.0;
 const MENU_SUBMENU_GAP: f32 = 4.0;
@@ -275,7 +274,7 @@ fn panel_view(
         .flex_col()
         .gap(px(1.0))
         .p(px(menu_style::PANEL_PAD))
-        .rounded_lg()
+        .rounded_md()
         .bg(Colors::surface_panel())
         .border(px(1.0))
         .border_color(Colors::border_subtle())
@@ -411,6 +410,7 @@ fn menu_item_row(
 
     // ── Row container ────────────────────────────────────────────────────
     let mut row = div()
+        .id(("menu-item", depth * 10_000 + index))
         .flex()
         .flex_row()
         .items_center()
@@ -419,24 +419,32 @@ fn menu_item_row(
         .w_full()
         .px(px(menu_style::ROW_PAD_X))
         .rounded_md()
+        .bg(if is_open_submenu {
+            Colors::surface_control_hover()
+        } else {
+            gpui::transparent_black().into()
+        })
+        .opacity(if enabled { 1.0 } else { 0.45 })
         .text_size(px(menu_style::LABEL_TEXT_SIZE))
-        .id(("menu-item", depth * 10_000 + index))
         .child(left)
         .child(right);
-
-    if is_open_submenu {
-        row = row.bg(Colors::surface_hover());
-    }
 
     if enabled {
         row = row
             .cursor(gpui::CursorStyle::PointingHand)
-            .hover(|s| s.bg(Colors::surface_hover()));
+            .hover(|s| s.bg(Colors::surface_control_hover()));
         if is_submenu {
-            // Click toggles this submenu open/closed at `depth`.
-            row = row.on_click(move |_, w, cx| {
-                on_toggle_click(&(depth, item_id.clone()), w, cx);
-            });
+            let hover_toggle = on_toggle_submenu.clone();
+            let hover_item_id = item_id.clone();
+            row = row
+                .on_hover(move |hovered, w, cx| {
+                    if *hovered && !is_open_submenu {
+                        hover_toggle(&(depth, hover_item_id.clone()), w, cx);
+                    }
+                })
+                .on_click(move |_, w, cx| {
+                    on_toggle_click(&(depth, item_id.clone()), w, cx);
+                });
         } else {
             row = row.on_click(move |_, w, cx| {
                 if let Some(cmd) = command.as_ref() {

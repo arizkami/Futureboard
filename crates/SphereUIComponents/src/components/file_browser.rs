@@ -123,29 +123,37 @@ pub struct FileBrowserState {
     /// Lazy index of expanded directories. Render reads from here; the
     /// layout owns the background loader that populates it.
     pub index: IndexCache,
+    /// Active project folder. Pinned to the top of the browser roots when set.
+    pub project_folder: Option<PathBuf>,
+    /// Current search filter query.
+    pub filter: String,
+    /// Cached flattened visible nodes representing the current state.
+    pub visible_nodes: Vec<BrowserVisibleNode>,
 }
 
 impl Default for FileBrowserState {
     fn default() -> Self {
-        // Startup must not touch the disk beyond enumerating mounted
-        // drives. Everything else loads on demand when the user expands
-        // a node.
-        Self {
+        let mut state = Self {
             selected: None,
             expanded_paths: HashSet::new(),
             root_drives: default_root_drives(),
             index: IndexCache::default(),
-        }
+            project_folder: None,
+            filter: String::new(),
+            visible_nodes: Vec::new(),
+        };
+        state.update_visible_nodes();
+        state
     }
 }
 
 impl FileBrowserState {
     pub fn select(&mut self, path: PathBuf) {
         self.selected = Some(path);
+        self.update_visible_nodes();
     }
 
-    /// Toggle expand state for a node. Path is the source of truth — the
-    /// `node_id` argument is kept for callsite ergonomics but unused.
+    /// Toggle expand state for a node. Path is the source of truth.
     /// Returns `true` if the path was just expanded (caller should ensure
     /// it is indexed); `false` if it was collapsed.
     pub fn toggle_node(&mut self, _node_id: &str, path: Option<&Path>) -> bool {
@@ -153,13 +161,15 @@ impl FileBrowserState {
             return false;
         };
         let path = path.to_path_buf();
-        if self.expanded_paths.contains(&path) {
+        let expanded = if self.expanded_paths.contains(&path) {
             self.expanded_paths.remove(&path);
             false
         } else {
             self.expanded_paths.insert(path);
             true
-        }
+        };
+        self.update_visible_nodes();
+        expanded
     }
 
     pub fn is_expanded_node(&self, _node_id: &str, path: Option<&Path>) -> bool {
@@ -177,6 +187,7 @@ impl FileBrowserState {
                 loaded_at: Instant::now(),
             },
         );
+        self.update_visible_nodes();
     }
 
     /// Apply a finished directory listing failure from the background indexer.
@@ -184,12 +195,26 @@ impl FileBrowserState {
         self.index.loading.remove(&path);
         self.index.loaded.remove(&path);
         self.index.errors.insert(path, error);
+        self.update_visible_nodes();
     }
 
     /// Mark a path as having an in-flight load request.
     pub fn mark_loading(&mut self, path: PathBuf) {
         self.index.errors.remove(&path);
         self.index.loading.insert(path);
+        self.update_visible_nodes();
+    }
+
+    /// Set active project folder and refresh roots.
+    pub fn set_project_folder(&mut self, folder: Option<PathBuf>) {
+        self.project_folder = folder;
+        self.update_visible_nodes();
+    }
+
+    /// Set search filter query.
+    pub fn set_filter(&mut self, filter: &str) {
+        self.filter = filter.to_string();
+        self.update_visible_nodes();
     }
 
     /// Returns the list of currently-expanded paths whose contents have
@@ -206,28 +231,33 @@ impl FileBrowserState {
         out
     }
 
-    /// Count of visible rows. Currently delegates to `visible_nodes()`;
-    /// a streaming implementation could avoid the allocation if this
-    /// ever becomes hot.
     pub fn visible_node_count(&self) -> usize {
-        self.visible_nodes().len()
+        self.visible_nodes.len()
     }
 
     /// Flatten the tree into one row per visible node, driven entirely by
     /// the in-memory cache. No filesystem access happens here.
     pub fn visible_nodes(&self) -> Vec<BrowserVisibleNode> {
+        self.visible_nodes.clone()
+    }
+
+    /// Re-calculate the cached visible flattened nodes.
+    pub fn update_visible_nodes(&mut self) {
         let mut nodes = Vec::new();
-        for drive in &self.root_drives {
-            let drive_path = match drive.root_path.as_ref() {
-                Some(p) => p,
-                None => continue,
-            };
-            let expanded = self.expanded_paths.contains(drive_path);
-            let selected = self.selected.as_deref() == Some(drive_path.as_path());
+        let dirs = resolve_standard_dirs();
+
+        // 1. Current Project Folder (pinned at top when open)
+        if let Some(proj_folder) = &self.project_folder {
+            let expanded = self.expanded_paths.contains(proj_folder);
+            let selected = self.selected.as_ref() == Some(proj_folder);
+            let label = proj_folder
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Current Project".to_string());
             nodes.push(BrowserVisibleNode {
-                id: drive.id.clone(),
-                label: drive.label.clone(),
-                path: Some(drive_path.clone()),
+                id: format!("root:project"),
+                label: format!("PROJECT: {}", label),
+                path: Some(proj_folder.clone()),
                 kind: BrowserNodeKind::Folder,
                 depth: 0,
                 extension: String::new(),
@@ -236,16 +266,174 @@ impl FileBrowserState {
                 selected,
                 error: None,
             });
-
             if expanded {
-                self.append_cached_dir(drive_path, 1, &mut nodes);
+                self.append_cached_dir(proj_folder, 1, &mut nodes);
             }
         }
-        nodes
+
+        // 2. Audio Files
+        if let Some(audio_path) = dirs.get("audio_files") {
+            let expanded = self.expanded_paths.contains(audio_path);
+            let selected = self.selected.as_ref() == Some(audio_path);
+            nodes.push(BrowserVisibleNode {
+                id: "root:audio_files".to_string(),
+                label: "Audio Files".to_string(),
+                path: Some(audio_path.clone()),
+                kind: BrowserNodeKind::Folder,
+                depth: 0,
+                extension: String::new(),
+                expandable: true,
+                expanded,
+                selected,
+                error: None,
+            });
+            if expanded {
+                self.append_cached_dir(audio_path, 1, &mut nodes);
+            }
+        }
+
+        // 3. Plug-ins
+        if let Some(plugins_path) = dirs.get("plugins") {
+            let expanded = self.expanded_paths.contains(plugins_path);
+            let selected = self.selected.as_ref() == Some(plugins_path);
+            nodes.push(BrowserVisibleNode {
+                id: "root:plugins".to_string(),
+                label: "Plug-ins".to_string(),
+                path: Some(plugins_path.clone()),
+                kind: BrowserNodeKind::Folder,
+                depth: 0,
+                extension: String::new(),
+                expandable: true,
+                expanded,
+                selected,
+                error: None,
+            });
+            if expanded {
+                self.append_cached_dir(plugins_path, 1, &mut nodes);
+            }
+        }
+
+        // 4. Instruments
+        if let Some(plugins_path) = dirs.get("plugins") {
+            let instruments_path = plugins_path.join("Instruments");
+            let expanded = self.expanded_paths.contains(&instruments_path);
+            let selected = self.selected.as_ref() == Some(&instruments_path);
+            nodes.push(BrowserVisibleNode {
+                id: "root:instruments".to_string(),
+                label: "Instruments".to_string(),
+                path: Some(instruments_path.clone()),
+                kind: BrowserNodeKind::Folder,
+                depth: 0,
+                extension: String::new(),
+                expandable: true,
+                expanded,
+                selected,
+                error: None,
+            });
+            if expanded {
+                self.append_cached_dir(&instruments_path, 1, &mut nodes);
+            }
+        }
+
+        // 5. Projects
+        if let Some(projects_path) = dirs.get("projects") {
+            let expanded = self.expanded_paths.contains(projects_path);
+            let selected = self.selected.as_ref() == Some(projects_path);
+            nodes.push(BrowserVisibleNode {
+                id: "root:projects".to_string(),
+                label: "Projects".to_string(),
+                path: Some(projects_path.clone()),
+                kind: BrowserNodeKind::Folder,
+                depth: 0,
+                extension: String::new(),
+                expandable: true,
+                expanded,
+                selected,
+                error: None,
+            });
+            if expanded {
+                self.append_cached_dir(projects_path, 1, &mut nodes);
+            }
+        }
+
+        // 6. Samples
+        if let Some(samples_path) = dirs.get("samples") {
+            let expanded = self.expanded_paths.contains(samples_path);
+            let selected = self.selected.as_ref() == Some(samples_path);
+            nodes.push(BrowserVisibleNode {
+                id: "root:samples".to_string(),
+                label: "Samples".to_string(),
+                path: Some(samples_path.clone()),
+                kind: BrowserNodeKind::Folder,
+                depth: 0,
+                extension: String::new(),
+                expandable: true,
+                expanded,
+                selected,
+                error: None,
+            });
+            if expanded {
+                self.append_cached_dir(samples_path, 1, &mut nodes);
+            }
+        }
+
+        // 7. User Library
+        if let Some(user_lib_path) = dirs.get("user_library") {
+            let expanded = self.expanded_paths.contains(user_lib_path);
+            let selected = self.selected.as_ref() == Some(user_lib_path);
+            nodes.push(BrowserVisibleNode {
+                id: "root:user_library".to_string(),
+                label: "User Library".to_string(),
+                path: Some(user_lib_path.clone()),
+                kind: BrowserNodeKind::Folder,
+                depth: 0,
+                extension: String::new(),
+                expandable: true,
+                expanded,
+                selected,
+                error: None,
+            });
+            if expanded {
+                self.append_cached_dir(user_lib_path, 1, &mut nodes);
+            }
+        }
+
+        // 8. Logical drives (fallback at bottom only when no project is open)
+        if self.project_folder.is_none() {
+            for drive in &self.root_drives {
+                let drive_path = match drive.root_path.as_ref() {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let expanded = self.expanded_paths.contains(drive_path);
+                let selected = self.selected.as_deref() == Some(drive_path.as_path());
+                nodes.push(BrowserVisibleNode {
+                    id: drive.id.clone(),
+                    label: drive.label.clone(),
+                    path: Some(drive_path.clone()),
+                    kind: BrowserNodeKind::Folder,
+                    depth: 0,
+                    extension: String::new(),
+                    expandable: true,
+                    expanded,
+                    selected,
+                    error: None,
+                });
+                if expanded {
+                    self.append_cached_dir(drive_path, 1, &mut nodes);
+                }
+            }
+        }
+
+        // 9. Apply Search Filter
+        if !self.filter.is_empty() {
+            nodes = self.filter_flattened_nodes(nodes);
+        }
+
+        self.visible_nodes = nodes;
     }
 
     fn append_cached_dir(&self, dir: &Path, depth: usize, nodes: &mut Vec<BrowserVisibleNode>) {
-        // Cache state, in priority order: error > loading > loaded > unknown.
         if let Some(err) = self.index.errors.get(dir) {
             nodes.push(placeholder_row(dir, depth, err.clone(), true));
             return;
@@ -255,8 +443,6 @@ impl FileBrowserState {
             return;
         }
         let Some(indexed) = self.index.loaded.get(dir) else {
-            // Path is expanded but not yet asked for — the layout's
-            // `paths_needing_load` sweep will pick it up next render.
             nodes.push(placeholder_row(dir, depth, "Loading…".to_string(), false));
             return;
         };
@@ -287,6 +473,143 @@ impl FileBrowserState {
             }
         }
     }
+
+    fn filter_flattened_nodes(&self, nodes: Vec<BrowserVisibleNode>) -> Vec<BrowserVisibleNode> {
+        let query = self.filter.to_lowercase();
+        let mut kept = vec![false; nodes.len()];
+
+        for i in (0..nodes.len()).rev() {
+            let node = &nodes[i];
+            let matches_query = node.label.to_lowercase().contains(&query);
+            if matches_query {
+                kept[i] = true;
+                continue;
+            }
+
+            if node.expandable {
+                let mut has_kept_descendant = false;
+                for j in (i + 1)..nodes.len() {
+                    let child = &nodes[j];
+                    if child.depth <= node.depth {
+                        break;
+                    }
+                    if kept[j] {
+                        has_kept_descendant = true;
+                        break;
+                    }
+                }
+                if has_kept_descendant {
+                    kept[i] = true;
+                }
+            }
+        }
+
+        nodes
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| kept[*i])
+            .map(|(_, n)| n)
+            .collect()
+    }
+
+    // Keyboard Helpers
+
+    pub fn select_next(&mut self) {
+        if self.visible_nodes.is_empty() {
+            return;
+        }
+        let next_path = if let Some(current_selected) = &self.selected {
+            if let Some(idx) = self
+                .visible_nodes
+                .iter()
+                .position(|n| n.path.as_ref() == Some(current_selected))
+            {
+                if idx + 1 < self.visible_nodes.len() {
+                    self.visible_nodes[idx + 1].path.clone()
+                } else {
+                    self.visible_nodes[idx].path.clone()
+                }
+            } else {
+                self.visible_nodes[0].path.clone()
+            }
+        } else {
+            self.visible_nodes[0].path.clone()
+        };
+        self.selected = next_path;
+        self.update_visible_nodes();
+    }
+
+    pub fn select_previous(&mut self) {
+        if self.visible_nodes.is_empty() {
+            return;
+        }
+        let prev_path = if let Some(current_selected) = &self.selected {
+            if let Some(idx) = self
+                .visible_nodes
+                .iter()
+                .position(|n| n.path.as_ref() == Some(current_selected))
+            {
+                if idx > 0 {
+                    self.visible_nodes[idx - 1].path.clone()
+                } else {
+                    self.visible_nodes[0].path.clone()
+                }
+            } else {
+                self.visible_nodes[0].path.clone()
+            }
+        } else {
+            self.visible_nodes[0].path.clone()
+        };
+        self.selected = prev_path;
+        self.update_visible_nodes();
+    }
+
+    pub fn expand_selected(&mut self) {
+        if let Some(current_selected) = &self.selected {
+            if self.expanded_paths.contains(current_selected) {
+                if let Some(idx) = self
+                    .visible_nodes
+                    .iter()
+                    .position(|n| n.path.as_ref() == Some(current_selected))
+                {
+                    if idx + 1 < self.visible_nodes.len()
+                        && self.visible_nodes[idx + 1].depth > self.visible_nodes[idx].depth
+                    {
+                        self.selected = self.visible_nodes[idx + 1].path.clone();
+                    }
+                }
+            } else {
+                self.expanded_paths.insert(current_selected.clone());
+                self.update_visible_nodes();
+            }
+        }
+    }
+
+    pub fn collapse_selected_or_parent(&mut self) {
+        if let Some(current_selected) = &self.selected {
+            if self.expanded_paths.contains(current_selected) {
+                self.expanded_paths.remove(current_selected);
+                self.update_visible_nodes();
+            } else {
+                if let Some(idx) = self
+                    .visible_nodes
+                    .iter()
+                    .position(|n| n.path.as_ref() == Some(current_selected))
+                {
+                    let current_depth = self.visible_nodes[idx].depth;
+                    if current_depth > 0 {
+                        for i in (0..idx).rev() {
+                            if self.visible_nodes[i].depth < current_depth {
+                                self.selected = self.visible_nodes[i].path.clone();
+                                break;
+                            }
+                        }
+                    }
+                }
+                self.update_visible_nodes();
+            }
+        }
+    }
 }
 
 fn placeholder_row(dir: &Path, depth: usize, label: String, is_error: bool) -> BrowserVisibleNode {
@@ -312,7 +635,7 @@ fn placeholder_row(dir: &Path, depth: usize, label: String, is_error: bool) -> B
     }
 }
 
-/// Resolve a sensible starting directory: user Music dir, then home, then cwd.
+/// Resolve sensible starting directory: user Music dir, then home, then cwd.
 pub fn default_directory() -> PathBuf {
     if let Some(p) = dirs::audio_dir() {
         if p.is_dir() {
@@ -327,9 +650,7 @@ pub fn default_directory() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Enumerate top-level filesystem roots — drive letters on Windows,
-/// `/` plus mounted volumes on macOS / Linux. Each root maps to a single
-/// `BrowserRootSection` whose `root_path` is a real directory.
+/// Enumerate logical drive letters on Windows, `/` plus mounted volumes on unix.
 fn default_root_drives() -> Vec<BrowserRootSection> {
     let mut out = Vec::new();
     for path in enumerate_filesystem_roots() {
@@ -347,11 +668,6 @@ fn default_root_drives() -> Vec<BrowserRootSection> {
 
 #[cfg(target_os = "windows")]
 fn enumerate_filesystem_roots() -> Vec<PathBuf> {
-    // Use kernel32 `GetLogicalDrives` — returns a 26-bit mask of mounted
-    // drive letters in microseconds. The previous probe loop called
-    // `Path::is_dir("A:\\")` for every letter, which causes Windows to
-    // spin up empty optical / floppy / disconnected removable drives and
-    // hang the UI for tens of seconds at startup.
     extern "system" {
         fn GetLogicalDrives() -> u32;
     }
@@ -408,13 +724,10 @@ fn enumerate_filesystem_roots() -> Vec<PathBuf> {
     roots
 }
 
-/// Friendly label for a drive root. On Windows that's `C:` etc.; on
-/// Unix-likes the leaf folder name (or `/` for the root itself).
 fn drive_label(path: &Path) -> String {
     #[cfg(target_os = "windows")]
     {
         let s = path.to_string_lossy();
-        // `C:\` → `C:`. Trim trailing separator(s) for display.
         let trimmed = s.trim_end_matches(|c| c == '\\' || c == '/');
         if trimmed.is_empty() {
             return s.into_owned();
@@ -433,9 +746,48 @@ fn drive_label(path: &Path) -> String {
     }
 }
 
-/// Read a directory into a sorted entry list. Folders first, then files,
-/// each block alphabetical (case-insensitive). Hidden entries (`.foo`) are
-/// skipped — they almost never matter inside a DAW browser.
+/// Resolves standard folder paths under Futureboard Documents, creating them if needed.
+pub fn resolve_standard_dirs() -> HashMap<String, PathBuf> {
+    let doc_dir = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
+    let fb_dir = doc_dir.join("Futureboard Studio");
+
+    // Proactively initialize directories under Futureboard Studio
+    let _ = std::fs::create_dir_all(fb_dir.join("Projects"));
+    let _ = std::fs::create_dir_all(fb_dir.join("Samples"));
+    let _ = std::fs::create_dir_all(fb_dir.join("User Library"));
+
+    let mut map = HashMap::new();
+
+    // Audio Files
+    let audio = dirs::audio_dir()
+        .unwrap_or_else(|| dirs::home_dir().map(|h| h.join("Music")).unwrap_or_else(|| PathBuf::from(".")));
+    map.insert("audio_files".to_string(), audio);
+
+    // Projects
+    let projects = fb_dir.join("Projects");
+    map.insert("projects".to_string(), projects);
+
+    // Samples
+    let samples = fb_dir.join("Samples");
+    map.insert("samples".to_string(), samples);
+
+    // User Library
+    let user_lib = fb_dir.join("User Library");
+    map.insert("user_library".to_string(), user_lib);
+
+    // VST3 Plugin folders
+    #[cfg(target_os = "windows")]
+    let vst3 = PathBuf::from(r"C:\Program Files\Common Files\VST3");
+    #[cfg(target_os = "macos")]
+    let vst3 = PathBuf::from("/Library/Audio/Plug-Ins/Components");
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let vst3 = PathBuf::from("/usr/lib/vst3");
+    map.insert("plugins".to_string(), vst3);
+
+    map
+}
+
+/// Read directory into sorted entry lists. Treat .vst3 folders as files/plugins.
 pub fn read_directory(path: &Path) -> (Vec<FileBrowserEntry>, Option<String>) {
     let read = match std::fs::read_dir(path) {
         Ok(r) => r,
@@ -457,12 +809,26 @@ pub fn read_directory(path: &Path) -> (Vec<FileBrowserEntry>, Option<String>) {
         };
 
         if meta.is_dir() {
-            folders.push(FileBrowserEntry {
-                name,
-                path: p,
-                kind: FileEntryKind::Folder,
-                extension: String::new(),
-            });
+            let ext = p
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            if ext == "vst3" {
+                files.push(FileBrowserEntry {
+                    name,
+                    path: p,
+                    kind: FileEntryKind::File,
+                    extension: ext,
+                });
+            } else {
+                folders.push(FileBrowserEntry {
+                    name,
+                    path: p,
+                    kind: FileEntryKind::Folder,
+                    extension: String::new(),
+                });
+            }
         } else if meta.is_file() {
             let ext = p
                 .extension()

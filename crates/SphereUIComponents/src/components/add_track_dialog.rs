@@ -7,6 +7,9 @@ use gpui::{
 };
 
 use crate::assets;
+use crate::components::text_input::{
+    text_field_with_callbacks, TextInputCallbacks, TextInputState,
+};
 use crate::components::timeline::timeline_state::TrackType;
 use crate::theme::Colors;
 
@@ -219,29 +222,29 @@ fn option_card(
     let supported = option_supported(kind, state);
     let cb = callbacks.on_select_kind.clone();
     let border = if active {
-        rgba(0x5FCED07A)
+        Colors::with_alpha(Colors::accent_primary(), 0.48)
     } else {
-        rgba(0xFFFFFF0F)
+        Colors::divider()
     };
     let bg = if active {
-        rgba(0x5FCED012)
+        Colors::with_alpha(Colors::accent_primary(), 0.07)
     } else {
-        rgba(0x1F242CFF)
+        Colors::surface_input()
     };
     let icon_bg = if active {
-        rgba(0x5FCED01F)
+        Colors::accent_soft()
     } else {
-        rgba(0x13161CFF)
+        Colors::surface_canvas()
     };
     let icon_border = if active {
-        rgba(0x5FCED04D)
+        Colors::with_alpha(Colors::accent_primary(), 0.3)
     } else {
-        rgba(0xFFFFFF12)
+        Colors::slot_border()
     };
     let icon_color = if active {
         Colors::accent_primary()
     } else {
-        rgba(0x8D9AAF99)
+        Colors::text_muted()
     };
 
     let mut card = div()
@@ -269,7 +272,7 @@ fn option_card(
                             .rounded_sm()
                             .px(px(4.0))
                             .py(px(1.0))
-                            .bg(rgba(0x5FCED01F))
+                            .bg(Colors::accent_soft())
                             .text_size(px(8.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(Colors::accent_primary())
@@ -281,7 +284,7 @@ fn option_card(
                             .rounded_sm()
                             .px(px(4.0))
                             .py(px(1.0))
-                            .bg(rgba(0xFFFFFF0D))
+                            .bg(Colors::with_alpha(Colors::text_primary(), 0.05))
                             .text_size(px(8.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(Colors::text_faint())
@@ -329,7 +332,7 @@ fn option_card(
     if supported {
         card = card
             .cursor(gpui::CursorStyle::PointingHand)
-            .hover(|s| s.bg(rgba(0x232830FF)).border_color(rgba(0xFFFFFF1A)))
+            .hover(|s| s.bg(Colors::surface_hover()).border_color(Colors::border_default()))
             .on_click(move |_, window, cx| {
                 cb(&kind, window, cx);
             });
@@ -372,14 +375,14 @@ fn pill(
         .rounded_md()
         .border(px(1.0))
         .border_color(if active {
-            rgba(0x5FCED07A)
+            Colors::with_alpha(Colors::accent_primary(), 0.48)
         } else {
-            rgba(0xFFFFFF12)
+            Colors::slot_border()
         })
         .bg(if active {
-            rgba(0x5FCED024)
+            Colors::with_alpha(Colors::accent_primary(), 0.14)
         } else {
-            rgba(0x13161CFF)
+            Colors::surface_input()
         })
         .text_size(px(11.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -390,7 +393,7 @@ fn pill(
         })
         .id(label)
         .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|s| s.bg(rgba(0xFFFFFF0D)))
+        .hover(|s| s.bg(Colors::surface_hover()))
         .on_click(on_click)
         .child(label)
 }
@@ -411,8 +414,8 @@ fn spinner(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -> 
                 .h(px(27.0))
                 .rounded_md()
                 .border(px(1.0))
-                .border_color(rgba(0xFFFFFF12))
-                .bg(rgba(0x13161CFF))
+                .border_color(Colors::slot_border())
+                .bg(Colors::surface_input())
                 .text_size(px(12.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_muted())
@@ -430,8 +433,8 @@ fn spinner(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -> 
                 .flex_1()
                 .rounded_md()
                 .border(px(1.0))
-                .border_color(rgba(0xFFFFFF12))
-                .bg(rgba(0x13161CFF))
+                .border_color(Colors::slot_border())
+                .bg(Colors::surface_input())
                 .text_size(px(12.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_primary())
@@ -446,8 +449,8 @@ fn spinner(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -> 
                 .h(px(27.0))
                 .rounded_md()
                 .border(px(1.0))
-                .border_color(rgba(0xFFFFFF12))
-                .bg(rgba(0x13161CFF))
+                .border_color(Colors::slot_border())
+                .bg(Colors::surface_input())
                 .text_size(px(12.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_muted())
@@ -485,8 +488,8 @@ fn select_box(text: String) -> impl IntoElement {
         .h(px(27.0))
         .rounded_md()
         .border(px(1.0))
-        .border_color(rgba(0xFFFFFF12))
-        .bg(rgba(0x13161CFF))
+        .border_color(Colors::slot_border())
+        .bg(Colors::surface_input())
         .px(px(8.0))
         .child(
             div()
@@ -543,6 +546,9 @@ fn summary_text(state: &AddTrackDialogState) -> String {
 
 pub fn add_track_dialog(
     state: &AddTrackDialogState,
+    track_name_input: &TextInputState,
+    track_name_focused: bool,
+    track_name_callbacks: TextInputCallbacks,
     callbacks: AddTrackDialogCallbacks,
 ) -> impl IntoElement {
     let close_backdrop = callbacks.on_close.clone();
@@ -602,7 +608,7 @@ pub fn add_track_dialog(
             .flex_col()
             .gap(px(6.0))
             .border_t(px(1.0))
-            .border_color(rgba(0xFFFFFF0D))
+            .border_color(Colors::divider())
             .px(px(12.0))
             .py(px(10.0))
             .child(routing_row(
@@ -651,12 +657,12 @@ pub fn add_track_dialog(
                             .border_color(if state.arm_track {
                                 Colors::status_error()
                             } else {
-                                rgba(0xFFFFFF26)
+                                Colors::border_default()
                             })
                             .bg(if state.arm_track {
                                 Colors::status_error()
                             } else {
-                                rgba(0x13161CFF)
+                                Colors::surface_input()
                             }),
                     )
                     .child(
@@ -675,7 +681,7 @@ pub fn add_track_dialog(
             .flex_col()
             .gap(px(6.0))
             .border_t(px(1.0))
-            .border_color(rgba(0xFFFFFF0D))
+            .border_color(Colors::divider())
             .px(px(12.0))
             .py(px(10.0))
             .child(routing_row(
@@ -699,7 +705,7 @@ pub fn add_track_dialog(
     } else {
         div()
             .border_t(px(1.0))
-            .border_color(rgba(0xFFFFFF0D))
+            .border_color(Colors::divider())
             .px(px(12.0))
             .py(px(10.0))
             .text_size(px(10.0))
@@ -721,7 +727,7 @@ pub fn add_track_dialog(
         .px(px(18.0))
         .pb(px(32.0))
         .id("add-track-modal-overlay")
-        .bg(rgba(0x00000000))
+        .bg(gpui::transparent_black())
         .occlude()
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
             close_backdrop(&(), window, cx);
@@ -736,8 +742,8 @@ pub fn add_track_dialog(
                 .overflow_hidden()
                 .rounded_xl()
                 .border(px(1.0))
-                .border_color(rgba(0xFFFFFF14))
-                .bg(rgba(0x1A1E26FF))
+                .border_color(Colors::border_default())
+                .bg(Colors::surface_window())
                 .shadow_xl()
                 .on_mouse_down(gpui::MouseButton::Left, |_, _window, cx| {
                     cx.stop_propagation();
@@ -751,7 +757,7 @@ pub fn add_track_dialog(
                         .h(px(40.0))
                         .px(px(16.0))
                         .border_b(px(1.0))
-                        .border_color(rgba(0xFFFFFF0F))
+                        .border_color(Colors::divider())
                         .child(
                             div()
                                 .flex()
@@ -777,7 +783,7 @@ pub fn add_track_dialog(
                                 .rounded_md()
                                 .id("add-track-close")
                                 .cursor(gpui::CursorStyle::PointingHand)
-                                .hover(|s| s.bg(rgba(0xFFFFFF0F)))
+                                .hover(|s| s.bg(Colors::surface_control_hover()))
                                 .on_click(move |_, window, cx| close_button(&(), window, cx))
                                 .child(icon(assets::ICON_X_PATH, 13.0, Colors::text_faint())),
                         ),
@@ -793,7 +799,7 @@ pub fn add_track_dialog(
                 .child(
                     div()
                         .border_t(px(1.0))
-                        .border_color(rgba(0xFFFFFF0D))
+                        .border_color(Colors::divider())
                         .px(px(12.0))
                         .py(px(8.0))
                         .child(
@@ -802,25 +808,13 @@ pub fn add_track_dialog(
                                 .flex_row()
                                 .items_center()
                                 .gap(px(10.0))
-                                .h(px(32.0))
-                                .rounded_lg()
-                                .border(px(1.0))
-                                .border_color(rgba(0xFFFFFF12))
-                                .bg(rgba(0x13161CFF))
-                                .px(px(12.0))
+                                .h(px(34.0))
                                 .child(icon(state.selected_kind.icon(), 12.0, Colors::text_faint()))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_size(px(12.0))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(Colors::text_primary())
-                                        .child(if state.track_name.is_empty() {
-                                            "Track name".to_string()
-                                        } else {
-                                            state.track_name.clone()
-                                        }),
-                                ),
+                                .child(div().flex_1().min_w_0().child(text_field_with_callbacks(
+                                    track_name_input,
+                                    track_name_focused,
+                                    track_name_callbacks,
+                                ))),
                         ),
                 )
                 .child(
@@ -829,7 +823,7 @@ pub fn add_track_dialog(
                         .flex_row()
                         .gap(px(8.0))
                         .border_t(px(1.0))
-                        .border_color(rgba(0xFFFFFF0D))
+                        .border_color(Colors::divider())
                         .px(px(14.0))
                         .py(px(10.0))
                         .child(option_group("Amount", spinner(state, &callbacks)))
@@ -842,7 +836,7 @@ pub fn add_track_dialog(
                         .flex_col()
                         .gap(px(8.0))
                         .border_t(px(1.0))
-                        .border_color(rgba(0xFFFFFF0D))
+                        .border_color(Colors::divider())
                         .px(px(12.0))
                         .py(px(10.0))
                         .child(
@@ -875,7 +869,7 @@ pub fn add_track_dialog(
                                                 .rounded_full()
                                                 .border(px(2.0))
                                                 .border_color(color)
-                                                .bg(if active { color } else { rgba(0x00000000) })
+                                                .bg(if active { color } else { gpui::transparent_black().into() })
                                                 .opacity(if active { 1.0 } else { 0.5 })
                                                 .id(("add-track-color", i))
                                                 .cursor(gpui::CursorStyle::PointingHand)
@@ -886,7 +880,7 @@ pub fn add_track_dialog(
                                                     Some(icon(
                                                         assets::ICON_CIRCLE_DOT_PATH,
                                                         12.0,
-                                                        rgba(0x00000099),
+                                                        Colors::with_alpha(Colors::surface_canvas(), 0.6),
                                                     ))
                                                 } else {
                                                     None
@@ -910,13 +904,13 @@ pub fn add_track_dialog(
                                                 .px(px(12.0))
                                                 .rounded_md()
                                                 .border(px(1.0))
-                                                .border_color(rgba(0xFFFFFF12))
+                                                .border_color(Colors::slot_border())
                                                 .text_size(px(11.0))
                                                 .font_weight(gpui::FontWeight::MEDIUM)
                                                 .text_color(Colors::text_faint())
                                                 .id("add-track-cancel")
                                                 .cursor(gpui::CursorStyle::PointingHand)
-                                                .hover(|s| s.bg(rgba(0xFFFFFF0D)))
+                                                .hover(|s| s.bg(Colors::surface_hover()))
                                                 .on_click({
                                                     let cb = callbacks.on_close.clone();
                                                     move |_, window, cx| cb(&(), window, cx)
@@ -936,7 +930,7 @@ pub fn add_track_dialog(
                                                 .opacity(if state.is_valid() { 1.0 } else { 0.45 })
                                                 .text_size(px(11.0))
                                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .text_color(gpui::rgb(0x101216))
+                                                .text_color(Colors::text_inverse())
                                                 .id("add-track-confirm")
                                                 .when(state.is_valid(), |this| {
                                                     this.cursor(gpui::CursorStyle::PointingHand)
@@ -947,7 +941,7 @@ pub fn add_track_dialog(
                                                 .child(icon(
                                                     assets::ICON_PLUS_PATH,
                                                     12.0,
-                                                    gpui::rgb(0x101216),
+                                                    Colors::text_inverse(),
                                                 ))
                                                 .child(if state.count == 1 {
                                                     "Add Track".to_string()

@@ -24,78 +24,297 @@ pub mod text {
 pub mod menu {
     pub const PANEL_MIN_WIDTH: f32 = 210.0;
     pub const PANEL_MAX_WIDTH: f32 = 340.0;
-    pub const PANEL_PAD: f32 = 5.0;
-    pub const ROW_HEIGHT: f32 = 24.0;
+    pub const PANEL_PAD: f32 = 4.0;
+    pub const ROW_HEIGHT: f32 = 25.0;
     pub const ROW_PAD_X: f32 = 10.0;
     pub const CHECK_SLOT_W: f32 = 18.0;
     pub const ICON_SIZE: f32 = 11.0;
     pub const CHEVRON_SIZE: f32 = 11.0;
-    pub const LABEL_TEXT_SIZE: f32 = 11.0;
+    pub const LABEL_TEXT_SIZE: f32 = 10.5;
     pub const META_TEXT_SIZE: f32 = 10.0;
     pub const HEADER_TEXT_SIZE: f32 = 10.0;
-    pub const HEADER_HEIGHT: f32 = 22.0;
-    pub const SEPARATOR_MARGIN_Y: f32 = 4.0;
+    pub const HEADER_HEIGHT: f32 = 21.0;
+    pub const SEPARATOR_MARGIN_Y: f32 = 3.0;
     pub const ITEM_GAP: f32 = 1.0;
 }
 
 pub struct Colors;
 
 impl Colors {
-    // Backgrounds — near-black blue-gray DAW palette
+    // Backgrounds — JetBrains Fleet Dark inspired palette
     pub fn surface_base() -> Rgba {
-        rgb(0x171B22)
+        rgb(0x1E1F22)
     }
+
     pub fn surface_panel() -> Rgba {
-        rgb(0x202631)
+        rgb(0x25262B)
     }
+
+    pub fn surface_panel_alt() -> Rgba {
+        rgb(0x1B1C20)
+    }
+
+    pub fn surface_panel_raised() -> Rgba {
+        rgb(0x2B2D33)
+    }
+
+    pub fn surface_canvas() -> Rgba {
+        rgb(0x15161A)
+    }
+
     pub fn surface_raised() -> Rgba {
-        rgb(0x2A3240)
+        rgb(0x2B2D33)
     }
+
     pub fn surface_input() -> Rgba {
-        rgb(0x11151B)
+        rgb(0x181A1F)
     }
+
+    pub fn surface_window() -> Rgba {
+        rgb(0x15161A)
+    }
+
+    pub fn surface_titlebar() -> Rgba {
+        rgb(0x1B1C20)
+    }
+
+    pub fn surface_card() -> Rgba {
+        rgb(0x202126)
+    }
+
     pub fn surface_hover() -> Rgba {
-        rgb(0x313A49)
+        rgb(0x30323A)
+    }
+
+    pub fn surface_active() -> Rgba {
+        rgb(0x2B2D33)
+    }
+
+    pub fn surface_control_hover() -> Rgba {
+        rgb(0x292B31)
+    }
+
+    pub fn surface_overlay() -> Rgba {
+        rgba(0x00000085)
     }
 
     // Borders
     pub fn border_subtle() -> Rgba {
-        rgba(0xFFFFFF13)
+        rgba(0xFFFFFF14)
     }
+
+    pub fn border_default() -> Rgba {
+        rgba(0xFFFFFF1F)
+    }
+
     pub fn border_strong() -> Rgba {
-        rgb(0x536173)
+        rgb(0x4C505C)
+    }
+
+    pub fn border_focus() -> Rgba {
+        rgba(0x7B61FFB8)
+    }
+
+    pub fn border_accent() -> Rgba {
+        rgba(0x7B61FF80)
+    }
+
+    pub fn divider() -> Rgba {
+        rgba(0xFFFFFF0F)
     }
 
     // Text
     pub fn text_primary() -> Rgba {
-        rgb(0xF1F5F9)
+        rgb(0xDFE1E5)
     }
-    pub fn text_secondary() -> Rgba {
-        rgb(0xD2DBE6)
-    }
-    pub fn text_muted() -> Rgba {
-        rgb(0x9AA7B8)
-    }
-    pub fn text_faint() -> Rgba {
-        rgba(0xFFFFFF47)
-    } // ~28% white — sub-labels
 
-    // Accent
+    pub fn text_secondary() -> Rgba {
+        rgb(0xC3C7D0)
+    }
+
+    pub fn text_muted() -> Rgba {
+        rgb(0x8E96A3)
+    }
+
+    pub fn text_faint() -> Rgba {
+        rgba(0xFFFFFF45)
+    }
+
+    pub fn text_dim() -> Rgba {
+        rgba(0xFFFFFF66)
+    }
+
+    pub fn text_disabled() -> Rgba {
+        rgba(0xFFFFFF3B)
+    }
+
+    pub fn text_inverse() -> Rgba {
+        rgb(0x1E1F22)
+    }
+
+    // Accent — Fleet-style violet/blue
     pub fn accent_primary() -> Rgba {
+        rgb(0x7B61FF)
+    }
+
+    pub fn accent_primary_hover() -> Rgba {
+        rgb(0x8D78FF)
+    }
+
+    pub fn accent_soft() -> Rgba {
+        rgba(0x7B61FF30)
+    }
+
+    pub fn accent_muted() -> Rgba {
+        rgba(0x7B61FF20)
+    }
+
+    pub fn accent_pressed() -> Rgba {
+        rgba(0x7B61FF28)
+    }
+
+    pub fn on_accent() -> Rgba {
+        rgb(0xFFFFFF)
+    }
+
+    // Status / Alert Accents
+    pub fn status_error() -> Rgba {
+        rgb(0xFF6B68)
+    }
+
+    pub fn status_warning() -> Rgba {
+        rgb(0xE5C07B)
+    }
+
+    pub fn status_success() -> Rgba {
+        rgb(0x6FCF97)
+    }
+
+    pub fn accent_success() -> Rgba {
+        rgb(0x6FCF97)
+    }
+
+    pub fn accent_warning() -> Rgba {
+        rgb(0xE5C07B)
+    }
+
+    pub fn accent_danger() -> Rgba {
+        rgb(0xFF6B68)
+    }
+
+    pub fn accent_purple() -> Rgba {
+        rgb(0xBB86FC)
+    }
+
+    // DAW-specific
+    pub fn meter_bg() -> Rgba {
+        rgba(0xFFFFFF0D)
+    }
+
+    pub fn meter_low() -> Rgba {
+        rgb(0x6FCF97)
+    }
+
+    pub fn meter_mid() -> Rgba {
+        rgb(0xE5C07B)
+    }
+
+    pub fn meter_high() -> Rgba {
+        rgb(0xFF6B68)
+    }
+
+    pub fn fader_rail() -> Rgba {
+        rgba(0xFFFFFF0F)
+    }
+
+    pub fn fader_thumb() -> Rgba {
+        rgb(0xDFE1E5)
+    }
+
+    pub fn fader_tick() -> Rgba {
+        rgba(0xFFFFFF1F)
+    }
+
+    pub fn fader_scale_text() -> Rgba {
+        rgba(0xFFFFFF38)
+    }
+
+    pub fn knob_bg() -> Rgba {
+        rgb(0x181A1F)
+    }
+
+    pub fn knob_ring() -> Rgba {
+        rgb(0x7B61FF)
+    }
+
+    pub fn slot_bg() -> Rgba {
+        rgba(0xFFFFFF08)
+    }
+
+    pub fn slot_border() -> Rgba {
+        rgba(0xFFFFFF12)
+    }
+
+    pub fn statusbar_bg() -> Rgba {
+        rgb(0x1B1C20)
+    }
+
+    pub fn statusbar_text() -> Rgba {
+        rgb(0x8E96A3)
+    }
+
+    pub fn mixer_bg() -> Rgba {
+        rgb(0x111418)
+    }
+
+    pub fn master_strip_bg() -> Rgba {
+        rgb(0x181A1F)
+    }
+
+    pub fn timeline_grid_major() -> Rgba {
+        rgba(0xFFFFFF1A)
+    }
+
+    pub fn timeline_grid_minor() -> Rgba {
+        rgba(0xFFFFFF0A)
+    }
+
+    pub fn timeline_playhead() -> Rgba {
+        rgb(0xFF6B68)
+    }
+
+    // Track colors (fallbacks)
+    pub fn track_audio() -> Rgba {
         rgb(0x5FCED0)
     }
-    pub fn accent_soft() -> Rgba {
-        rgba(0x5FCED02E)
+
+    pub fn track_midi() -> Rgba {
+        rgb(0xE5C07B)
     }
 
-    // Status
-    pub fn status_error() -> Rgba {
-        rgb(0xF4877F)
+    pub fn track_instrument() -> Rgba {
+        rgb(0xBB86FC)
     }
-    pub fn status_warning() -> Rgba {
-        rgb(0xF4CF7A)
+
+    pub fn track_bus() -> Rgba {
+        rgb(0x7B61FF)
     }
-    pub fn status_success() -> Rgba {
-        rgb(0x85E0A3)
+
+    pub fn track_return() -> Rgba {
+        rgb(0x6FCF97)
+    }
+
+    pub fn track_master() -> Rgba {
+        rgb(0xDFE1E5)
+    }
+
+    // Helper to dynamically adjust alpha channel
+    pub fn with_alpha(color: Rgba, alpha: f32) -> Rgba {
+        Rgba {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+            a: alpha,
+        }
     }
 }

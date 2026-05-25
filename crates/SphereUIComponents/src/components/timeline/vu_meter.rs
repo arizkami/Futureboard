@@ -44,7 +44,7 @@ pub fn vu_meter_vertical_full(level_l: f32, level_r: f32) -> impl IntoElement {
         let mut bar = div()
             .w(px(width))
             .h_full()
-            .bg(gpui::rgba(0xFFFFFF0D))
+            .bg(Colors::meter_bg())
             .rounded_sm()
             .relative();
 
@@ -56,7 +56,7 @@ pub fn vu_meter_vertical_full(level_l: f32, level_r: f32) -> impl IntoElement {
                     .right(px(0.0))
                     .bottom(px(0.0))
                     .h(gpui::relative(green_n))
-                    .bg(Colors::status_success()),
+                    .bg(Colors::meter_low()),
             );
         }
         if yellow_n > 0.0 {
@@ -67,7 +67,7 @@ pub fn vu_meter_vertical_full(level_l: f32, level_r: f32) -> impl IntoElement {
                     .right(px(0.0))
                     .bottom(gpui::relative(green_n))
                     .h(gpui::relative(yellow_n))
-                    .bg(Colors::status_warning()),
+                    .bg(Colors::meter_mid()),
             );
         }
         if red_n > 0.0 {
@@ -78,7 +78,7 @@ pub fn vu_meter_vertical_full(level_l: f32, level_r: f32) -> impl IntoElement {
                     .right(px(0.0))
                     .bottom(gpui::relative(green_n + yellow_n))
                     .h(gpui::relative(red_n))
-                    .bg(Colors::status_error()),
+                    .bg(Colors::meter_high()),
             );
         }
         bar
@@ -122,7 +122,7 @@ fn vu_meter_sized(
         div()
             .w(px(width))
             .h(px(total_height))
-            .bg(gpui::rgba(0xFFFFFF0D)) // background track
+            .bg(Colors::meter_bg()) // background track
             .rounded_sm()
             .relative()
             // Green segment
@@ -132,7 +132,7 @@ fn vu_meter_sized(
                     .bottom_0()
                     .w_full()
                     .h(px(green_h))
-                    .bg(Colors::status_success()),
+                    .bg(Colors::meter_low()),
             )
             // Yellow segment
             .child(
@@ -141,7 +141,7 @@ fn vu_meter_sized(
                     .bottom(px(green_h))
                     .w_full()
                     .h(px(yellow_h))
-                    .bg(Colors::status_warning()),
+                    .bg(Colors::meter_mid()),
             )
             // Red segment
             .child(
@@ -150,7 +150,7 @@ fn vu_meter_sized(
                     .bottom(px(green_h + yellow_h))
                     .w_full()
                     .h(px(red_h))
-                    .bg(Colors::status_error()),
+                    .bg(Colors::meter_high()),
             )
     };
 

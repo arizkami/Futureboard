@@ -1,4 +1,5 @@
 use crate::components::timeline::timeline_state::{GridLineLevel, TimelineState};
+use crate::theme::Colors;
 use gpui::{div, px, IntoElement, ParentElement, Styled};
 
 pub fn timeline_grid(
@@ -31,12 +32,7 @@ pub fn timeline_grid(
                         .bottom_0()
                         .left(px(bx))
                         .w(px(bar_w.round()))
-                        .bg(gpui::Rgba {
-                            r: 1.0,
-                            g: 1.0,
-                            b: 1.0,
-                            a: 0.022,
-                        }), // matching "rgba(255,255,255,0.022)"
+                        .bg(Colors::with_alpha(Colors::text_primary(), 0.022)), // matching "rgba(255,255,255,0.022)"
                 );
             }
         }
@@ -67,12 +63,7 @@ pub fn timeline_grid(
                         .top_0()
                         .bottom_0()
                         .w(px(1.0))
-                        .bg(gpui::Rgba {
-                            r: 1.0,
-                            g: 1.0,
-                            b: 1.0,
-                            a: alpha,
-                        })
+                        .bg(Colors::with_alpha(Colors::text_primary(), alpha))
                 })),
         )
 }

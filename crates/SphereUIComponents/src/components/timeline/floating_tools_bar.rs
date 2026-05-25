@@ -1,5 +1,6 @@
 use crate::assets;
 use crate::components::timeline::timeline_state::TimelineTool;
+use crate::theme::Colors;
 use gpui::{
     div, px, svg, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
     Styled,
@@ -58,8 +59,8 @@ pub fn floating_tools_bar(
         .gap(px(1.0))
         .rounded_lg()
         .border(px(1.0))
-        .border_color(gpui::rgba(0xFFFFFF1A))
-        .bg(gpui::rgb(0x171b22))
+        .border_color(Colors::border_default())
+        .bg(Colors::surface_panel_alt())
         .px(px(4.0))
         .py(px(4.0))
         .shadow_xl()
@@ -88,18 +89,18 @@ pub fn floating_tools_bar(
                                 .cursor(gpui::CursorStyle::PointingHand)
                                 .text_size(px(14.0))
                                 .text_color(if active {
-                                    gpui::rgb(0x56c7c9)
+                                    Colors::accent_primary()
                                 } else {
-                                    gpui::rgba(0xB4C0CC8C)
+                                    Colors::text_muted()
                                 })
                                 .bg(if active {
-                                    gpui::rgba(0x56c7c926)
+                                    Colors::accent_soft()
                                 } else {
-                                    gpui::rgba(0x00000000)
+                                    gpui::transparent_black().into()
                                 })
                                 .hover(|style| {
                                     if !active {
-                                        style.bg(gpui::rgba(0xFFFFFF0D))
+                                        style.bg(Colors::surface_hover())
                                     } else {
                                         style
                                     }
@@ -109,9 +110,9 @@ pub fn floating_tools_bar(
                                 })
                                 .child(svg().path(icon).w(px(14.0)).h(px(14.0)).text_color(
                                     if active {
-                                        gpui::rgb(0x56c7c9)
+                                        Colors::accent_primary()
                                     } else {
-                                        gpui::rgba(0xB4C0CC8C)
+                                        Colors::text_muted()
                                     },
                                 ))
                                 .children(if active {
@@ -122,7 +123,7 @@ pub fn floating_tools_bar(
                                             .h(px(1.5))
                                             .w(px(16.0))
                                             .rounded_full()
-                                            .bg(gpui::rgb(0x56c7c9)),
+                                            .bg(Colors::accent_primary()),
                                     )
                                 } else {
                                     None
@@ -134,7 +135,7 @@ pub fn floating_tools_bar(
                                     .mx(px(4.0))
                                     .h(px(16.0))
                                     .w(px(1.0))
-                                    .bg(gpui::rgba(0xFFFFFF14)),
+                                    .bg(Colors::divider()),
                             )
                         } else {
                             None
