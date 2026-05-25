@@ -57,8 +57,16 @@ pub enum TimelineContextTarget {
 pub type TimelineContextMenuCb = std::sync::Arc<
     dyn Fn(&(TimelineContextTarget, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static,
 >;
-pub type TimelineAddTrackCb =
-    std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>;
+
+#[derive(Clone, Copy, Debug)]
+pub struct TimelineAddTrackRequest {
+    pub track_count: usize,
+    pub has_master_track: bool,
+}
+
+pub type TimelineAddTrackCb = std::sync::Arc<
+    dyn Fn(&TimelineAddTrackRequest, &mut gpui::Window, &mut gpui::App) + 'static,
+>;
 
 #[derive(Clone, Debug)]
 struct ScrollbarDrag {
@@ -446,7 +454,18 @@ impl Render for Timeline {
 
         let on_add_track = cx.listener(|this, _: &(), window, cx| {
             if let Some(callback) = this.on_add_track.as_ref() {
-                callback(&(), window, cx);
+                callback(
+                    &TimelineAddTrackRequest {
+                        track_count: this.state.tracks.len(),
+                        has_master_track: this
+                            .state
+                            .tracks
+                            .iter()
+                            .any(|track| track.track_type == TrackType::Master),
+                    },
+                    window,
+                    cx,
+                );
             } else {
                 let id = this.state.create_audio_track();
                 this.state.select_track(&id);

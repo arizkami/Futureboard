@@ -7,6 +7,7 @@ pub mod timeline;
 pub mod timeline_grid;
 pub mod timeline_ruler;
 pub mod timeline_state;
+pub mod timeline_surface;
 pub mod track_header;
 pub mod track_lane;
 pub mod track_list;

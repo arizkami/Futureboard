@@ -1,8 +1,8 @@
 use gpui::{div, px, IntoElement, ParentElement, Styled};
 
 use crate::components::timeline::automation_lane::automation_lane;
-use crate::components::timeline::timeline_grid::timeline_grid;
 use crate::components::timeline::timeline_state::{TimelineState, HEADER_WIDTH, TRACK_HEIGHT};
+use crate::components::timeline::timeline_surface::timeline_surface;
 use crate::components::timeline::track_header::{track_header, TrackHeaderCallbacks};
 use crate::components::timeline::track_lane::track_lane;
 use crate::theme::Colors;
@@ -107,7 +107,7 @@ pub fn track_list(
                 .right_0()
                 .top_0()
                 .bottom_0()
-                .child(timeline_grid(state, grid_width, grid_height)),
+                .child(timeline_surface(state, grid_width, grid_height)),
         )
         // Foreground layer: scrolling TrackHeader/TrackLane rows.
         .child(

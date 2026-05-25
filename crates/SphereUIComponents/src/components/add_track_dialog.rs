@@ -13,7 +13,6 @@ use crate::theme::Colors;
 type VoidCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 type KindCb = Arc<dyn Fn(&AddTrackKind, &mut Window, &mut App) + 'static>;
 type U32Cb = Arc<dyn Fn(&u32, &mut Window, &mut App) + 'static>;
-type F32Cb = Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>;
 type BoolCb = Arc<dyn Fn(&bool, &mut Window, &mut App) + 'static>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,8 +180,6 @@ pub struct AddTrackDialogCallbacks {
     pub on_count_delta: Arc<dyn Fn(&i32, &mut Window, &mut App) + 'static>,
     pub on_channel_count: U32Cb,
     pub on_color_index: U32Cb,
-    pub on_volume: F32Cb,
-    pub on_pan: F32Cb,
     pub on_arm: BoolCb,
     pub on_monitor: Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
 }
@@ -343,13 +340,21 @@ fn option_card(
 }
 
 fn option_group(label: &'static str, child: impl IntoElement) -> impl IntoElement {
-    div().flex().flex_col().gap(px(6.0)).child(
-        div()
-            .text_size(px(9.0))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(Colors::text_faint())
-            .child(label),
-    ).child(child)
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(0.0))
+        .gap(px(6.0))
+        .child(
+            div()
+                .h(px(12.0))
+                .text_size(px(9.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::text_faint())
+                .child(label),
+        )
+        .child(child)
 }
 
 fn pill(
@@ -363,6 +368,8 @@ fn pill(
         .justify_center()
         .h(px(27.0))
         .flex_1()
+        .min_w(px(52.0))
+        .px(px(10.0))
         .rounded_md()
         .border(px(1.0))
         .border_color(if active {
@@ -448,81 +455,6 @@ fn spinner(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -> 
                 .id("add-track-count-plus")
                 .cursor(gpui::CursorStyle::PointingHand)
                 .on_click(move |_, window, cx| up(&1, window, cx))
-                .child("+"),
-        )
-}
-
-fn slider_row(
-    id_prefix: u32,
-    value: f32,
-    display: String,
-    accent: gpui::Rgba,
-    minus: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-    plus: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(7.0))
-        .child(
-            div()
-                .w(px(18.0))
-                .h(px(20.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_sm()
-                .bg(rgba(0x13161CFF))
-                .border(px(1.0))
-                .border_color(rgba(0xFFFFFF12))
-                .text_color(Colors::text_muted())
-                .id(("add-track-slider-minus", id_prefix))
-                .cursor(gpui::CursorStyle::PointingHand)
-                .on_click(minus)
-                .child("-"),
-        )
-        .child(
-            div()
-                .relative()
-                .flex_1()
-                .h(px(3.0))
-                .rounded_full()
-                .bg(rgba(0xFFFFFF18))
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(px((value.clamp(0.0, 1.0) * 120.0).max(2.0)))
-                        .rounded_full()
-                        .bg(accent),
-                ),
-        )
-        .child(
-            div()
-                .w(px(38.0))
-                .text_align(gpui::TextAlign::Right)
-                .text_size(px(10.0))
-                .text_color(Colors::text_muted())
-                .child(display),
-        )
-        .child(
-            div()
-                .w(px(18.0))
-                .h(px(20.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_sm()
-                .bg(rgba(0x13161CFF))
-                .border(px(1.0))
-                .border_color(rgba(0xFFFFFF12))
-                .text_color(Colors::text_muted())
-                .id(("add-track-slider-plus", id_prefix))
-                .cursor(gpui::CursorStyle::PointingHand)
-                .on_click(plus)
                 .child("+"),
         )
 }
@@ -669,6 +601,7 @@ pub fn add_track_dialog(
                 div()
                     .flex()
                     .flex_row()
+                    .flex_1()
                     .gap(px(5.0))
                     .child(pill("Off", state.monitor_mode == "off", move |_, window, cx| {
                         off(&"off".to_string(), window, cx)
@@ -764,8 +697,12 @@ pub fn add_track_dialog(
         .flex()
         .items_start()
         .justify_center()
-        .pt(px(92.0))
+        .pt(px(56.0))
+        .px(px(18.0))
+        .pb(px(32.0))
+        .id("add-track-modal-overlay")
         .bg(rgba(0x00000000))
+        .occlude()
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
             close_backdrop(&(), window, cx);
         })
@@ -773,8 +710,9 @@ pub fn add_track_dialog(
             div()
                 .flex()
                 .flex_col()
-                .w(px(540.0))
-                .max_h(px(720.0))
+                .w(px(620.0))
+                .max_w(px(620.0))
+                .max_h(px(760.0))
                 .overflow_hidden()
                 .rounded_xl()
                 .border(px(1.0))
@@ -876,67 +814,10 @@ pub fn add_track_dialog(
                         .gap(px(8.0))
                         .border_t(px(1.0))
                         .border_color(rgba(0xFFFFFF0D))
-                        .px(px(12.0))
-                        .py(px(8.0))
+                        .px(px(14.0))
+                        .py(px(10.0))
                         .child(option_group("Amount", spinner(state, &callbacks)))
                         .child(channel_controls),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap(px(8.0))
-                        .border_t(px(1.0))
-                        .border_color(rgba(0xFFFFFF0D))
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .child({
-                            let down = callbacks.on_volume.clone();
-                            let up = callbacks.on_volume.clone();
-                            let volume = state.volume;
-                            option_group(
-                                "Volume",
-                                slider_row(
-                                    0,
-                                    volume,
-                                    format!("{}%", (volume * 100.0).round() as i32),
-                                    selected_color,
-                                    move |_, window, cx| {
-                                        down(&(volume - 0.05).clamp(0.0, 1.0), window, cx)
-                                    },
-                                    move |_, window, cx| {
-                                        up(&(volume + 0.05).clamp(0.0, 1.0), window, cx)
-                                    },
-                                ),
-                            )
-                        })
-                        .child({
-                            let down = callbacks.on_pan.clone();
-                            let up = callbacks.on_pan.clone();
-                            let pan = state.pan;
-                            let display = if pan.abs() < 0.001 {
-                                "C".to_string()
-                            } else if pan < 0.0 {
-                                format!("L{}", (-pan * 100.0).round() as i32)
-                            } else {
-                                format!("R{}", (pan * 100.0).round() as i32)
-                            };
-                            option_group(
-                                "Pan",
-                                slider_row(
-                                    1,
-                                    (pan + 1.0) * 0.5,
-                                    display,
-                                    gpui::rgb(0xA99CFF),
-                                    move |_, window, cx| {
-                                        down(&(pan - 0.05).clamp(-1.0, 1.0), window, cx)
-                                    },
-                                    move |_, window, cx| {
-                                        up(&(pan + 0.05).clamp(-1.0, 1.0), window, cx)
-                                    },
-                                ),
-                            )
-                        }),
                 )
                 .child(routing)
                 .child(

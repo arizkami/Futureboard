@@ -8,6 +8,10 @@ autobins = false
 name = "sphere_ui_components"
 path = "src/lib.rs"
 
+[features]
+default = []
+gpu-renderer = ["dep:raw-window-handle", "dep:wgpu"]
+
 [dependencies]
 gpui = "0.2.2"
 # Audio decoding + multi-LOD peak generation moved into DAUx
@@ -20,3 +24,5 @@ dirs = "5"
 # Menu manifest is shared with Electron/Web via a generated JSON file.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+raw-window-handle = { version = "0.6", optional = true }
+wgpu = { version = "29.0.3", default-features = false, features = ["std", "vulkan", "wgsl"], optional = true }

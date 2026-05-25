@@ -690,6 +690,16 @@ impl StudioLayout {
                 .iter()
                 .any(|track| track.track_type == TrackType::Master);
         });
+        self.open_add_track_dialog_with_context(kind, track_count, has_master_track, cx);
+    }
+
+    fn open_add_track_dialog_with_context(
+        &mut self,
+        kind: AddTrackKind,
+        track_count: usize,
+        has_master_track: bool,
+        cx: &mut Context<Self>,
+    ) {
         let mut dialog = AddTrackDialogState::open_for(track_count, has_master_track);
         dialog.selected_kind = kind;
         dialog.track_name = format!("{} {}", kind.label(), dialog.next_number);
@@ -744,8 +754,8 @@ impl StudioLayout {
                     color: timeline
                         .state
                         .track_color_for_index(dialog.color_index.saturating_add(i)),
-                    volume: dialog.volume.clamp(0.0, 1.0),
-                    pan: dialog.pan.clamp(-1.0, 1.0),
+                    volume: timeline_state::volume::db_to_norm(0.0),
+                    pan: 0.0,
                     armed: dialog.selected_kind == AddTrackKind::Audio && dialog.arm_track,
                     input_monitor: dialog.selected_kind == AddTrackKind::Audio
                         && dialog.monitor_mode != "off",
@@ -1753,9 +1763,15 @@ impl Render for StudioLayout {
         });
         let on_add_track: components::timeline::timeline::TimelineAddTrackCb = {
             let this = cx.entity().clone();
-            std::sync::Arc::new(move |_: &(), _w, cx| {
+            std::sync::Arc::new(move |request, _w, cx| {
+                let request = *request;
                 let _ = this.update(cx, |this, cx| {
-                    this.open_add_track_dialog(cx);
+                    this.open_add_track_dialog_with_context(
+                        AddTrackKind::Audio,
+                        request.track_count,
+                        request.has_master_track,
+                        cx,
+                    );
                 });
             })
         };
@@ -1971,26 +1987,6 @@ impl Render for StudioLayout {
                         let index = *index as usize;
                         let _ = target.update(cx, |this, cx| {
                             this.add_track_dialog.color_index = index;
-                            cx.notify();
-                        });
-                    }
-                }),
-                on_volume: Arc::new({
-                    let target = target.clone();
-                    move |value: &f32, _w, cx| {
-                        let value = *value;
-                        let _ = target.update(cx, |this, cx| {
-                            this.add_track_dialog.volume = value.clamp(0.0, 1.0);
-                            cx.notify();
-                        });
-                    }
-                }),
-                on_pan: Arc::new({
-                    let target = target.clone();
-                    move |value: &f32, _w, cx| {
-                        let value = *value;
-                        let _ = target.update(cx, |this, cx| {
-                            this.add_track_dialog.pan = value.clamp(-1.0, 1.0);
                             cx.notify();
                         });
                     }
