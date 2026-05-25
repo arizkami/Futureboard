@@ -63,7 +63,7 @@ fn piano_key(is_black: bool) -> impl IntoElement {
         .w_full()
         .bg(bg_color)
         .border_b(px(1.0))
-        .border_color(Colors::border_subtle())
+        .border_color(Colors::panel_border())
 }
 
 fn midi_note(width: f32, delay: f32, note_y: f32) -> impl IntoElement {
@@ -76,7 +76,7 @@ fn midi_note(width: f32, delay: f32, note_y: f32) -> impl IntoElement {
         .rounded_sm()
         .bg(Colors::accent_primary())
         .border(px(1.0))
-        .border_color(Colors::with_alpha(Colors::accent_primary(), 0.8))
+        .border_color(Colors::with_alpha(Colors::accent_primary(), 0.8)) // Approved: MIDI note state border opacity
 }
 
 fn editor_panel() -> impl IntoElement {
@@ -92,7 +92,7 @@ fn editor_panel() -> impl IntoElement {
                 .h_full()
                 .bg(Colors::surface_panel())
                 .border_r(px(1.0))
-                .border_color(Colors::border_subtle())
+                .border_color(Colors::panel_border())
                 .flex_col()
                 .child(piano_key(false))
                 .child(piano_key(true))
@@ -221,7 +221,7 @@ fn empty_plugin_slot() -> impl IntoElement {
         .h(px(80.0))
         .rounded_md()
         .border(px(1.0))
-        .border_color(Colors::border_subtle())
+        .border_color(Colors::panel_border())
         .border_dashed()
         .flex()
         .items_center()
@@ -338,8 +338,8 @@ pub fn bottom_panel(
         .h(px(panel_state.height_px))
         .w_full()
         .border_t(px(1.0))
-        .border_color(Colors::border_subtle())
-        .bg(Colors::surface_panel())
+        .border_color(Colors::panel_border())
+        .bg(Colors::bottom_panel_bg())
         .relative()
         // While dragging, listen for move events on the whole panel.
         .on_drag_move::<BottomPanelResizeDrag>(on_resize_move)
@@ -368,8 +368,8 @@ pub fn bottom_panel(
                 .h(px(28.0))
                 .px(px(8.0))
                 .border_b(px(1.0))
-                .border_color(Colors::border_subtle())
-                .bg(Colors::surface_panel_alt())
+                .border_color(Colors::panel_border())
+                .bg(Colors::bottom_panel_header_bg())
                 .child(tab_button(
                     "Mixer",
                     assets::ICON_SLIDERS_HORIZONTAL_PATH,

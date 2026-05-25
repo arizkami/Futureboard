@@ -13,9 +13,9 @@ pub fn status_bar(left: impl Into<String>, right: impl Into<String>) -> impl Int
         .h(px(STATUSBAR_HEIGHT))
         .px(px(6.0))
         .gap(px(8.0))
-        .bg(Colors::surface_titlebar())
+        .bg(Colors::statusbar_bg())
         .border_t(px(1.0))
-        .border_color(Colors::border_subtle())
+        .border_color(Colors::panel_border())
         .child(
             div()
                 .flex_1()

@@ -30,6 +30,7 @@ use crate::components::timeline::timeline_state::{
 };
 use crate::components::timeline::waveform_cache;
 use crate::components::{BottomPanelResizeDrag, BottomPanelState};
+use crate::paths::FutureboardPaths;
 use crate::project::{
     apply_to_timeline, io::load_project, io::save_project, now_secs, recent::RecentProjectsStore,
     FutureboardProject,
@@ -134,11 +135,13 @@ pub struct StudioLayout {
     mixer_scroll_x: f32,
 
     // ── Project file system ───────────────────────────────────────────────────
+    /// Centralized filesystem paths for the entire application.
+    paths: FutureboardPaths,
     /// Absolute path to the currently open `.fbproj` file, if any.
     project_path: Option<PathBuf>,
     /// Root folder of the current project (contains Media/, Cache/, etc.).
     project_folder: Option<PathBuf>,
-    /// Persistent recent-projects list backed by `~/.config/Futureboard/recent.json`.
+    /// Persistent recent-projects list backed by `<AppData>/Futureboard Studio/recent.json`.
     recent_projects: RecentProjectsStore,
     /// External borderless New Project utility window, if it is currently alive.
     project_wizard_window: Option<WindowHandle<ProjectWizardWindow>>,
@@ -338,6 +341,12 @@ impl StudioLayout {
 
         Self::spawn_audio_poll(cx);
 
+        // ── Centralized path resolution ───────────────────────────────────
+        let paths = FutureboardPaths::resolve();
+        if let Err(e) = paths.ensure_user_dirs() {
+            eprintln!("[paths] failed to create user directories: {e}");
+        }
+
         Self {
             active_bottom_tab: components::BottomTab::Mixer,
             bottom_panel_state: BottomPanelState::default(),
@@ -374,6 +383,7 @@ impl StudioLayout {
             logged_unsupported_commands: HashSet::new(),
             frame_diag: FrameDiagnostics::new(),
             mixer_scroll_x: 0.0,
+            paths,
             project_path: None,
             project_folder: None,
             recent_projects: RecentProjectsStore::load(),

@@ -15,7 +15,7 @@ pub fn section_separator() -> impl gpui::IntoElement {
         .w(px(1.0))
         .h(px(18.0))
         .mx(px(3.0))
-        .bg(Colors::border_subtle())
+        .bg(Colors::panel_border())
 }
 
 pub fn chrome_button(
@@ -91,9 +91,9 @@ pub fn status_item(text: impl Into<String>, strong: bool) -> impl gpui::IntoElem
             gpui::FontWeight::NORMAL
         })
         .text_color(if strong {
-            Colors::text_secondary()
+            Colors::statusbar_text()
         } else {
-            Colors::text_muted()
+            Colors::statusbar_text_muted()
         })
         .child(text.into())
 }

@@ -746,45 +746,13 @@ fn drive_label(path: &Path) -> String {
     }
 }
 
-/// Resolves standard folder paths under Futureboard Documents, creating them if needed.
+/// Resolves standard folder paths for the file browser sidebar.
+///
+/// Delegates to [`crate::paths::FutureboardPaths`] — the centralized path
+/// system. Directory creation is handled once at app startup via
+/// `FutureboardPaths::ensure_user_dirs()`, not on every browser update.
 pub fn resolve_standard_dirs() -> HashMap<String, PathBuf> {
-    let doc_dir = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let fb_dir = doc_dir.join("Futureboard Studio");
-
-    // Proactively initialize directories under Futureboard Studio
-    let _ = std::fs::create_dir_all(fb_dir.join("Projects"));
-    let _ = std::fs::create_dir_all(fb_dir.join("Samples"));
-    let _ = std::fs::create_dir_all(fb_dir.join("User Library"));
-
-    let mut map = HashMap::new();
-
-    // Audio Files
-    let audio = dirs::audio_dir()
-        .unwrap_or_else(|| dirs::home_dir().map(|h| h.join("Music")).unwrap_or_else(|| PathBuf::from(".")));
-    map.insert("audio_files".to_string(), audio);
-
-    // Projects
-    let projects = fb_dir.join("Projects");
-    map.insert("projects".to_string(), projects);
-
-    // Samples
-    let samples = fb_dir.join("Samples");
-    map.insert("samples".to_string(), samples);
-
-    // User Library
-    let user_lib = fb_dir.join("User Library");
-    map.insert("user_library".to_string(), user_lib);
-
-    // VST3 Plugin folders
-    #[cfg(target_os = "windows")]
-    let vst3 = PathBuf::from(r"C:\Program Files\Common Files\VST3");
-    #[cfg(target_os = "macos")]
-    let vst3 = PathBuf::from("/Library/Audio/Plug-Ins/Components");
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let vst3 = PathBuf::from("/usr/lib/vst3");
-    map.insert("plugins".to_string(), vst3);
-
-    map
+    crate::paths::FutureboardPaths::resolve().standard_dirs()
 }
 
 /// Read directory into sorted entry lists. Treat .vst3 folders as files/plugins.

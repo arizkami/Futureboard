@@ -71,9 +71,9 @@ pub fn db_scale_column() -> gpui::Div {
                 .mt(-px(4.0))
                 .text_size(px(7.5))
                 .text_color(if db == 0.0 {
-                    Colors::with_alpha(Colors::text_primary(), 0.7)
+                    Colors::text_primary()
                 } else {
-                    Colors::with_alpha(Colors::text_muted(), 0.4)
+                    Colors::fader_scale_text()
                 })
                 .child(label),
         );
@@ -85,8 +85,7 @@ pub fn db_scale_column() -> gpui::Div {
 fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
     let value = value_norm.clamp(0.0, 1.0);
 
-    let mut thumb_accent = accent;
-    thumb_accent.a = 0.9;
+    let thumb_accent = Colors::with_alpha(accent, 0.9); // Approved: dynamic accent thumb outline
 
     let top_basis = (1.0 - value).clamp(0.0, 1.0);
     let bot_basis = value.clamp(0.0, 1.0);
@@ -109,7 +108,7 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
             .w(px(RAIL_W))
             .bg(Colors::fader_rail())
             .border(px(1.0))
-            .border_color(Colors::with_alpha(Colors::surface_canvas(), 0.5))
+            .border_color(Colors::fader_groove())
             .rounded_full(),
     );
 
@@ -126,9 +125,9 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
                 .h(px(1.0))
                 .w(px(w))
                 .bg(if db == 0.0 {
-                    Colors::with_alpha(Colors::fader_tick(), 0.7)
+                    Colors::fader_tick()
                 } else {
-                    Colors::with_alpha(Colors::fader_tick(), 0.3)
+                    Colors::with_alpha(Colors::fader_tick(), 0.3) // Approved: minor tick marks alpha
                 }),
         );
     }
@@ -143,7 +142,7 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
                 .rounded_sm()
                 .bg(Colors::surface_input())
                 .border(px(1.0))
-                .border_color(Colors::with_alpha(Colors::text_primary(), 0.4))
+                .border_color(Colors::fader_thumb_border())
                 .relative()
                 .child(
                     div()
@@ -152,7 +151,7 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
                         .left(px(1.0))
                         .right(px(1.0))
                         .h(px(1.0))
-                        .bg(Colors::with_alpha(Colors::text_primary(), 0.15)),
+                        .bg(Colors::with_alpha(Colors::text_primary(), 0.15)), // Approved: thumb top highlight
                 )
                 .child(
                     div()
@@ -171,9 +170,9 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
 /// the value reads as a proper integrated control.
 pub fn db_value_pill(db_text: impl Into<gpui::SharedString>, highlight: bool) -> impl IntoElement {
     let border = if highlight {
-        Colors::with_alpha(Colors::border_default(), 0.5)
+        Colors::border_default()
     } else {
-        Colors::with_alpha(Colors::border_subtle(), 0.5)
+        Colors::panel_border()
     };
 
     div()
@@ -186,7 +185,7 @@ pub fn db_value_pill(db_text: impl Into<gpui::SharedString>, highlight: bool) ->
         .h(px(18.0))
         .px(px(6.0))
         .rounded_sm()
-        .bg(Colors::with_alpha(Colors::surface_canvas(), 0.6))
+        .bg(Colors::slot_bg())
         .border(px(1.0))
         .border_color(border)
         .child(

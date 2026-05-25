@@ -44,7 +44,7 @@ pub fn vu_meter_vertical_full(level_l: f32, level_r: f32) -> impl IntoElement {
         let mut bar = div()
             .w(px(width))
             .h_full()
-            .bg(Colors::meter_bg())
+            .bg(Colors::meter_rail())
             .rounded_sm()
             .relative();
 
@@ -122,7 +122,7 @@ fn vu_meter_sized(
         div()
             .w(px(width))
             .h(px(total_height))
-            .bg(Colors::meter_bg()) // background track
+            .bg(Colors::meter_rail()) // background track
             .rounded_sm()
             .relative()
             // Green segment

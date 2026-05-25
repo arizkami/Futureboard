@@ -2,17 +2,18 @@ use super::{
     format::{decode_project, encode_project, ProjectError},
     now_secs, FutureboardProject,
 };
+use crate::paths::{FutureboardPaths, ProjectFolderLayout};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const PROJECT_FILE_EXT: &str = "fbproj";
 
 /// Platform-aware default projects directory: `~/Documents/Futureboard Studio/Projects/`.
+///
+/// Delegates to [`FutureboardPaths::resolve()`] so the path string is defined
+/// in exactly one place.
 pub fn default_projects_dir() -> PathBuf {
-    dirs::document_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Futureboard Studio")
-        .join("Projects")
+    FutureboardPaths::resolve().projects
 }
 
 /// Strips characters that are illegal in file/folder names on Windows, macOS, and Linux.
@@ -36,8 +37,10 @@ pub fn sanitize_project_name(name: &str) -> String {
 /// Creates the project folder tree under `base_dir/project_name/`.
 /// Returns the root folder path.
 ///
+/// Delegates to [`ProjectFolderLayout`] for the actual subfolder structure.
+///
 /// Folder layout:
-/// ```
+/// ```text
 /// <base_dir>/<project_name>/
 ///   <project_name>.fbproj
 ///   Media/Audio/
@@ -55,22 +58,8 @@ pub fn create_project_folder(base_dir: &Path, project_name: &str) -> Result<Path
     let safe_name = sanitize_project_name(project_name);
     let root = base_dir.join(&safe_name);
 
-    let dirs_to_create = [
-        root.join("Media").join("Audio"),
-        root.join("Media").join("MIDI"),
-        root.join("Media").join("Samples"),
-        root.join("Cache").join("Waveform"),
-        root.join("Cache").join("Peaks"),
-        root.join("Cache").join("Processed"),
-        root.join("Cache").join("Analysis"),
-        root.join("Rendered").join("Mixdowns"),
-        root.join("Rendered").join("Stems"),
-        root.join("Rendered").join("Bounces"),
-    ];
-
-    for dir in &dirs_to_create {
-        fs::create_dir_all(dir)?;
-    }
+    let layout = ProjectFolderLayout::from_root(root.clone());
+    layout.ensure_dirs()?;
 
     Ok(root)
 }

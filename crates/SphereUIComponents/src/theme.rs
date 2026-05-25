@@ -308,6 +308,88 @@ impl Colors {
         rgb(0xDFE1E5)
     }
 
+    // Surfaces
+    pub fn bottom_panel_bg() -> Rgba {
+        rgb(0x25262B)
+    }
+
+    pub fn bottom_panel_header_bg() -> Rgba {
+        rgb(0x1B1C20)
+    }
+
+    pub fn mixer_strip_bg() -> Rgba {
+        rgba(0xFFFFFF08)
+    }
+
+    pub fn mixer_strip_bg_alt() -> Rgba {
+        rgba(0xFFFFFF05)
+    }
+
+    pub fn mixer_strip_selected_bg() -> Rgba {
+        rgba(0xFFFFFF14)
+    }
+
+    pub fn master_strip_header_bg() -> Rgba {
+        rgb(0x181A1F)
+    }
+
+    // Borders
+    pub fn panel_border() -> Rgba {
+        rgba(0xFFFFFF14)
+    }
+
+    pub fn strip_border() -> Rgba {
+        rgba(0xFFFFFF26)
+    }
+
+    pub fn strip_border_subtle() -> Rgba {
+        rgba(0xFFFFFF0A)
+    }
+
+    pub fn master_strip_border() -> Rgba {
+        rgba(0xFFFFFF1A)
+    }
+
+    // Slots
+    pub fn slot_bg_hover() -> Rgba {
+        rgba(0xFFFFFF14)
+    }
+
+    pub fn slot_empty_text() -> Rgba {
+        rgba(0xFFFFFF45)
+    }
+
+    // Fader
+    pub fn fader_groove() -> Rgba {
+        rgb(0x15161A)
+    }
+
+    pub fn fader_thumb_border() -> Rgba {
+        rgba(0xFFFFFF40)
+    }
+
+    // Meters
+    pub fn meter_rail() -> Rgba {
+        rgba(0xFFFFFF0A)
+    }
+
+    pub fn meter_peak() -> Rgba {
+        rgb(0xFFD700)
+    }
+
+    // Status
+    pub fn statusbar_text_muted() -> Rgba {
+        rgba(0xFFFFFF66)
+    }
+
+    pub fn statusbar_accent() -> Rgba {
+        rgb(0x7B61FF)
+    }
+
+    pub fn statusbar_warning() -> Rgba {
+        rgb(0xE5C07B)
+    }
+
     // Helper to dynamically adjust alpha channel
     pub fn with_alpha(color: Rgba, alpha: f32) -> Rgba {
         Rgba {

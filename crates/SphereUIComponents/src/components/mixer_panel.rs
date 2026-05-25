@@ -111,7 +111,7 @@ fn mixer_sub_header(track_count: usize) -> impl IntoElement {
                 .border(px(1.0))
                 .border_color(Colors::slot_border())
                 .text_size(px(9.0))
-                .text_color(Colors::with_alpha(Colors::text_primary(), 0.35))
+                .text_color(Colors::text_faint())
                 .child(format!("{} ch", track_count)),
         )
 }
@@ -124,8 +124,7 @@ fn section_header(label: &'static str, accent: gpui::Rgba) -> impl IntoElement {
         "SENDS" => Some(assets::ICON_ROUTE_PATH),
         _ => None,
     };
-    let mut soft_accent = accent;
-    soft_accent.a = 0.55;
+    let soft_accent = Colors::with_alpha(accent, 0.55); // Approved: dynamic accent decoration alpha
 
     div()
         .flex()
@@ -187,7 +186,7 @@ fn empty_slot() -> impl IntoElement {
         .border_dashed()
         .border_color(Colors::slot_border())
         .text_size(px(8.0))
-        .text_color(Colors::text_faint())
+        .text_color(Colors::slot_empty_text())
         .child("empty")
 }
 
@@ -219,11 +218,11 @@ fn msri_button(
         btn = btn.bg(active_bg).text_color(active_fg);
     } else {
         btn = btn
-            .bg(Colors::with_alpha(Colors::text_primary(), 0.04))
+            .bg(Colors::slot_bg())
             .border(px(1.0))
-            .border_color(Colors::with_alpha(Colors::text_primary(), 0.09))
-            .text_color(Colors::with_alpha(Colors::text_secondary(), 0.52))
-            .hover(|s| s.bg(Colors::surface_hover()));
+            .border_color(Colors::slot_border())
+            .text_color(Colors::text_muted())
+            .hover(|s| s.bg(Colors::slot_bg_hover()));
     }
     btn
 }
@@ -523,14 +522,16 @@ fn channel_strip(
     };
 
     let strip_bg = if is_selected {
-        Colors::with_alpha(Colors::text_primary(), 0.08)
+        Colors::mixer_strip_selected_bg()
+    } else if index % 2 == 0 {
+        Colors::mixer_strip_bg()
     } else {
-        Colors::with_alpha(Colors::text_primary(), 0.03)
+        Colors::mixer_strip_bg_alt()
     };
     let border_col = if is_selected {
-        Colors::with_alpha(Colors::text_primary(), 0.15)
+        Colors::strip_border()
     } else {
-        Colors::with_alpha(Colors::text_primary(), 0.04)
+        Colors::strip_border_subtle()
     };
 
     let select_id = track.id.clone();
@@ -594,9 +595,9 @@ fn master_strip(
         .w(px(STRIP_WIDTH))
         .min_h(px(STRIP_MIN_HEIGHT))
         .h_full()
-        .bg(Colors::with_alpha(Colors::track_audio(), 0.05))
+        .bg(Colors::master_strip_bg())
         .border_l(px(1.0))
-        .border_color(Colors::with_alpha(Colors::text_primary(), 0.1))
+        .border_color(Colors::master_strip_border())
         .child(div().w_full().h(px(2.0)).bg(accent))
         // Header
         .child(
@@ -660,25 +661,23 @@ fn master_strip(
                 .h(px(SEC_PAN_H))
                 .border_b(px(1.0))
                 .border_color(Colors::divider())
-                .child({
-                    let mut border = accent;
-                    border.a = 0.55;
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .min_w(px(46.0))
-                        .px(px(6.0))
-                        .h(px(14.0))
-                        .rounded_sm()
-                        .bg(Colors::with_alpha(Colors::surface_canvas(), 0.3))
-                        .border(px(1.0))
-                        .border_color(border)
-                        .text_size(px(9.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_secondary())
-                        .child("STEREO")
-                })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .min_w(px(46.0))
+                .px(px(6.0))
+                .h(px(14.0))
+                .rounded_sm()
+                .bg(Colors::slot_bg())
+                .border(px(1.0))
+                .border_color(Colors::with_alpha(accent, 0.55)) // Approved: dynamic accent border highlight
+                .text_size(px(9.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::text_secondary())
+                .child("STEREO")
+        )
                 .child(
                     div()
                         .text_size(px(7.5))
@@ -744,12 +743,12 @@ fn master_strip(
                         .h(px(16.0))
                         .px(px(6.0))
                         .rounded_sm()
-                        .bg(Colors::with_alpha(Colors::text_primary(), 0.04))
+                        .bg(Colors::slot_bg())
                         .border(px(1.0))
-                        .border_color(Colors::with_alpha(Colors::text_primary(), 0.09))
+                        .border_color(Colors::slot_border())
                         .text_size(px(8.5))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::with_alpha(Colors::text_secondary(), 0.52))
+                        .text_color(Colors::text_muted())
                         .child("OUT 1·2"),
                 ),
         )

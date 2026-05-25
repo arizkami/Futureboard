@@ -1,3 +1,4 @@
+use crate::paths::FutureboardPaths;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,7 +15,7 @@ pub struct RecentProject {
 }
 
 /// Persistent list of recently opened projects, backed by a JSON config file.
-/// Stored at `dirs::config_dir()/Futureboard/recent.json`.
+/// Stored at `<AppData>/Futureboard Studio/recent.json`.
 #[derive(Debug, Default)]
 pub struct RecentProjectsStore {
     entries: Vec<RecentProject>,
@@ -23,10 +24,7 @@ pub struct RecentProjectsStore {
 
 impl RecentProjectsStore {
     fn config_path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Futureboard")
-            .join("recent.json")
+        FutureboardPaths::resolve().recent_file
     }
 
     /// Loads from disk, creating an empty store if the file doesn't exist.
