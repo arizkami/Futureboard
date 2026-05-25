@@ -101,6 +101,23 @@ To ensure a seamless desktop DAW experience, all interface elements must share t
 - Manage plugin instance lifecycles defensively to prevent host crashes.
 
 ---
+### Get Source code and setup
+
+Clone Source Code
+```bash
+git clone --recursive https://github.com/futureboard/Futureboard
+```
+---
+### Setup
+
+#### for WebUI
+```
+bun install
+```
+
+#### for Desktop
+- Desktop Development using Cargo
+---
 
 ## 🔧 Submission Checklist
 
