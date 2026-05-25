@@ -194,8 +194,7 @@ pub fn track_color(index: usize) -> gpui::Rgba {
 }
 
 fn option_supported(kind: AddTrackKind, state: &AddTrackDialogState) -> bool {
-    kind.native_track_type().is_some()
-        && !(kind == AddTrackKind::Master && state.has_master_track)
+    kind.native_track_type().is_some() && !(kind == AddTrackKind::Master && state.has_master_track)
 }
 
 fn unsupported_badge(kind: AddTrackKind, state: &AddTrackDialogState) -> &'static str {
@@ -516,7 +515,11 @@ fn summary_text(state: &AddTrackDialogState) -> String {
     };
     match state.selected_kind {
         AddTrackKind::Audio => {
-            let ch = if state.channel_count == 1 { "mono" } else { "stereo" };
+            let ch = if state.channel_count == 1 {
+                "mono"
+            } else {
+                "stereo"
+            };
             let mon = if state.monitor_mode != "off" {
                 format!(" - Mon {}", state.monitor_mode)
             } else {
@@ -526,7 +529,9 @@ fn summary_text(state: &AddTrackDialogState) -> String {
         }
         AddTrackKind::Midi => format!("Add {n}MIDI track{plural} - All MIDI Inputs, all channels"),
         AddTrackKind::Instrument => {
-            format!("Add {n}instrument track{plural} - All MIDI Inputs -> instrument plugin -> {out}")
+            format!(
+                "Add {n}instrument track{plural} - All MIDI Inputs -> instrument plugin -> {out}"
+            )
         }
         AddTrackKind::Plugin => "Plugin tracks are not wired in Native yet".to_string(),
         AddTrackKind::Bus => "Bus tracks are not wired in Native yet".to_string(),
@@ -558,7 +563,11 @@ pub fn add_track_dialog(
 
     let channel_controls = if matches!(
         state.selected_kind,
-        AddTrackKind::Audio | AddTrackKind::Plugin | AddTrackKind::Bus | AddTrackKind::Return | AddTrackKind::Group
+        AddTrackKind::Audio
+            | AddTrackKind::Plugin
+            | AddTrackKind::Bus
+            | AddTrackKind::Return
+            | AddTrackKind::Group
     ) {
         option_group(
             "Channels",
@@ -603,15 +612,21 @@ pub fn add_track_dialog(
                     .flex_row()
                     .flex_1()
                     .gap(px(5.0))
-                    .child(pill("Off", state.monitor_mode == "off", move |_, window, cx| {
-                        off(&"off".to_string(), window, cx)
-                    }))
-                    .child(pill("Auto", state.monitor_mode == "auto", move |_, window, cx| {
-                        auto(&"auto".to_string(), window, cx)
-                    }))
-                    .child(pill("In", state.monitor_mode == "in", move |_, window, cx| {
-                        input(&"in".to_string(), window, cx)
-                    })),
+                    .child(pill(
+                        "Off",
+                        state.monitor_mode == "off",
+                        move |_, window, cx| off(&"off".to_string(), window, cx),
+                    ))
+                    .child(pill(
+                        "Auto",
+                        state.monitor_mode == "auto",
+                        move |_, window, cx| auto(&"auto".to_string(), window, cx),
+                    ))
+                    .child(pill(
+                        "In",
+                        state.monitor_mode == "in",
+                        move |_, window, cx| input(&"in".to_string(), window, cx),
+                    )),
             ))
             .child(routing_row("Input", select_box("System Input".to_string())))
             .child(routing_row("Output", select_box("Master".to_string())))
@@ -652,7 +667,9 @@ pub fn add_track_dialog(
                     )
             })
             .into_any_element()
-    } else if state.selected_kind == AddTrackKind::Midi || state.selected_kind == AddTrackKind::Instrument {
+    } else if state.selected_kind == AddTrackKind::Midi
+        || state.selected_kind == AddTrackKind::Instrument
+    {
         div()
             .flex()
             .flex_col()
@@ -670,7 +687,10 @@ pub fn add_track_dialog(
                 select_box(state.selected_kind.default_input().to_string()),
             ))
             .when(state.selected_kind == AddTrackKind::Midi, |this| {
-                this.child(routing_row("Channel", select_box("All Channels".to_string())))
+                this.child(routing_row(
+                    "Channel",
+                    select_box("All Channels".to_string()),
+                ))
             })
             .when(state.selected_kind == AddTrackKind::Instrument, |this| {
                 this.child(routing_row("Output", select_box("Master".to_string())))
@@ -788,11 +808,7 @@ pub fn add_track_dialog(
                                 .border_color(rgba(0xFFFFFF12))
                                 .bg(rgba(0x13161CFF))
                                 .px(px(12.0))
-                                .child(icon(
-                                    state.selected_kind.icon(),
-                                    12.0,
-                                    Colors::text_faint(),
-                                ))
+                                .child(icon(state.selected_kind.icon(), 12.0, Colors::text_faint()))
                                 .child(
                                     div()
                                         .flex_1()

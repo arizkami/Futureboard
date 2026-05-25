@@ -1,9 +1,9 @@
 #[cfg(feature = "gpu-renderer")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use gpui::IntoElement;
 #[cfg(feature = "gpu-renderer")]
 use gpui::{canvas, fill, point, px, size, Bounds, Pixels, Styled};
-use gpui::IntoElement;
 
 #[cfg(not(feature = "gpu-renderer"))]
 use crate::components::timeline::timeline_grid::timeline_grid;
@@ -94,13 +94,7 @@ pub fn timeline_surface(
 }
 
 #[cfg(feature = "gpu-renderer")]
-fn local_bounds(
-    parent: Bounds<Pixels>,
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-) -> Bounds<Pixels> {
+fn local_bounds(parent: Bounds<Pixels>, x: f32, y: f32, width: f32, height: f32) -> Bounds<Pixels> {
     Bounds::new(
         parent.origin + point(px(x), px(y)),
         size(px(width.max(0.0)), px(height.max(0.0))),

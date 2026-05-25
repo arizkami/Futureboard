@@ -56,9 +56,8 @@ pub fn track_list(
         visible_end.saturating_sub(visible_start) as u64,
     );
 
-    let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(
-        visible_end.saturating_sub(visible_start) + 2,
-    );
+    let mut rows: Vec<gpui::AnyElement> =
+        Vec::with_capacity(visible_end.saturating_sub(visible_start) + 2);
 
     if top_spacer_h > 0.0 {
         rows.push(

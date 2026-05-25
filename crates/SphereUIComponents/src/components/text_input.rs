@@ -1,7 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, rgba, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, ParentElement, Styled, Window,
+    div, px, rgba, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
+    ParentElement, Styled, Window,
 };
 
 use crate::theme::Colors;
@@ -207,7 +207,11 @@ fn printable_text(key: &str) -> Option<&str> {
         "space" => Some(" "),
         k if k.chars().count() == 1 => {
             let c = k.chars().next()?;
-            if c.is_control() { None } else { Some(k) }
+            if c.is_control() {
+                None
+            } else {
+                Some(k)
+            }
         }
         _ => None,
     }
@@ -229,8 +233,16 @@ pub fn text_field(state: &TextInputState, focused: bool) -> impl IntoElement {
     let is_empty = value.is_empty();
     let placeholder = state.placeholder.clone().unwrap_or_default();
 
-    let border = if focused { rgba(0x5FCED0B0) } else { rgba(0xFFFFFF1A) };
-    let bg = if focused { rgba(0x192030FF) } else { rgba(0x0E1117FF) };
+    let border = if focused {
+        rgba(0x5FCED0B0)
+    } else {
+        rgba(0xFFFFFF1A)
+    };
+    let bg = if focused {
+        rgba(0x192030FF)
+    } else {
+        rgba(0x0E1117FF)
+    };
 
     // Build the text + cursor content
     let content: gpui::AnyElement = if is_empty {

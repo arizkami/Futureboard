@@ -4,8 +4,8 @@ pub mod recent;
 
 pub use format::{decode_project, encode_project, ProjectError, PROJECT_MAGIC, PROJECT_VERSION};
 pub use io::{
-    create_project_folder, default_projects_dir, load_project, sanitize_project_name,
-    save_project, PROJECT_FILE_EXT,
+    create_project_folder, default_projects_dir, load_project, sanitize_project_name, save_project,
+    PROJECT_FILE_EXT,
 };
 pub use recent::{RecentProject, RecentProjectsStore};
 
@@ -305,7 +305,10 @@ impl From<&TimelineState> for FutureboardProject {
                     .iter()
                     .map(|c| {
                         let source = match &c.clip_type {
-                            ClipType::Audio { file_id, source_path } => ClipSource::Audio {
+                            ClipType::Audio {
+                                file_id,
+                                source_path,
+                            } => ClipSource::Audio {
                                 asset_id: file_id.clone(),
                                 source_path: source_path.as_deref().map(PathBuf::from),
                             },
@@ -409,9 +412,14 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 .iter()
                 .map(|pc| {
                     let clip_type = match &pc.source {
-                        ClipSource::Audio { asset_id, source_path } => ClipType::Audio {
+                        ClipSource::Audio {
+                            asset_id,
+                            source_path,
+                        } => ClipType::Audio {
                             file_id: asset_id.clone(),
-                            source_path: source_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                            source_path: source_path
+                                .as_ref()
+                                .map(|p| p.to_string_lossy().into_owned()),
                         },
                         ClipSource::Midi { notes } => ClipType::Midi {
                             notes: notes

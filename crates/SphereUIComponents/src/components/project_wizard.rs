@@ -72,11 +72,21 @@ impl ProjectTemplate {
     }
 
     pub fn default_bpm(self) -> f64 {
-        if matches!(self, Self::BeatMaking) { 140.0 } else { 120.0 }
+        if matches!(self, Self::BeatMaking) {
+            140.0
+        } else {
+            120.0
+        }
     }
 
     pub fn all() -> [Self; 5] {
-        [Self::Empty, Self::Recording, Self::BeatMaking, Self::Mixing, Self::Scoring]
+        [
+            Self::Empty,
+            Self::Recording,
+            Self::BeatMaking,
+            Self::Mixing,
+            Self::Scoring,
+        ]
     }
 }
 
@@ -123,11 +133,17 @@ impl ProjectWizardState {
     }
 
     pub fn open() -> Self {
-        Self { is_open: true, ..Self::closed() }
+        Self {
+            is_open: true,
+            ..Self::closed()
+        }
     }
 
     pub fn bpm(&self) -> f64 {
-        self.bpm_text.parse::<f64>().unwrap_or(120.0).clamp(20.0, 300.0)
+        self.bpm_text
+            .parse::<f64>()
+            .unwrap_or(120.0)
+            .clamp(20.0, 300.0)
     }
 
     pub fn is_valid(&self) -> bool {
@@ -182,18 +198,10 @@ fn section_label(text: &'static str) -> impl IntoElement {
                 .text_color(rgba(0x4A556680))
                 .child(text),
         )
-        .child(
-            div()
-                .flex_1()
-                .h(px(1.0))
-                .bg(rgba(0xFFFFFF08)),
-        )
+        .child(div().flex_1().h(px(1.0)).bg(rgba(0xFFFFFF08)))
 }
 
-fn field_row(
-    label: &'static str,
-    child: impl IntoElement,
-) -> impl IntoElement {
+fn field_row(label: &'static str, child: impl IntoElement) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
@@ -217,10 +225,26 @@ fn template_card(
     index: usize,
     cb: Arc<dyn Fn(&ProjectTemplate, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
-    let border = if active { rgba(0x5FCED0B0) } else { rgba(0xFFFFFF0F) };
-    let bg = if active { rgba(0x0D2030FF) } else { rgba(0x12161EFF) };
-    let icon_color = if active { Colors::accent_primary() } else { rgba(0x5A6A8080) };
-    let name_color = if active { Colors::text_primary() } else { rgba(0xB0C0D0CC) };
+    let border = if active {
+        rgba(0x5FCED0B0)
+    } else {
+        rgba(0xFFFFFF0F)
+    };
+    let bg = if active {
+        rgba(0x0D2030FF)
+    } else {
+        rgba(0x12161EFF)
+    };
+    let icon_color = if active {
+        Colors::accent_primary()
+    } else {
+        rgba(0x5A6A8080)
+    };
+    let name_color = if active {
+        Colors::text_primary()
+    } else {
+        rgba(0xB0C0D0CC)
+    };
 
     div()
         .id(("wizard-tmpl", index))
@@ -237,10 +261,7 @@ fn template_card(
         .px(px(10.0))
         .py(px(10.0))
         .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|s| {
-            s.bg(rgba(0x16202EFF))
-                .border_color(rgba(0xFFFFFF1E))
-        })
+        .hover(|s| s.bg(rgba(0x16202EFF)).border_color(rgba(0xFFFFFF1E)))
         .on_click(move |_, window, cx| cb(&tmpl, window, cx))
         // Top: icon
         .child(
@@ -251,7 +272,11 @@ fn template_card(
                 .w(px(26.0))
                 .h(px(26.0))
                 .rounded_md()
-                .bg(if active { rgba(0x5FCED018) } else { rgba(0xFFFFFF08) })
+                .bg(if active {
+                    rgba(0x5FCED018)
+                } else {
+                    rgba(0xFFFFFF08)
+                })
                 .child(
                     svg()
                         .path(tmpl.icon_path())
@@ -298,11 +323,27 @@ fn seg_button(
         .min_w(px(28.0))
         .rounded_md()
         .border(px(1.0))
-        .border_color(if active { rgba(0x5FCED080) } else { rgba(0xFFFFFF10) })
-        .bg(if active { rgba(0x5FCED018) } else { rgba(0x0E1117FF) })
+        .border_color(if active {
+            rgba(0x5FCED080)
+        } else {
+            rgba(0xFFFFFF10)
+        })
+        .bg(if active {
+            rgba(0x5FCED018)
+        } else {
+            rgba(0x0E1117FF)
+        })
         .text_size(px(10.5))
-        .font_weight(if active { gpui::FontWeight::SEMIBOLD } else { gpui::FontWeight::NORMAL })
-        .text_color(if active { Colors::text_primary() } else { rgba(0x7080A0AA) })
+        .font_weight(if active {
+            gpui::FontWeight::SEMIBOLD
+        } else {
+            gpui::FontWeight::NORMAL
+        })
+        .text_color(if active {
+            Colors::text_primary()
+        } else {
+            rgba(0x7080A0AA)
+        })
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| s.bg(rgba(0x1A2030FF)).border_color(rgba(0xFFFFFF1A)))
         .on_click(on_click)
@@ -615,12 +656,20 @@ pub fn project_wizard(
                                                 .w(px(68.0))
                                                 .child(text_field(bpm_input, bpm_focused)),
                                         )
-                                        .child(stepper_btn("−", "wizard-bpm-dec", move |_, w, cx| {
-                                            bpm_dec(&-1, w, cx);
-                                        }))
-                                        .child(stepper_btn("+", "wizard-bpm-inc", move |_, w, cx| {
-                                            bpm_inc(&1, w, cx);
-                                        }))
+                                        .child(stepper_btn(
+                                            "−",
+                                            "wizard-bpm-dec",
+                                            move |_, w, cx| {
+                                                bpm_dec(&-1, w, cx);
+                                            },
+                                        ))
+                                        .child(stepper_btn(
+                                            "+",
+                                            "wizard-bpm-inc",
+                                            move |_, w, cx| {
+                                                bpm_inc(&1, w, cx);
+                                            },
+                                        ))
                                         .child(
                                             div()
                                                 .text_size(px(10.0))

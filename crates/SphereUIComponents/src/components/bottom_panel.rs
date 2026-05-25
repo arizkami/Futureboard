@@ -404,18 +404,16 @@ pub fn bottom_panel(
                 .min_h_0()
                 .w_full()
                 .child(match active_tab {
-                    BottomTab::Mixer => {
-                        render_mixer_panel(
-                            tracks,
-                            master,
-                            selected_track_id,
-                            mixer_callbacks,
-                            mixer_scroll_x,
-                            mixer_viewport_width,
-                            on_mixer_scroll,
-                        )
-                        .into_any_element()
-                    }
+                    BottomTab::Mixer => render_mixer_panel(
+                        tracks,
+                        master,
+                        selected_track_id,
+                        mixer_callbacks,
+                        mixer_scroll_x,
+                        mixer_viewport_width,
+                        on_mixer_scroll,
+                    )
+                    .into_any_element(),
                     BottomTab::Editor => editor_panel().into_any_element(),
                     BottomTab::EffectEditor => effect_editor_panel().into_any_element(),
                 }),

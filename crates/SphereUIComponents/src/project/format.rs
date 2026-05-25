@@ -26,7 +26,10 @@ impl std::fmt::Display for ProjectError {
             ProjectError::UnsupportedVersion(v) => write!(f, "Unsupported project version: {v}"),
             ProjectError::Corrupted(msg) => write!(f, "Corrupted project: {msg}"),
             ProjectError::ChecksumMismatch { expected, got } => {
-                write!(f, "Checksum mismatch: expected {expected:#010x}, got {got:#010x}")
+                write!(
+                    f,
+                    "Checksum mismatch: expected {expected:#010x}, got {got:#010x}"
+                )
             }
         }
     }
@@ -46,7 +49,9 @@ pub struct FbWriter {
 
 impl FbWriter {
     pub fn new() -> Self {
-        Self { buf: Vec::with_capacity(4096) }
+        Self {
+            buf: Vec::with_capacity(4096),
+        }
     }
 
     pub fn into_bytes(self) -> Vec<u8> {
@@ -147,36 +152,48 @@ pub struct FbReader<'a> {
 
 impl<'a> FbReader<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { cur: Cursor::new(data) }
+        Self {
+            cur: Cursor::new(data),
+        }
     }
 
     fn read_u8(&mut self) -> Result<u8, ProjectError> {
         let mut b = [0u8; 1];
-        self.cur.read_exact(&mut b).map_err(|_| ProjectError::Corrupted("truncated u8".into()))?;
+        self.cur
+            .read_exact(&mut b)
+            .map_err(|_| ProjectError::Corrupted("truncated u8".into()))?;
         Ok(b[0])
     }
 
     fn read_u32(&mut self) -> Result<u32, ProjectError> {
         let mut b = [0u8; 4];
-        self.cur.read_exact(&mut b).map_err(|_| ProjectError::Corrupted("truncated u32".into()))?;
+        self.cur
+            .read_exact(&mut b)
+            .map_err(|_| ProjectError::Corrupted("truncated u32".into()))?;
         Ok(u32::from_le_bytes(b))
     }
 
     fn read_u64(&mut self) -> Result<u64, ProjectError> {
         let mut b = [0u8; 8];
-        self.cur.read_exact(&mut b).map_err(|_| ProjectError::Corrupted("truncated u64".into()))?;
+        self.cur
+            .read_exact(&mut b)
+            .map_err(|_| ProjectError::Corrupted("truncated u64".into()))?;
         Ok(u64::from_le_bytes(b))
     }
 
     fn read_f32(&mut self) -> Result<f32, ProjectError> {
         let mut b = [0u8; 4];
-        self.cur.read_exact(&mut b).map_err(|_| ProjectError::Corrupted("truncated f32".into()))?;
+        self.cur
+            .read_exact(&mut b)
+            .map_err(|_| ProjectError::Corrupted("truncated f32".into()))?;
         Ok(f32::from_le_bytes(b))
     }
 
     fn read_f64(&mut self) -> Result<f64, ProjectError> {
         let mut b = [0u8; 8];
-        self.cur.read_exact(&mut b).map_err(|_| ProjectError::Corrupted("truncated f64".into()))?;
+        self.cur
+            .read_exact(&mut b)
+            .map_err(|_| ProjectError::Corrupted("truncated f64".into()))?;
         Ok(f64::from_le_bytes(b))
     }
 
@@ -324,7 +341,10 @@ fn encode_clip(w: &mut FbWriter, c: &ProjectClip) {
     w.write_bool(c.muted);
     match &c.source {
         ClipSource::Empty => w.write_u8(0),
-        ClipSource::Audio { asset_id, source_path } => {
+        ClipSource::Audio {
+            asset_id,
+            source_path,
+        } => {
             w.write_u8(1);
             w.write_str(asset_id);
             w.write_opt_path(source_path);
@@ -501,9 +521,18 @@ fn decode_insert(r: &mut FbReader) -> Result<ProjectInsert, ProjectError> {
     let plugin = match r.read_u8()? {
         0 => None,
         1 => Some(decode_plugin_instance(r)?),
-        t => return Err(ProjectError::Corrupted(format!("bad plugin option tag {t}"))),
+        t => {
+            return Err(ProjectError::Corrupted(format!(
+                "bad plugin option tag {t}"
+            )))
+        }
     };
-    Ok(ProjectInsert { id, slot_index, bypassed, plugin })
+    Ok(ProjectInsert {
+        id,
+        slot_index,
+        bypassed,
+        plugin,
+    })
 }
 
 fn decode_automation_lane(r: &mut FbReader) -> Result<AutomationLane, ProjectError> {
@@ -513,9 +542,17 @@ fn decode_automation_lane(r: &mut FbReader) -> Result<AutomationLane, ProjectErr
     let count = r.read_u32()? as usize;
     let mut points = Vec::with_capacity(count);
     for _ in 0..count {
-        points.push(AutomationPoint { beat: r.read_f32()?, value: r.read_f32()? });
+        points.push(AutomationPoint {
+            beat: r.read_f32()?,
+            value: r.read_f32()?,
+        });
     }
-    Ok(AutomationLane { id, parameter_name, visible, points })
+    Ok(AutomationLane {
+        id,
+        parameter_name,
+        visible,
+        points,
+    })
 }
 
 fn decode_midi_note(r: &mut FbReader) -> Result<MidiNote, ProjectError> {
@@ -549,9 +586,22 @@ fn decode_clip(r: &mut FbReader) -> Result<ProjectClip, ProjectError> {
             }
             ClipSource::Midi { notes }
         }
-        t => return Err(ProjectError::Corrupted(format!("unknown clip source tag {t}"))),
+        t => {
+            return Err(ProjectError::Corrupted(format!(
+                "unknown clip source tag {t}"
+            )))
+        }
     };
-    Ok(ProjectClip { id, name, start_beat, duration_beats, offset_beats, gain, muted, source })
+    Ok(ProjectClip {
+        id,
+        name,
+        start_beat,
+        duration_beats,
+        offset_beats,
+        gain,
+        muted,
+        source,
+    })
 }
 
 fn decode_track_type(r: &mut FbReader) -> Result<ProjectTrackType, ProjectError> {
@@ -572,7 +622,11 @@ fn decode_input_monitor(r: &mut FbReader) -> Result<InputMonitorMode, ProjectErr
         0 => InputMonitorMode::Off,
         1 => InputMonitorMode::Always,
         2 => InputMonitorMode::WhenRecordArmed,
-        t => return Err(ProjectError::Corrupted(format!("unknown input monitor mode {t}"))),
+        t => {
+            return Err(ProjectError::Corrupted(format!(
+                "unknown input monitor mode {t}"
+            )))
+        }
     })
 }
 
@@ -677,7 +731,13 @@ fn decode_body(body: &[u8]) -> Result<FutureboardProject, ProjectError> {
         name,
         created_at,
         modified_at,
-        settings: super::ProjectSettings { bpm, time_sig_num, time_sig_den, sample_rate, bit_depth },
+        settings: super::ProjectSettings {
+            bpm,
+            time_sig_num,
+            time_sig_den,
+            sample_rate,
+            bit_depth,
+        },
         tracks,
         mixer: ProjectMixer { master_volume_norm },
         assets,
@@ -709,9 +769,7 @@ pub fn decode_project(data: &[u8]) -> Result<FutureboardProject, ProjectError> {
     }
 
     let body = &data[20..20 + body_len];
-    let stored_crc = u32::from_le_bytes(
-        data[20 + body_len..20 + body_len + 4].try_into().unwrap(),
-    );
+    let stored_crc = u32::from_le_bytes(data[20 + body_len..20 + body_len + 4].try_into().unwrap());
     let computed_crc = crc32fast::hash(body);
 
     if computed_crc != stored_crc {

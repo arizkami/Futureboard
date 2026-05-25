@@ -60,9 +60,7 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_MUSIC_PATH => Some(assets::icons::MUSIC.as_bytes()),
             assets::ICON_GIT_MERGE_PATH => Some(assets::icons::GIT_MERGE.as_bytes()),
             assets::ICON_GIT_FORK_PATH => Some(assets::icons::GIT_FORK.as_bytes()),
-            assets::ICON_CORNER_DOWN_LEFT_PATH => {
-                Some(assets::icons::CORNER_DOWN_LEFT.as_bytes())
-            }
+            assets::ICON_CORNER_DOWN_LEFT_PATH => Some(assets::icons::CORNER_DOWN_LEFT.as_bytes()),
             assets::ICON_VOLUME_2_PATH => Some(assets::icons::VOLUME_2.as_bytes()),
             assets::ICON_CIRCLE_DOT_PATH => Some(assets::icons::CIRCLE_DOT.as_bytes()),
             assets::ICON_MAGNET_PATH => Some(assets::icons::MAGNET.as_bytes()),

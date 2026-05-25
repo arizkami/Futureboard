@@ -40,7 +40,10 @@ impl RecentProjectsStore {
         } else {
             Vec::new()
         };
-        Self { entries, config_path }
+        Self {
+            entries,
+            config_path,
+        }
     }
 
     pub fn entries(&self) -> &[RecentProject] {
@@ -51,7 +54,15 @@ impl RecentProjectsStore {
     pub fn push(&mut self, name: impl Into<String>, path: PathBuf, last_opened_at: u64) {
         let path_clone = path.clone();
         self.entries.retain(|e| e.path != path_clone);
-        self.entries.insert(0, RecentProject { name: name.into(), path, last_opened_at, missing: false });
+        self.entries.insert(
+            0,
+            RecentProject {
+                name: name.into(),
+                path,
+                last_opened_at,
+                missing: false,
+            },
+        );
         self.entries.truncate(MAX_RECENT);
         let _ = self.save();
     }

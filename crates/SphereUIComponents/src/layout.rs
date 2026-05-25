@@ -29,8 +29,8 @@ use crate::components::timeline::timeline_state::{
 use crate::components::timeline::waveform_cache;
 use crate::components::{BottomPanelResizeDrag, BottomPanelState};
 use crate::project::{
-    apply_to_timeline, io::save_project, io::load_project, now_secs,
-    recent::RecentProjectsStore, FutureboardProject,
+    apply_to_timeline, io::load_project, io::save_project, now_secs, recent::RecentProjectsStore,
+    FutureboardProject,
 };
 use crate::theme::{self, Colors};
 
@@ -94,6 +94,8 @@ pub struct StudioLayout {
     audio_last_error: Option<String>,
     audio_stats: Option<DAUx::EngineStats>,
     last_audio_project_signature: Option<String>,
+    engine_project_dirty: bool,
+    engine_media_dirty: bool,
     last_engine_playhead_beat: f32,
     last_engine_sync: Instant,
     /// Owns keyboard focus for the studio surface. Without a focused
@@ -225,6 +227,19 @@ impl StudioLayout {
                         if d.is_default { "  [default]" } else { "" }
                     );
                 }
+                let mut engine = engine;
+                match engine.start() {
+                    Ok(()) => {
+                        let stats = engine.stats();
+                        eprintln!(
+                            "[audio] stream warmed: backend={} sr={} buf={}",
+                            stats.backend_name, stats.sample_rate, stats.buffer_size
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("[audio] warm-up failed; will retry on first Play: {error}");
+                    }
+                }
                 Some(engine)
             }
             Err(error) => {
@@ -277,6 +292,32 @@ impl StudioLayout {
                 );
             });
         }
+        {
+            let target = cx.entity().clone();
+            let _ = timeline.update(cx, |timeline, _cx| {
+                timeline.set_project_changed_callback(Some(Arc::new(move |cx| {
+                    let _ = target.update(cx, |this, _cx| {
+                        this.mark_dirty();
+                    });
+                })));
+            });
+        }
+        {
+            let target = cx.entity().clone();
+            let _ = timeline.update(cx, |timeline, _cx| {
+                timeline.set_media_changed_callback(Some(Arc::new(move |cx| {
+                    let _ = target.update(cx, |this, cx| {
+                        this.mark_engine_media_dirty();
+                        this.sync_audio_project(cx, false);
+                    });
+                })));
+            });
+        }
+        let initial_audio_stats = audio_engine.as_ref().map(|engine| engine.stats());
+        let initial_audio_running = initial_audio_stats
+            .as_ref()
+            .map(|stats| stats.running)
+            .unwrap_or(false);
 
         Self::spawn_audio_poll(cx);
 
@@ -291,10 +332,12 @@ impl StudioLayout {
             add_track_dialog: AddTrackDialogState::closed(),
             open_popover: None,
             audio_engine,
-            audio_running: false,
+            audio_running: initial_audio_running,
             audio_last_error: None,
-            audio_stats: None,
+            audio_stats: initial_audio_stats,
             last_audio_project_signature: None,
+            engine_project_dirty: true,
+            engine_media_dirty: true,
             last_engine_playhead_beat: 0.0,
             last_engine_sync: Instant::now(),
             focus_handle: cx.focus_handle(),
@@ -449,20 +492,67 @@ impl StudioLayout {
             let timeline = self.timeline.read(cx);
             build_engine_project_snapshot(&timeline.state, sample_rate)
         };
+        log_engine_sync_snapshot(
+            &snapshot,
+            self.engine_project_dirty || self.engine_media_dirty,
+        );
         let signature = serde_json::to_string(&snapshot).unwrap_or_default();
         if !force && self.last_audio_project_signature.as_deref() == Some(signature.as_str()) {
+            self.engine_project_dirty = false;
+            self.engine_media_dirty = false;
             return true;
         }
 
         match engine.load_project(snapshot) {
             Ok(()) => {
                 self.last_audio_project_signature = Some(signature);
+                self.engine_project_dirty = false;
+                self.engine_media_dirty = false;
                 self.audio_last_error = None;
                 true
             }
             Err(error) => {
                 self.audio_last_error = Some(error.to_string());
                 eprintln!("[audio] load_project failed: {error}");
+                false
+            }
+        }
+    }
+
+    fn mark_engine_project_dirty(&mut self) {
+        self.engine_project_dirty = true;
+    }
+
+    fn mark_engine_media_dirty(&mut self) {
+        self.engine_project_dirty = true;
+        self.engine_media_dirty = true;
+    }
+
+    fn ensure_audio_stream_warm(&mut self) -> bool {
+        if self
+            .audio_stats
+            .as_ref()
+            .map(|stats| stats.running)
+            .unwrap_or(self.audio_running)
+        {
+            return true;
+        }
+
+        let Some(engine) = self.audio_engine.as_mut() else {
+            self.audio_last_error = Some("audio engine unavailable".to_string());
+            return false;
+        };
+        match engine.start() {
+            Ok(()) => {
+                self.audio_stats = Some(engine.stats());
+                self.audio_running = true;
+                self.audio_last_error = None;
+                true
+            }
+            Err(error) => {
+                self.audio_running = false;
+                self.audio_last_error = Some(error.to_string());
+                eprintln!("[audio] stream warm-up failed: {error}");
                 false
             }
         }
@@ -483,40 +573,19 @@ impl StudioLayout {
     }
 
     fn start_native_playback(&mut self, cx: &mut Context<Self>) {
+        eprintln!("[transport] Play requested");
         if self.audio_engine.is_none() {
             self.audio_last_error = Some("audio engine unavailable".to_string());
             return;
         }
 
-        // Open the audio device FIRST. The DirectAudioEngine renders clip
-        // ranges in `runtime.sample_rate` units; if we load the project at
-        // the default 44.1 kHz fallback before the cpal/WASAPI stream picks
-        // its real rate (e.g. 48 kHz), every clip's start_sample and
-        // duration_samples land in the wrong reference frame and playback
-        // either drifts in pitch or stops short. Opening the stream up
-        // front lets us hand `sync_audio_project` the real hardware rate.
-        if !self.audio_running {
-            let Some(engine) = self.audio_engine.as_mut() else {
-                return;
-            };
-            if let Err(error) = engine.start() {
-                self.audio_running = false;
-                self.audio_last_error = Some(error.to_string());
-                eprintln!("[audio] start failed: {error}");
-                return;
-            }
-            self.audio_running = true;
-            // Refresh stats so current_audio_sample_rate() reads the rate
-            // cpal actually negotiated, not the pre-open fallback.
-            if let Some(engine) = self.audio_engine.as_ref() {
-                self.audio_stats = Some(engine.stats());
-            }
+        if !self.ensure_audio_stream_warm() {
+            return;
         }
 
-        // Now push the project snapshot. Force a resync so the runtime gets
-        // (re)built at the real sample rate even when the project signature
-        // is unchanged from the cached one stored before the stream opened.
-        if !self.sync_audio_project(cx, true) {
+        if (self.engine_project_dirty || self.engine_media_dirty)
+            && !self.sync_audio_project(cx, false)
+        {
             return;
         }
         self.sync_metronome_controls(cx);
@@ -732,9 +801,8 @@ impl StudioLayout {
         self.project_wizard = ProjectWizardState::open();
         self.wizard_name_input.set_value("Untitled Project");
         self.wizard_name_input.select_all();
-        self.wizard_bpm_input.set_value(
-            format!("{:.0}", self.project_wizard.bpm()).as_str(),
-        );
+        self.wizard_bpm_input
+            .set_value(format!("{:.0}", self.project_wizard.bpm()).as_str());
     }
 
     fn close_project_wizard(&mut self) {
@@ -744,7 +812,8 @@ impl StudioLayout {
     fn on_project_created(&mut self, result: &ProjectWizardResult, cx: &mut Context<Self>) {
         self.close_project_wizard();
 
-        let folder = match crate::project::io::create_project_folder(&result.location, &result.name) {
+        let folder = match crate::project::io::create_project_folder(&result.location, &result.name)
+        {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("[project] failed to create folder: {e}");
@@ -783,7 +852,9 @@ impl StudioLayout {
                     });
                 }
                 for i in 0..midi_count {
-                    let color = timeline.state.track_color_for_index((audio_count + i) as usize);
+                    let color = timeline
+                        .state
+                        .track_color_for_index((audio_count + i) as usize);
                     timeline.state.create_track(CreateTrackOptions {
                         track_type: TrackType::Midi,
                         name: format!("MIDI {}", i + 1),
@@ -814,7 +885,8 @@ impl StudioLayout {
         self.project_switcher.current_project.is_dirty = false;
         self.project_switcher.current_project.subtitle = "Saved".to_string();
 
-        self.recent_projects.push(&result.name, project_file, now_secs());
+        self.recent_projects
+            .push(&result.name, project_file, now_secs());
         self.sync_recent_to_switcher();
         cx.notify();
     }
@@ -824,6 +896,7 @@ impl StudioLayout {
     fn mark_dirty(&mut self) {
         self.project_switcher.current_project.is_dirty = true;
         self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
+        self.mark_engine_project_dirty();
     }
 
     fn cmd_save_project(&mut self, cx: &mut Context<Self>) {
@@ -851,7 +924,10 @@ impl StudioLayout {
                     crate::project::io::sanitize_project_name(&name),
                     crate::project::io::PROJECT_FILE_EXT
                 ))
-                .add_filter("Futureboard Project", &[crate::project::io::PROJECT_FILE_EXT])
+                .add_filter(
+                    "Futureboard Project",
+                    &[crate::project::io::PROJECT_FILE_EXT],
+                )
                 .save_file()
                 .await;
             if let Some(handle) = result {
@@ -883,7 +959,10 @@ impl StudioLayout {
                     crate::project::io::sanitize_project_name(&name),
                     crate::project::io::PROJECT_FILE_EXT
                 ))
-                .add_filter("Futureboard Project", &[crate::project::io::PROJECT_FILE_EXT])
+                .add_filter(
+                    "Futureboard Project",
+                    &[crate::project::io::PROJECT_FILE_EXT],
+                )
                 .save_file()
                 .await;
             if let Some(handle) = result {
@@ -908,11 +987,8 @@ impl StudioLayout {
                 self.project_switcher.current_project.is_dirty = false;
                 self.project_switcher.current_project.subtitle = "Saved".to_string();
                 self.project_switcher.current_project.path = Some(path.clone());
-                self.recent_projects.push(
-                    &project.name,
-                    path.clone(),
-                    now_secs(),
-                );
+                self.recent_projects
+                    .push(&project.name, path.clone(), now_secs());
                 self.sync_recent_to_switcher();
             }
             Err(e) => {
@@ -933,7 +1009,10 @@ impl StudioLayout {
             let result = rfd::AsyncFileDialog::new()
                 .set_title("Open Project")
                 .set_directory(&default_dir)
-                .add_filter("Futureboard Project", &[crate::project::io::PROJECT_FILE_EXT])
+                .add_filter(
+                    "Futureboard Project",
+                    &[crate::project::io::PROJECT_FILE_EXT],
+                )
                 .pick_file()
                 .await;
             if let Some(handle) = result {
@@ -960,6 +1039,8 @@ impl StudioLayout {
                 self.project_switcher.current_project.subtitle = "Opened".to_string();
                 self.recent_projects.push(&project.name, path, now_secs());
                 self.sync_recent_to_switcher();
+                self.mark_engine_media_dirty();
+                self.sync_audio_project(cx, true);
                 cx.notify();
             }
             Err(e) => {
@@ -1032,15 +1113,17 @@ impl StudioLayout {
                     _ => TrackType::Instrument,
                 };
                 let color = timeline.state.track_color_for_index(idx);
-                timeline.state.create_track(timeline_state::CreateTrackOptions {
-                    track_type,
-                    name: format!("Track {}", idx + 1),
-                    color,
-                    volume: timeline_state::volume::db_to_norm(0.0),
-                    pan: 0.0,
-                    armed: false,
-                    input_monitor: false,
-                });
+                timeline
+                    .state
+                    .create_track(timeline_state::CreateTrackOptions {
+                        track_type,
+                        name: format!("Track {}", idx + 1),
+                        color,
+                        volume: timeline_state::volume::db_to_norm(0.0),
+                        pan: 0.0,
+                        armed: false,
+                        input_monitor: false,
+                    });
             }
         });
         cx.notify();
@@ -1119,7 +1202,11 @@ impl StudioLayout {
                 let name = if count == 1 {
                     base_name.clone()
                 } else {
-                    format!("{} {}", numbered_name_stem(&base_name), dialog.next_number + i)
+                    format!(
+                        "{} {}",
+                        numbered_name_stem(&base_name),
+                        dialog.next_number + i
+                    )
                 };
                 let id = timeline.state.create_track(CreateTrackOptions {
                     track_type,
@@ -1177,6 +1264,7 @@ impl StudioLayout {
     }
 
     fn toggle_selected_track_mute(&mut self, cx: &mut Context<Self>) {
+        self.mark_dirty();
         let _ = self.timeline.update(cx, |timeline, cx| {
             if let Some(id) = timeline.state.selection.selected_track_id.clone() {
                 timeline.state.toggle_track_mute(&id);
@@ -1186,6 +1274,7 @@ impl StudioLayout {
     }
 
     fn toggle_selected_track_solo(&mut self, cx: &mut Context<Self>) {
+        self.mark_dirty();
         let _ = self.timeline.update(cx, |timeline, cx| {
             if let Some(id) = timeline.state.selection.selected_track_id.clone() {
                 timeline.state.toggle_track_solo(&id);
@@ -1195,6 +1284,7 @@ impl StudioLayout {
     }
 
     fn toggle_selected_track_arm(&mut self, cx: &mut Context<Self>) {
+        self.mark_dirty();
         let _ = self.timeline.update(cx, |timeline, cx| {
             if let Some(id) = timeline.state.selection.selected_track_id.clone() {
                 timeline.state.toggle_track_arm(&id);
@@ -1204,6 +1294,7 @@ impl StudioLayout {
     }
 
     fn reset_selected_track_volume(&mut self, cx: &mut Context<Self>) {
+        self.mark_dirty();
         let _ = self.timeline.update(cx, |timeline, cx| {
             if let Some(id) = timeline.state.selection.selected_track_id.clone() {
                 timeline
@@ -1215,6 +1306,7 @@ impl StudioLayout {
     }
 
     fn reset_selected_track_pan(&mut self, cx: &mut Context<Self>) {
+        self.mark_dirty();
         let _ = self.timeline.update(cx, |timeline, cx| {
             if let Some(id) = timeline.state.selection.selected_track_id.clone() {
                 timeline.state.set_track_pan(&id, 0.0);
@@ -1687,6 +1779,7 @@ impl StudioLayout {
 
     fn spawn_timeline_audio_import_jobs(
         cx: &mut Context<Self>,
+        owner: Entity<Self>,
         timeline: Entity<components::timeline::Timeline>,
         path: PathBuf,
         path_key: String,
@@ -1703,7 +1796,7 @@ impl StudioLayout {
                     let format = info.format.as_str().to_string();
                     let meta_path_key = path_key.clone();
                     let _ = timeline.update(cx, move |timeline, cx| {
-                        timeline.state.update_audio_clip_metadata(
+                        let changed = timeline.state.update_audio_clip_metadata(
                             &meta_path_key,
                             &format,
                             info.sample_rate,
@@ -1712,6 +1805,12 @@ impl StudioLayout {
                             info.duration_seconds,
                         );
                         cx.notify();
+                        if changed {
+                            let _ = owner.update(cx, |this, cx| {
+                                this.mark_engine_media_dirty();
+                                this.sync_audio_project(cx, false);
+                            });
+                        }
                     });
                 }
                 Err(error) => {
@@ -1779,6 +1878,7 @@ impl StudioLayout {
         });
 
         let timeline_vol = self.timeline.clone();
+        let owner_dirty = owner.clone();
         let on_volume_change: std::sync::Arc<
             dyn Fn(&(String, f32), &mut Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(move |(id, v): &(String, f32), _w, cx| {
@@ -1788,6 +1888,7 @@ impl StudioLayout {
                 t.state.set_track_volume(&id, v);
                 cx.notify();
             });
+            let _ = owner_dirty.update(cx, |this, _cx| this.mark_dirty());
             if let Some(engine) = audio_engine.as_ref() {
                 let _ = engine.update_track_param(&id, "volume", volume_norm_to_linear(v) as f64);
             }
@@ -1795,6 +1896,7 @@ impl StudioLayout {
 
         let audio_engine = self.audio_engine.clone();
         let timeline_pan = self.timeline.clone();
+        let owner_dirty = owner.clone();
         let on_pan_change: std::sync::Arc<
             dyn Fn(&(String, f32), &mut Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(move |(id, v): &(String, f32), _w, cx| {
@@ -1804,6 +1906,7 @@ impl StudioLayout {
                 t.state.set_track_pan(&id, v);
                 cx.notify();
             });
+            let _ = owner_dirty.update(cx, |this, _cx| this.mark_dirty());
             if let Some(engine) = audio_engine.as_ref() {
                 let _ = engine.update_track_param(&id, "pan", v as f64);
             }
@@ -1811,6 +1914,7 @@ impl StudioLayout {
 
         let audio_engine = self.audio_engine.clone();
         let timeline_mute = self.timeline.clone();
+        let owner_dirty = owner.clone();
         let on_toggle_mute: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
             std::sync::Arc::new(move |id: &String, _w, cx| {
                 let id = id.clone();
@@ -1824,6 +1928,7 @@ impl StudioLayout {
                         .unwrap_or(false);
                     cx.notify();
                 });
+                let _ = owner_dirty.update(cx, |this, _cx| this.mark_dirty());
                 if let Some(engine) = audio_engine.as_ref() {
                     let _ = engine.update_track_param(&id, "mute", if muted { 1.0 } else { 0.0 });
                 }
@@ -1831,6 +1936,7 @@ impl StudioLayout {
 
         let audio_engine = self.audio_engine.clone();
         let timeline_solo = self.timeline.clone();
+        let owner_dirty = owner.clone();
         let on_toggle_solo: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
             std::sync::Arc::new(move |id: &String, _w, cx| {
                 let id = id.clone();
@@ -1844,12 +1950,14 @@ impl StudioLayout {
                         .unwrap_or(false);
                     cx.notify();
                 });
+                let _ = owner_dirty.update(cx, |this, _cx| this.mark_dirty());
                 if let Some(engine) = audio_engine.as_ref() {
                     let _ = engine.update_track_param(&id, "solo", if solo { 1.0 } else { 0.0 });
                 }
             });
 
         let timeline_arm = self.timeline.clone();
+        let owner_dirty = owner.clone();
         let on_toggle_arm: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
             std::sync::Arc::new(move |id: &String, _w, cx| {
                 let id = id.clone();
@@ -1857,9 +1965,11 @@ impl StudioLayout {
                     t.state.toggle_track_arm(&id);
                     cx.notify();
                 });
+                let _ = owner_dirty.update(cx, |this, _cx| this.mark_dirty());
             });
 
         let timeline_input = self.timeline.clone();
+        let owner_dirty = owner.clone();
         let on_toggle_input: std::sync::Arc<
             dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(move |id: &String, _w, cx| {
@@ -1868,10 +1978,12 @@ impl StudioLayout {
                 t.state.toggle_track_input_monitor(&id);
                 cx.notify();
             });
+            let _ = owner_dirty.update(cx, |this, _cx| this.mark_dirty());
         });
 
         let audio_engine = self.audio_engine.clone();
         let timeline_master = self.timeline.clone();
+        let owner_dirty = owner.clone();
         let on_master_volume_change: std::sync::Arc<
             dyn Fn(&f32, &mut Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(move |v: &f32, _w, cx| {
@@ -1880,6 +1992,7 @@ impl StudioLayout {
                 t.state.set_master_volume(v);
                 cx.notify();
             });
+            let _ = owner_dirty.update(cx, |this, _cx| this.mark_dirty());
             if let Some(engine) = audio_engine.as_ref() {
                 let _ = engine.update_track_param(
                     "__master__",
@@ -2084,10 +2197,17 @@ impl Render for StudioLayout {
                         .import_audio_to_selected_or_new_track(path_key, name);
                     cx.notify();
                 });
+                let _ = layout.update(cx, |this, cx| {
+                    this.mark_dirty();
+                    this.mark_engine_media_dirty();
+                    this.sync_audio_project(cx, false);
+                });
                 let path_key = path_for_decode.to_string_lossy().to_string();
+                let owner = layout.clone();
                 let _ = layout.update(cx, move |_layout, cx| {
                     Self::spawn_timeline_audio_import_jobs(
                         cx,
+                        owner,
                         timeline_for_decode,
                         path_for_decode,
                         path_key,
@@ -2356,8 +2476,7 @@ impl Render for StudioLayout {
                     let target = target.clone();
                     move |kind: &AddTrackKind, _w, cx| {
                         let kind = *kind;
-                        let _ =
-                            target.update(cx, |this, cx| this.select_add_track_kind(kind, cx));
+                        let _ = target.update(cx, |this, cx| this.select_add_track_kind(kind, cx));
                     }
                 }),
                 on_count_delta: Arc::new({
@@ -2744,7 +2863,7 @@ fn build_engine_project_snapshot(state: &TimelineState, sample_rate: u32) -> Eng
     tracks.push(EngineTrackSnapshot {
         id: "master".to_string(),
         track_type: "master".to_string(),
-        volume: 1.0,
+        volume: volume_norm_to_linear(state.master.volume),
         pan: 0.0,
         muted: false,
         solo: false,
@@ -2812,6 +2931,36 @@ fn build_engine_project_snapshot(state: &TimelineState, sample_rate: u32) -> Eng
     }
 }
 
+fn log_engine_sync_snapshot(snapshot: &EngineProjectSnapshot, dirty: bool) {
+    let clips_with_path = snapshot
+        .clips
+        .iter()
+        .filter(|clip| {
+            clip.media_path
+                .as_deref()
+                .map(|path| !path.trim().is_empty())
+                .unwrap_or(false)
+        })
+        .count();
+    eprintln!(
+        "[engine-sync] tracks={} clips={} clips_with_path={} dirty={}",
+        snapshot.tracks.len(),
+        snapshot.clips.len(),
+        clips_with_path,
+        dirty
+    );
+    for clip in &snapshot.clips {
+        eprintln!(
+            "[engine-sync] clip id={} track={} path={} start={:.3} duration={:.3}",
+            clip.id,
+            clip.track_id,
+            clip.media_path.as_deref().unwrap_or("<none>"),
+            clip.start_beat,
+            clip.duration_beats
+        );
+    }
+}
+
 /// Keep in sync with `DAUx::probe_audio_file`,
 /// `waveform_cache::decode_file_uncached`, and
 /// `file_browser::FileBrowserEntry::is_audio` — any divergence between
@@ -2854,7 +3003,9 @@ fn cleaned_track_name(name: &str, kind: AddTrackKind) -> String {
 }
 
 fn numbered_name_stem(name: &str) -> String {
-    let stem = name.trim_end_matches(|c: char| c.is_ascii_digit()).trim_end();
+    let stem = name
+        .trim_end_matches(|c: char| c.is_ascii_digit())
+        .trim_end();
     if stem.is_empty() {
         "Track".to_string()
     } else {

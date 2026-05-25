@@ -1,5 +1,5 @@
-mod app_chrome;
 pub mod add_track_dialog;
+mod app_chrome;
 mod bottom_panel;
 pub mod context_menu;
 pub mod fader;
@@ -13,15 +13,15 @@ pub mod panel;
 pub mod project_switcher;
 pub mod project_wizard;
 mod sidebar;
-pub mod text_input;
 pub mod slider;
 mod status_bar;
+pub mod text_input;
 pub mod timeline;
 
-pub use app_chrome::{app_chrome, ProjectChromeState, TransportChromeState};
 pub use add_track_dialog::{
     add_track_dialog, AddTrackDialogCallbacks, AddTrackDialogState, AddTrackKind,
 };
+pub use app_chrome::{app_chrome, ProjectChromeState, TransportChromeState};
 pub use bottom_panel::{bottom_panel, BottomPanelResizeDrag, BottomPanelState, BottomTab};
 pub use fader::fader;
 pub use icon::icon;

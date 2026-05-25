@@ -34,6 +34,8 @@ pub struct Timeline {
     on_seek_beats: Option<std::sync::Arc<dyn Fn(f32, f32) + Send + Sync + 'static>>,
     on_track_param_change:
         Option<std::sync::Arc<dyn Fn(String, String, f32) + Send + Sync + 'static>>,
+    on_project_changed: Option<TimelineProjectChangedCb>,
+    on_media_changed: Option<TimelineProjectChangedCb>,
     on_add_track: Option<TimelineAddTrackCb>,
     /// Window-space position of the last drag-move event while files are
     /// being dragged. We need this because `on_drop::<ExternalPaths>` does
@@ -64,9 +66,10 @@ pub struct TimelineAddTrackRequest {
     pub has_master_track: bool,
 }
 
-pub type TimelineAddTrackCb = std::sync::Arc<
-    dyn Fn(&TimelineAddTrackRequest, &mut gpui::Window, &mut gpui::App) + 'static,
->;
+pub type TimelineAddTrackCb =
+    std::sync::Arc<dyn Fn(&TimelineAddTrackRequest, &mut gpui::Window, &mut gpui::App) + 'static>;
+
+pub type TimelineProjectChangedCb = std::sync::Arc<dyn Fn(&mut gpui::App) + 'static>;
 
 #[derive(Clone, Debug)]
 struct ScrollbarDrag {
@@ -92,6 +95,8 @@ impl Timeline {
             state: TimelineState::default(),
             on_seek_beats: None,
             on_track_param_change: None,
+            on_project_changed: None,
+            on_media_changed: None,
             on_add_track: None,
             last_drag_position: None,
             clip_drag_origin: None,
@@ -108,6 +113,8 @@ impl Timeline {
             state: TimelineState::demo_project(),
             on_seek_beats: None,
             on_track_param_change: None,
+            on_project_changed: None,
+            on_media_changed: None,
             on_add_track: None,
             last_drag_position: None,
             clip_drag_origin: None,
@@ -123,6 +130,26 @@ impl Timeline {
 
     pub fn set_add_track_callback(&mut self, callback: Option<TimelineAddTrackCb>) {
         self.on_add_track = callback;
+    }
+
+    pub fn set_project_changed_callback(&mut self, callback: Option<TimelineProjectChangedCb>) {
+        self.on_project_changed = callback;
+    }
+
+    pub fn set_media_changed_callback(&mut self, callback: Option<TimelineProjectChangedCb>) {
+        self.on_media_changed = callback;
+    }
+
+    fn mark_project_changed(&self, cx: &mut gpui::App) {
+        if let Some(callback) = self.on_project_changed.as_ref() {
+            callback(cx);
+        }
+    }
+
+    fn mark_media_changed(&self, cx: &mut gpui::App) {
+        if let Some(callback) = self.on_media_changed.as_ref() {
+            callback(cx);
+        }
     }
 
     fn timeline_content_width(&self) -> f32 {
@@ -246,6 +273,8 @@ impl Timeline {
 
         self.state
             .import_audio_at(path_key.clone(), clip_name, drop_x, drop_y);
+        self.mark_project_changed(cx);
+        self.mark_media_changed(cx);
         Self::spawn_audio_import_jobs(path.to_path_buf(), path_key, cx);
         true
     }
@@ -275,6 +304,8 @@ impl Timeline {
                             info.total_frames,
                             info.duration_seconds,
                         );
+                        this.mark_project_changed(cx);
+                        this.mark_media_changed(cx);
                         cx.notify();
                     });
                 }
@@ -343,6 +374,7 @@ impl Render for Timeline {
 
         let on_toggle_mute = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.toggle_track_mute(track_id);
+            this.mark_project_changed(cx);
             if let Some(track) = this.state.find_track(track_id) {
                 if let Some(cb) = this.on_track_param_change.as_ref() {
                     cb(
@@ -357,6 +389,7 @@ impl Render for Timeline {
 
         let on_toggle_solo = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.toggle_track_solo(track_id);
+            this.mark_project_changed(cx);
             if let Some(track) = this.state.find_track(track_id) {
                 if let Some(cb) = this.on_track_param_change.as_ref() {
                     cb(
@@ -371,11 +404,13 @@ impl Render for Timeline {
 
         let on_toggle_arm = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.toggle_track_arm(track_id);
+            this.mark_project_changed(cx);
             cx.notify();
         });
 
         let on_toggle_input = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.toggle_track_input_monitor(track_id);
+            this.mark_project_changed(cx);
             cx.notify();
         });
 
@@ -384,12 +419,14 @@ impl Render for Timeline {
             if this.state.selection.selected_track_id.as_ref() == Some(track_id) {
                 this.state.selection.selected_track_id = None;
             }
+            this.mark_project_changed(cx);
             cx.notify();
         });
 
         let on_volume_change =
             cx.listener(|this, (track_id, volume): &(String, f32), _window, cx| {
                 this.state.set_track_volume(track_id, *volume);
+                this.mark_project_changed(cx);
                 if let Some(cb) = this.on_track_param_change.as_ref() {
                     cb(track_id.clone(), "volume".to_string(), *volume);
                 }
@@ -398,6 +435,7 @@ impl Render for Timeline {
 
         let on_pan_change = cx.listener(|this, (track_id, pan): &(String, f32), _window, cx| {
             this.state.set_track_pan(track_id, *pan);
+            this.mark_project_changed(cx);
             if let Some(cb) = this.on_track_param_change.as_ref() {
                 cb(track_id.clone(), "pan".to_string(), *pan);
             }
@@ -448,6 +486,7 @@ impl Render for Timeline {
                     clip_type,
                     muted: false,
                 });
+                this.mark_project_changed(cx);
             }
             cx.notify();
         });
@@ -696,6 +735,7 @@ impl Render for Timeline {
                     .unwrap_or(drag.start_beat);
                 this.state
                     .move_clip_to_track(&drag.clip_id, &target_track_id, current_start);
+                this.mark_project_changed(cx);
             }
             this.clip_drag_origin = None;
             this.clip_drag_target_track_index = None;
@@ -723,6 +763,7 @@ impl Render for Timeline {
                 .unwrap_or(drag.origin_index)
                 .clamp(0, this.state.tracks.len());
             this.state.reorder_track(&drag.track_id, target_index);
+            this.mark_project_changed(cx);
             cx.notify();
         });
 

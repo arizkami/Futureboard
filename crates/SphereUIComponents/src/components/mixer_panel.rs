@@ -23,9 +23,7 @@
 //!   only the fader area grows to fill remaining height.
 
 use gpui::prelude::FluentBuilder;
-use gpui::{
-    div, px, rgba, svg, InteractiveElement, IntoElement, ParentElement, Styled,
-};
+use gpui::{div, px, rgba, svg, InteractiveElement, IntoElement, ParentElement, Styled};
 
 use crate::assets;
 use crate::components::fader::{db_scale_column, db_value_pill, fader as render_fader};

@@ -170,11 +170,8 @@ impl Collector {
         // Subtract instrumented child totals from the root to derive
         // "root self time" — otherwise StudioLayout always wins because
         // it transitively includes every child.
-        let mut ranked: Vec<(&'static str, ScopeAgg)> = self
-            .scopes
-            .iter()
-            .map(|(k, v)| (*k, *v))
-            .collect();
+        let mut ranked: Vec<(&'static str, ScopeAgg)> =
+            self.scopes.iter().map(|(k, v)| (*k, *v)).collect();
         let children_sum_ns: u64 = ranked
             .iter()
             .filter(|(n, _)| ROOT_CHILDREN.contains(n))
