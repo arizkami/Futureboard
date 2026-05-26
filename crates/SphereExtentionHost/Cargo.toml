@@ -1,0 +1,6 @@
+[package]
+name = "SphereFBExtentionHost"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

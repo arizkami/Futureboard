@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// Apply a linear gain to a sample buffer in-place.
 #[inline]
 pub fn apply_gain(buffer: &mut [f32], gain: f32) {

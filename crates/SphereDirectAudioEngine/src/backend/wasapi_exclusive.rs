@@ -281,7 +281,7 @@ unsafe fn open_exclusive_stream(
     cmd_rx: &Receiver<EngineCommand>,
     initial_runtime: RuntimeProject,
     device_name: &str,
-    mmcss_h: isize,
+    _mmcss_h: isize,
 ) -> bool {
     // ── IAudioClient ──────────────────────────────────────────────────────────
     let client: IAudioClient = match device.Activate(CLSCTX_ALL, None) {

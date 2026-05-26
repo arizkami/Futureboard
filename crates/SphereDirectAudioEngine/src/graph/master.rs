@@ -1,6 +1,7 @@
 /// State for the master output bus.
 #[derive(Debug, Clone)]
 pub struct MasterState {
+    #[allow(dead_code)]
     pub volume: f32, // linear 0..2
 }
 

@@ -1,0 +1,6 @@
+[package]
+name = "SphereFBMediaUtils"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

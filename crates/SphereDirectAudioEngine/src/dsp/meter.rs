@@ -1,6 +1,7 @@
 /// Per-block peak and RMS computation — allocation-free, no division by zero.
 
 /// Returns `(peak, rms)` for a mono slice of samples.
+#[allow(dead_code)]
 #[inline]
 pub fn compute_peak_rms(samples: &[f32]) -> (f32, f32) {
     if samples.is_empty() {
@@ -22,6 +23,7 @@ pub fn compute_peak_rms(samples: &[f32]) -> (f32, f32) {
 /// Compute peak and RMS for one channel extracted from an interleaved buffer.
 ///
 /// `channel` is zero-based.  Skips bounds-checked access with stride iteration.
+#[allow(dead_code)]
 #[inline]
 pub fn channel_peak_rms(interleaved: &[f32], channel: usize, num_channels: usize) -> (f32, f32) {
     if interleaved.is_empty() || num_channels == 0 || channel >= num_channels {

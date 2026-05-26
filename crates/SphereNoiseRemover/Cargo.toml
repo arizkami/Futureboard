@@ -1,0 +1,6 @@
+[package]
+name = "SphereFBNoiseRemover"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

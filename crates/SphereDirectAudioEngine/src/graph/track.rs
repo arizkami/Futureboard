@@ -4,6 +4,7 @@
 /// without any locking.
 #[derive(Debug, Clone)]
 pub struct TrackState {
+    #[allow(dead_code)]
     pub id: String,
     pub volume: f32, // linear 0..2
     pub pan: f32,    // -1..1
@@ -23,6 +24,7 @@ impl TrackState {
     }
 
     /// Effective gain accounting for mute.
+    #[allow(dead_code)]
     #[inline]
     pub fn effective_gain(&self) -> f32 {
         if self.muted {

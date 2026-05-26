@@ -5,8 +5,6 @@ import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from "ele
 import {
   IpcChannels,
   type ExternalWindowConfig,
-  type FloatingWindowMixerUpdateRequest,
-  type FloatingWindowOpenRequest,
   type MessageBoxOptions,
   type MessageBoxResult,
   type OpenDialogResult,
@@ -177,14 +175,6 @@ const pluginHostBridge = Object.freeze({
     invoke(IpcChannels.PluginHostResizeEditorWindow, { handle, width, height }),
 });
 
-const floatingWindowBridge = Object.freeze({
-  open:  (req: FloatingWindowOpenRequest): Promise<boolean> => invoke(IpcChannels.FloatingWindowOpen, req),
-  close: (id: string): Promise<void>                        => invoke(IpcChannels.FloatingWindowClose, id),
-  focus: (id: string): Promise<void>                        => invoke(IpcChannels.FloatingWindowFocus, id),
-  updateMixer: (req: FloatingWindowMixerUpdateRequest): Promise<void> =>
-    invoke(IpcChannels.FloatingWindowMixerUpdate, req),
-});
-
 /**
  * sphereAudioBridge — safe IPC surface for SphereDirectAudioEngine.
  * Only exposed in the Electron client; the renderer detects its presence via
@@ -242,8 +232,6 @@ const dawElectron = Object.freeze({
   pluginHost: pluginHostBridge,
   /** SphereDirectAudioEngine native backend bridge. Presence indicates Electron client. */
   sphereAudio: sphereAudioBridge,
-  /** Native floating window runtime (Rust/egui binary). */
-  floatingWindow: floatingWindowBridge,
 });
 
 contextBridge.exposeInMainWorld("dawElectron", dawElectron);

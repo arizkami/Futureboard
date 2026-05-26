@@ -17,6 +17,7 @@
 
 #![deny(clippy::all)]
 #![allow(clippy::needless_pass_by_value)] // napi-rs requires owned String args
+#![allow(non_snake_case)] // lib name "DAUx" is intentional branding
 
 mod audio_file;
 pub mod backend;

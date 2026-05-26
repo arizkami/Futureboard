@@ -2,12 +2,12 @@
 resolver = "3"
 members = [
     "apps/native",
-    "crates/SphereAudioPlugins",
-    "crates/SphereDirectAudioEngine",
-    "crates/SpherePluginHost",
-    "crates/SphereUIComponents",
-    "crates/SphereWebAudioCore",
+    "crates/*",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
 
 [profile.release]
 opt-level = 3

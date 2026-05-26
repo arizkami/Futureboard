@@ -133,6 +133,7 @@ impl ActiveStream {
             ActiveStream::WasapiExclusive(_) => Ok(()), // no pause in exclusive — caller mutes output
         }
     }
+    #[allow(dead_code)]
     fn sample_rate(&self) -> u32 {
         match self {
             ActiveStream::Cpal(h) => h.sample_rate,
@@ -140,6 +141,7 @@ impl ActiveStream {
             ActiveStream::WasapiExclusive(h) => h.sample_rate,
         }
     }
+    #[allow(dead_code)]
     fn buffer_size(&self) -> u32 {
         match self {
             ActiveStream::Cpal(h) => h.buffer_size,
@@ -147,6 +149,7 @@ impl ActiveStream {
             ActiveStream::WasapiExclusive(h) => h.buffer_size,
         }
     }
+    #[allow(dead_code)]
     fn device_name(&self) -> &str {
         match self {
             ActiveStream::Cpal(h) => &h.device_name,
@@ -184,6 +187,7 @@ pub struct EngineInner {
 
     // In-memory track graph — updated from project snapshots / param commands.
     tracks: Mutex<Vec<TrackState>>,
+    #[allow(dead_code)]
     master: Mutex<MasterState>,
 
     // Last loaded project snapshot (optional, for reference/debugging).
