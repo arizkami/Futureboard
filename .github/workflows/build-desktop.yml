@@ -45,18 +45,24 @@ jobs:
             artifact-glob: apps/electron/release/*.exe
             artifact-glob2: ""
             updater-yml: apps/electron/release/latest.yml
+            native-bin: target/release/futureboard_native.exe
+            native-artifact-name: futureboard-native-win
           - os: macos-latest
             platform: mac
             artifact-name: futureboard-mac
             artifact-glob: apps/electron/release/*.dmg
             artifact-glob2: ""
             updater-yml: apps/electron/release/latest-mac.yml
+            native-bin: target/release/futureboard_native
+            native-artifact-name: futureboard-native-mac
           - os: ubuntu-24.04
             platform: linux
             artifact-name: futureboard-linux
             artifact-glob: apps/electron/release/*.AppImage
             artifact-glob2: apps/electron/release/*.deb
             updater-yml: apps/electron/release/latest-linux.yml
+            native-bin: target/release/futureboard_native
+            native-artifact-name: futureboard-native-linux
 
     steps:
       - name: Checkout
@@ -109,7 +115,12 @@ jobs:
           sudo apt-get install -y \
             build-essential pkg-config libarchive-tools fakeroot rpm \
             libopenjp2-tools libasound2-dev \
-            libgtk-4-dev libglib2.0-dev
+            libgtk-4-dev libglib2.0-dev \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libxcb-xfixes0-dev libxcb-shape0-dev \
+            libxcb-render-util0-dev libxcb-composite0-dev \
+            libxi-dev libgl1-mesa-dev libfontconfig1-dev \
+            libssl-dev
 
       - name: Setup Rust + wasm32 target
         uses: dtolnay/rust-toolchain@stable
@@ -122,12 +133,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            crates/SphereWebAudioCore/target
-            crates/SphereAudioPlugins/target
-            crates/SphereDirectAudioEngine/target
-            crates/SpherePluginHost/target
+            target
             extentions/template/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('crates/SphereWebAudioCore/Cargo.lock', 'crates/SphereAudioPlugins/Cargo.lock', 'crates/SphereDirectAudioEngine/Cargo.lock', 'crates/SpherePluginHost/Cargo.lock', 'extentions/template/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'extentions/template/Cargo.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-
 
@@ -143,6 +151,9 @@ jobs:
           cargo check --manifest-path extentions/template/Cargo.toml
           bun install --cwd extentions/template
           bun run --cwd extentions/template typecheck
+
+      - name: Build native app (futureboard_native)
+        run: cargo build --release -p futureboard_native
 
       - name: Generate .icns app icon (macOS)
         if: matrix.os == 'macos-latest'
@@ -175,7 +186,7 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
 
-      - name: Upload artifact
+      - name: Upload Electron artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact-name }}
@@ -183,6 +194,14 @@ jobs:
             ${{ matrix.artifact-glob }}
             ${{ matrix.artifact-glob2 }}
             ${{ matrix.updater-yml }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload native app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.native-artifact-name }}
+          path: ${{ matrix.native-bin }}
           if-no-files-found: error
           retention-days: 7
 
