@@ -15,12 +15,14 @@ pub mod mixer_panel;
 pub mod panel;
 pub mod project_switcher;
 pub mod project_wizard;
+pub mod settings_dialog;
 mod sidebar;
 pub mod slider;
 mod status_bar;
 pub mod text_input;
 pub mod timeline;
 pub mod title_bar;
+
 
 pub use add_track_dialog::{
     add_track_dialog, AddTrackDialogCallbacks, AddTrackDialogState, AddTrackKind,
@@ -47,3 +49,7 @@ pub use sidebar::sidebar;
 pub use slider::slider;
 pub use status_bar::status_bar;
 pub use text_input::{text_field, TextInputAction, TextInputState};
+pub use settings_dialog::{
+    settings_dialog, SettingsDialogCallbacks, SettingsDialogState, SettingsTab,
+};
+

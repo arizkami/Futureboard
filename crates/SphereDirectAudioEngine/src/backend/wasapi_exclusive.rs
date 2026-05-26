@@ -552,7 +552,7 @@ unsafe fn get_device_friendly_name(device: &IMMDevice) -> String {
     };
 
     let key = &DEVPKEY_Device_FriendlyName as *const _ as *const PROPERTYKEY;
-    let prop = match store.GetValue(key) {
+    let mut prop = match store.GetValue(key) {
         Ok(p) => p,
         Err(_) => return "Unknown Device".into(),
     };
@@ -563,7 +563,7 @@ unsafe fn get_device_friendly_name(device: &IMMDevice) -> String {
         _pad: [u16; 3],
         pwsz: *mut u16,
     }
-    let raw = &prop as *const _ as *const RawPropVariant;
+    let raw = &mut prop as *mut _ as *mut RawPropVariant;
     if (*raw).vt == 31 {
         let ptr = (*raw).pwsz;
         if !ptr.is_null() {
@@ -574,6 +574,8 @@ unsafe fn get_device_friendly_name(device: &IMMDevice) -> String {
             let slice = std::slice::from_raw_parts(ptr, len);
             let s = String::from_utf16_lossy(slice).to_string();
             windows::Win32::System::Com::CoTaskMemFree(Some(ptr as *const _));
+            (*raw).pwsz = std::ptr::null_mut();
+            (*raw).vt = 0; // VT_EMPTY
             return s;
         }
     }

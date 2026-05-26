@@ -1,0 +1,604 @@
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use crate::paths::FutureboardPaths;
+use gpui::AppContext;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProjectDefaults {
+    pub tempo: f64,
+    pub time_signature_num: u32,
+    pub time_signature_den: u32,
+    pub sample_rate: u32,
+    pub buffer_size: u32,
+    pub tracks_count: u32,
+}
+
+impl Default for ProjectDefaults {
+    fn default() -> Self {
+        Self {
+            tempo: 120.0,
+            time_signature_num: 4,
+            time_signature_den: 4,
+            sample_rate: 48000,
+            buffer_size: 256,
+            tracks_count: 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AutosaveSettings {
+    pub enabled: bool,
+    pub interval_minutes: u32,
+    pub max_backups: u32,
+}
+
+impl Default for AutosaveSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_minutes: 5,
+            max_backups: 10,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NotificationSettings {
+    pub enable_warnings: bool,
+    pub enable_system_notifications: bool,
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            enable_warnings: true,
+            enable_system_notifications: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GeneralSettings {
+    #[serde(default = "default_language")]
+    pub language: String,
+    #[serde(default = "default_true")]
+    pub show_start_screen: bool,
+    #[serde(default = "default_true")]
+    pub check_updates: bool,
+    #[serde(default)]
+    pub project_defaults: ProjectDefaults,
+    #[serde(default)]
+    pub autosave: AutosaveSettings,
+    #[serde(default)]
+    pub notifications: NotificationSettings,
+}
+
+impl Default for GeneralSettings {
+    fn default() -> Self {
+        Self {
+            language: default_language(),
+            show_start_screen: default_true(),
+            check_updates: default_true(),
+            project_defaults: ProjectDefaults::default(),
+            autosave: AutosaveSettings::default(),
+            notifications: NotificationSettings::default(),
+        }
+    }
+}
+
+fn default_language() -> String {
+    "en".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AudioHardwareSettings {
+    pub driver_type: String,
+    pub device_in: String,
+    pub device_out: String,
+    pub active_inputs: Vec<u32>,
+    pub active_outputs: Vec<u32>,
+}
+
+impl Default for AudioHardwareSettings {
+    fn default() -> Self {
+        Self {
+            driver_type: "WASAPI Shared".to_string(),
+            device_in: "Built-in Microphone".to_string(),
+            device_out: "Speakers (Realtek)".to_string(),
+            active_inputs: vec![0, 1],
+            active_outputs: vec![0, 1],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MidiHardwareSettings {
+    pub enabled_inputs: Vec<String>,
+    pub enabled_outputs: Vec<String>,
+    pub clock_sync: bool,
+}
+
+impl Default for MidiHardwareSettings {
+    fn default() -> Self {
+        Self {
+            enabled_inputs: vec!["Keyboard Controller".to_string(), "Midi Device 2".to_string()],
+            enabled_outputs: vec!["Synth Out".to_string()],
+            clock_sync: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SyncSettings {
+    pub clock_source: String,
+    pub ltc_enabled: bool,
+}
+
+impl Default for SyncSettings {
+    fn default() -> Self {
+        Self {
+            clock_source: "Internal".to_string(),
+            ltc_enabled: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct HardwareSettings {
+    #[serde(default)]
+    pub audio: AudioHardwareSettings,
+    #[serde(default)]
+    pub midi: MidiHardwareSettings,
+    #[serde(default)]
+    pub control_surfaces: Vec<String>,
+    #[serde(default)]
+    pub sync: SyncSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArrangementAppearanceSettings {
+    pub grid_line_intensity: f32,
+    pub clip_color_mode: String,
+}
+
+impl Default for ArrangementAppearanceSettings {
+    fn default() -> Self {
+        Self {
+            grid_line_intensity: 0.4,
+            clip_color_mode: "TrackAccent".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PianoRollAppearanceSettings {
+    pub show_key_guides: bool,
+}
+
+impl Default for PianoRollAppearanceSettings {
+    fn default() -> Self {
+        Self {
+            show_key_guides: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MixerAppearanceSettings {
+    pub meter_decay_db_per_sec: f32,
+    pub peak_hold_seconds: f32,
+}
+
+impl Default for MixerAppearanceSettings {
+    fn default() -> Self {
+        Self {
+            meter_decay_db_per_sec: 24.0,
+            peak_hold_seconds: 3.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AppearanceSettings {
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f32,
+    #[serde(default)]
+    pub arrangement: ArrangementAppearanceSettings,
+    #[serde(default)]
+    pub piano_roll: PianoRollAppearanceSettings,
+    #[serde(default)]
+    pub mixer: MixerAppearanceSettings,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self {
+            theme: default_theme(),
+            ui_scale: default_ui_scale(),
+            arrangement: ArrangementAppearanceSettings::default(),
+            piano_roll: PianoRollAppearanceSettings::default(),
+            mixer: MixerAppearanceSettings::default(),
+        }
+    }
+}
+
+fn default_theme() -> String {
+    "Fleet Dark".to_string()
+}
+
+fn default_ui_scale() -> f32 {
+    1.0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MouseEditingSettings {
+    pub zoom_sensitivity: f32,
+    pub natural_scroll: bool,
+}
+
+impl Default for MouseEditingSettings {
+    fn default() -> Self {
+        Self {
+            zoom_sensitivity: 1.0,
+            natural_scroll: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SnapEditingSettings {
+    pub snap_to_grid: bool,
+    pub default_snap_value: String,
+}
+
+impl Default for SnapEditingSettings {
+    fn default() -> Self {
+        Self {
+            snap_to_grid: true,
+            default_snap_value: "1/16".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HistoryEditingSettings {
+    pub max_undo_steps: u32,
+}
+
+impl Default for HistoryEditingSettings {
+    fn default() -> Self {
+        Self {
+            max_undo_steps: 100,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct EditingSettings {
+    #[serde(default)]
+    pub mouse: MouseEditingSettings,
+    #[serde(default)]
+    pub snap: SnapEditingSettings,
+    #[serde(default)]
+    pub history: HistoryEditingSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AudioRecordingSettings {
+    pub format: String,
+    pub bit_depth: u32,
+    pub recording_path: String,
+}
+
+impl Default for AudioRecordingSettings {
+    fn default() -> Self {
+        Self {
+            format: "wav".to_string(),
+            bit_depth: 24,
+            recording_path: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MetronomeSettings {
+    pub enabled: bool,
+    pub volume: f32,
+    pub sound_type: String,
+    pub count_in_bars: u32,
+}
+
+impl Default for MetronomeSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            volume: 0.8,
+            sound_type: "Woodblock".to_string(),
+            count_in_bars: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct RecordingSettings {
+    #[serde(default)]
+    pub audio: AudioRecordingSettings,
+    #[serde(default)]
+    pub metronome: MetronomeSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Vst3PluginSettings {
+    pub enabled: bool,
+    pub paths: Vec<String>,
+}
+
+impl Default for Vst3PluginSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            paths: vec![
+                "C:\\Program Files\\Common Files\\VST3".to_string(),
+                "C:\\Program Files (x86)\\Common Files\\VST3".to_string(),
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClapPluginSettings {
+    pub enabled: bool,
+    pub paths: Vec<String>,
+}
+
+impl Default for ClapPluginSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            paths: vec![
+                "C:\\Program Files\\Common Files\\CLAP".to_string(),
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ScanPluginSettings {
+    pub background_scan: bool,
+    pub failed_plugins: Vec<String>,
+}
+
+impl Default for ScanPluginSettings {
+    fn default() -> Self {
+        Self {
+            background_scan: true,
+            failed_plugins: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct PluginsSettings {
+    #[serde(default)]
+    pub vst3: Vst3PluginSettings,
+    #[serde(default)]
+    pub clap: ClapPluginSettings,
+    #[serde(default)]
+    pub scan: ScanPluginSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SettingsSchema {
+    #[serde(default)]
+    pub general: GeneralSettings,
+    #[serde(default)]
+    pub hardware: HardwareSettings,
+    #[serde(default)]
+    pub appearance: AppearanceSettings,
+    #[serde(default)]
+    pub editing: EditingSettings,
+    #[serde(default)]
+    pub recording: RecordingSettings,
+    #[serde(default)]
+    pub plugins: PluginsSettings,
+}
+
+impl SettingsSchema {
+    pub fn validate_and_clamp(&mut self) {
+        // Clamp tempo
+        if self.general.project_defaults.tempo < 20.0 {
+            self.general.project_defaults.tempo = 20.0;
+        } else if self.general.project_defaults.tempo > 999.0 {
+            self.general.project_defaults.tempo = 999.0;
+        }
+
+        // Clamp sample rate
+        let sr = self.general.project_defaults.sample_rate;
+        if sr != 44100 && sr != 48000 && sr != 88200 && sr != 96000 && sr != 192000 {
+            self.general.project_defaults.sample_rate = 48000;
+        }
+
+        // Clamp buffer size (power of two between 32 and 4096)
+        let buf = self.general.project_defaults.buffer_size;
+        let is_valid_buf = buf >= 32 && buf <= 4096 && (buf & (buf - 1)) == 0;
+        if !is_valid_buf {
+            self.general.project_defaults.buffer_size = 256;
+        }
+
+        // Clamp ui scale
+        if self.appearance.ui_scale < 0.5 {
+            self.appearance.ui_scale = 0.5;
+        } else if self.appearance.ui_scale > 2.5 {
+            self.appearance.ui_scale = 2.5;
+        }
+    }
+}
+
+pub struct SettingsModel {
+    pub current: SettingsSchema,
+    pub path: PathBuf,
+}
+
+impl SettingsModel {
+    pub fn load_or_create(cx: &mut gpui::App) -> gpui::Entity<Self> {
+        let path = FutureboardPaths::resolve().settings_file;
+        let mut settings = Self::load_from_path(&path);
+        settings.validate_and_clamp();
+        
+        cx.new(|_cx| Self {
+            current: settings,
+            path,
+        })
+    }
+
+    fn load_from_path(path: &Path) -> SettingsSchema {
+        if path.exists() {
+            match std::fs::read_to_string(path) {
+                Ok(content) => {
+                    match serde_json::from_str::<SettingsSchema>(&content) {
+                        Ok(schema) => schema,
+                        Err(e) => {
+                            eprintln!("[settings] failed to parse settings.json: {e}. backing up.");
+                            let backup_path = path.with_extension("json.backup");
+                            let _ = std::fs::rename(path, &backup_path);
+                            let default_schema = SettingsSchema::default();
+                            if let Ok(json) = serde_json::to_string_pretty(&default_schema) {
+                                let _ = std::fs::write(path, json);
+                            }
+                            default_schema
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[settings] failed to read settings.json: {e}");
+                    SettingsSchema::default()
+                }
+            }
+        } else {
+            let default_schema = SettingsSchema::default();
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(json) = serde_json::to_string_pretty(&default_schema) {
+                let _ = std::fs::write(path, json);
+            }
+            default_schema
+        }
+    }
+
+    pub fn save_to_disk(&self) {
+        let path = self.path.clone();
+        let schema = self.current.clone();
+        
+        std::thread::spawn(move || {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match serde_json::to_string_pretty(&schema) {
+                Ok(json) => {
+                    if let Err(e) = std::fs::write(&path, json) {
+                        eprintln!("[settings] failed to write settings file: {e}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[settings] failed to serialize settings: {e}");
+                }
+            }
+        });
+    }
+
+    pub fn update_setting<F>(&mut self, updater: F, cx: &mut gpui::Context<Self>)
+    where
+        F: FnOnce(&mut SettingsSchema),
+    {
+        updater(&mut self.current);
+        self.current.validate_and_clamp();
+        self.save_to_disk();
+        cx.notify();
+    }
+}
+
+pub struct GlobalSettingsModel(pub gpui::Entity<SettingsModel>);
+
+impl gpui::Global for GlobalSettingsModel {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_settings() {
+        let schema = SettingsSchema::default();
+        assert_eq!(schema.general.language, "en");
+        assert_eq!(schema.general.project_defaults.tempo, 120.0);
+        assert_eq!(schema.general.project_defaults.sample_rate, 48000);
+        assert_eq!(schema.general.project_defaults.buffer_size, 256);
+        assert_eq!(schema.appearance.ui_scale, 1.0);
+    }
+
+    #[test]
+    fn test_validation_clamping() {
+        let mut schema = SettingsSchema::default();
+        
+        // Invalid tempo
+        schema.general.project_defaults.tempo = 10.0;
+        schema.validate_and_clamp();
+        assert_eq!(schema.general.project_defaults.tempo, 20.0);
+        
+        schema.general.project_defaults.tempo = 1200.0;
+        schema.validate_and_clamp();
+        assert_eq!(schema.general.project_defaults.tempo, 999.0);
+
+        // Invalid sample rate
+        schema.general.project_defaults.sample_rate = 99999;
+        schema.validate_and_clamp();
+        assert_eq!(schema.general.project_defaults.sample_rate, 48000);
+
+        // Invalid buffer size
+        schema.general.project_defaults.buffer_size = 123;
+        schema.validate_and_clamp();
+        assert_eq!(schema.general.project_defaults.buffer_size, 256);
+
+        // Invalid UI scale
+        schema.appearance.ui_scale = 0.1;
+        schema.validate_and_clamp();
+        assert_eq!(schema.appearance.ui_scale, 0.5);
+
+        schema.appearance.ui_scale = 5.0;
+        schema.validate_and_clamp();
+        assert_eq!(schema.appearance.ui_scale, 2.5);
+    }
+
+    #[test]
+    fn test_corrupt_file_recovery() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("test_settings_corrupt.json");
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
+        
+        // Write invalid JSON
+        std::fs::write(&path, "{ invalid json ... }").unwrap();
+        
+        // Load it
+        let schema = SettingsModel::load_from_path(&path);
+        
+        // Should have backed up and loaded defaults
+        assert_eq!(schema.general.project_defaults.tempo, 120.0);
+        
+        let backup_path = path.with_extension("json.backup");
+        assert!(backup_path.exists());
+        
+        // Clean up
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&backup_path);
+    }
+}
+

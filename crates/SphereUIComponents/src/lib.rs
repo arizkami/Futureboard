@@ -7,3 +7,4 @@ pub mod paths;
 pub mod perf;
 pub mod project;
 pub mod theme;
+pub mod settings;
