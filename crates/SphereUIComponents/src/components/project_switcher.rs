@@ -10,7 +10,9 @@ use crate::assets;
 use crate::components::text_input::{
     text_field_with_callbacks, TextInputCallbacks, TextInputState,
 };
-use crate::components::title_bar::TITLEBAR_HEIGHT;
+use crate::overlay::{
+    compute_overlay_position, OverlayAnchor, OverlayPlacement, OverlaySize, OVERLAY_WINDOW_MARGIN,
+};
 use crate::theme::Colors;
 
 pub type ProjectSwitcherCommandCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
@@ -28,7 +30,7 @@ pub struct ProjectSummary {
 #[derive(Debug, Clone)]
 pub struct ProjectSwitcherState {
     pub is_open: bool,
-    pub anchor_x: f32,
+    pub anchor: OverlayAnchor,
     pub query: String,
     pub selected_index: usize,
     pub current_project: ProjectSummary,
@@ -39,7 +41,9 @@ impl Default for ProjectSwitcherState {
     fn default() -> Self {
         Self {
             is_open: false,
-            anchor_x: 0.0,
+            anchor: OverlayAnchor {
+                bounds: gpui::bounds(gpui::point(px(0.0), px(0.0)), gpui::size(px(0.0), px(0.0))),
+            },
             query: String::new(),
             selected_index: 0,
             current_project: ProjectSummary {
@@ -56,8 +60,7 @@ impl Default for ProjectSwitcherState {
 
 const PANEL_WIDTH: f32 = 288.0;
 const PANEL_MAX_HEIGHT: f32 = 430.0;
-const EDGE_GAP: f32 = 8.0;
-const TOP_OFFSET: f32 = TITLEBAR_HEIGHT + 4.0;
+const EDGE_GAP: f32 = OVERLAY_WINDOW_MARGIN;
 const ROW_HEIGHT: f32 = 34.0;
 
 pub fn project_switcher_popover(
@@ -66,14 +69,26 @@ pub fn project_switcher_popover(
     search_focused: bool,
     search_callbacks: TextInputCallbacks,
     viewport_width: f32,
-    _viewport_height: f32,
+    viewport_height: f32,
     on_command: ProjectSwitcherCommandCb,
     on_close: ProjectSwitcherCloseCb,
 ) -> impl IntoElement {
-    let left = (state.anchor_x - 8.0).clamp(
-        EDGE_GAP,
-        (viewport_width - PANEL_WIDTH - EDGE_GAP).max(EDGE_GAP),
+    let window_bounds = gpui::bounds(
+        gpui::point(px(0.0), px(0.0)),
+        gpui::size(px(viewport_width), px(viewport_height)),
     );
+    let pos = compute_overlay_position(
+        state.anchor.bounds,
+        OverlaySize {
+            width: PANEL_WIDTH,
+            height: PANEL_MAX_HEIGHT,
+        },
+        window_bounds,
+        OverlayPlacement::BottomStart,
+        EDGE_GAP,
+    );
+    let left: f32 = pos.x.into();
+    let top: f32 = pos.y.into();
     let close_backdrop = on_close.clone();
 
     div()
@@ -97,6 +112,7 @@ pub fn project_switcher_popover(
             search_focused,
             search_callbacks,
             left,
+            top,
             on_command,
         ))
 }
@@ -116,6 +132,7 @@ fn panel(
     search_focused: bool,
     search_callbacks: TextInputCallbacks,
     left: f32,
+    top: f32,
     on_command: ProjectSwitcherCommandCb,
 ) -> impl IntoElement {
     let filtered = filtered_recent(state);
@@ -125,7 +142,7 @@ fn panel(
     div()
         .absolute()
         .left(px(left))
-        .top(px(TOP_OFFSET))
+        .top(px(top))
         .w(px(PANEL_WIDTH))
         .max_h(px(PANEL_MAX_HEIGHT))
         .rounded_md()

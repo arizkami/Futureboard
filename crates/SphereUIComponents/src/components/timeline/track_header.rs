@@ -143,6 +143,7 @@ pub fn track_header(
     state: &TimelineState,
     callbacks: TrackHeaderCallbacks,
 ) -> impl IntoElement {
+    let _s = crate::perf::PerfScope::enter("TrackHeader");
     let track_id = track.id.clone();
     let is_selected = state.selection.selected_track_id.as_ref() == Some(&track.id);
     let is_dragging = state.dragging_track_id.as_deref() == Some(track.id.as_str());

@@ -22,7 +22,7 @@ use crate::components::project_wizard::{
     open_project_wizard_window, ProjectCreateCallback, ProjectWizardResult, ProjectWizardWindow,
 };
 use crate::components::settings_dialog::{
-    settings_dialog, SettingsDialogCallbacks, SettingsDialogState, SettingsTab, UpdateSettingFn,
+    OnSettingUpdate, SettingsWindow, open_settings_window,
 };
 use crate::settings::{SettingsModel, SettingsSchema, GlobalSettingsModel};
 use crate::components::text_input::{
@@ -32,13 +32,13 @@ use crate::components::timeline::timeline::TimelineContextTarget;
 use crate::components::timeline::timeline_state::{
     self, ClipType, CreateTrackOptions, TimelineState, TrackState, TrackType,
 };
-use crate::components::timeline::waveform_cache;
 use crate::components::{BottomPanelResizeDrag, BottomPanelState};
 use crate::paths::FutureboardPaths;
 use crate::project::{
     apply_to_timeline, io::load_project, io::save_project, now_secs, recent::RecentProjectsStore,
     FutureboardProject,
 };
+use crate::overlay::{project_title_anchor, titlebar_label_anchor, OverlayAnchor};
 use crate::theme::{self, Colors};
 
 use DAUx::types::{
@@ -53,12 +53,11 @@ const USE_DEMO_PROJECT: bool = false;
 // Frame pacing details live in tasks/native/frame-pacing.md.
 
 /// Top-menu open state. `open_menu_id` is the manifest menu id currently
-/// showing its dropdown; `anchor_x` is the click x position used to align
-/// the dropdown panel underneath the clicked label.
+/// showing its dropdown; `anchor` is the label rect used to position the panel.
 #[derive(Debug, Clone, Default)]
 pub struct MenuBarUiState {
     pub open_menu_id: Option<String>,
-    pub anchor_x: f32,
+    pub anchor: OverlayAnchor,
     /// Nested submenu ids open underneath the root dropdown. `path[0]` is
     /// the submenu open in the root panel, `path[1]` in *that* submenu's
     /// panel, etc.
@@ -79,7 +78,6 @@ enum TextMenuTarget {
     AddTrackName,
     ProjectSwitcherSearch,
     BrowserSearch,
-    SettingsSearch,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -113,8 +111,8 @@ pub struct StudioLayout {
     browser_search_input: TextInputState,
     add_track_dialog: AddTrackDialogState,
     add_track_name_input: TextInputState,
-    settings_dialog: SettingsDialogState,
-    settings_search_input: TextInputState,
+    /// External settings window handle; None when closed.
+    settings_window: Option<WindowHandle<SettingsWindow>>,
     settings: gpui::Entity<SettingsModel>,
 
     text_context_menu: Option<TextContextMenu>,
@@ -126,6 +124,12 @@ pub struct StudioLayout {
     last_audio_project_signature: Option<String>,
     engine_project_dirty: bool,
     engine_media_dirty: bool,
+    /// True while a background `load_project` (file decode) is running.
+    audio_sync_in_flight: bool,
+    /// Queued when media/project changes during an in-flight sync.
+    audio_sync_pending: bool,
+    /// Start transport once the current background sync completes.
+    pending_play_after_sync: bool,
     last_engine_playhead_beat: f32,
     last_engine_sync: Instant,
     /// Owns keyboard focus for the studio surface. Without a focused
@@ -360,9 +364,11 @@ impl StudioLayout {
             let target = cx.entity().clone();
             let _ = timeline.update(cx, |timeline, _cx| {
                 timeline.set_media_changed_callback(Some(Arc::new(move |cx| {
-                    let _ = target.update(cx, |this, cx| {
+                    // Only mark dirty here — never read/sync Timeline from this
+                    // callback. It runs inside Timeline::update (e.g. file drop)
+                    // and sync_audio_project reads Timeline, which panics.
+                    let _ = target.update(cx, |this, _cx| {
                         this.mark_engine_media_dirty();
-                        this.sync_audio_project(cx, false);
                     });
                 })));
             });
@@ -375,14 +381,10 @@ impl StudioLayout {
 
         Self::spawn_audio_poll(cx);
 
+        let studio_entity = cx.entity();
+        crate::platform_chrome::register_studio_menu_dispatcher(studio_entity, cx);
+
         // settings and paths are loaded and registered at the top of this function
-
-        let settings_search_input = TextInputState::new(
-            "settings-search-input",
-            cx.focus_handle(),
-        )
-        .with_placeholder("Search settings...");
-
 
         Self {
             active_bottom_tab: components::BottomTab::Mixer,
@@ -405,8 +407,7 @@ impl StudioLayout {
             add_track_dialog: AddTrackDialogState::closed(),
             add_track_name_input: TextInputState::new("add-track-name-input", cx.focus_handle())
                 .with_placeholder("Track name"),
-            settings_dialog: SettingsDialogState::closed(),
-            settings_search_input,
+            settings_window: None,
             settings,
 
             text_context_menu: None,
@@ -418,6 +419,9 @@ impl StudioLayout {
             last_audio_project_signature: None,
             engine_project_dirty: true,
             engine_media_dirty: true,
+            audio_sync_in_flight: false,
+            audio_sync_pending: false,
+            pending_play_after_sync: false,
             last_engine_playhead_beat: 0.0,
             last_engine_sync: Instant::now(),
             focus_handle: cx.focus_handle(),
@@ -446,6 +450,7 @@ impl StudioLayout {
             executor.timer(Duration::from_millis(16)).await;
             let _ = this.update(cx, |this, cx| {
                 if this.poll_native_audio(cx) {
+                    crate::perf::record_notify("transport");
                     cx.notify();
                 }
             });
@@ -455,9 +460,15 @@ impl StudioLayout {
 
     fn poll_native_audio(&mut self, cx: &mut Context<Self>) -> bool {
         let _s = crate::perf::PerfScope::enter("poll_native_audio");
-        let Some(engine) = self.audio_engine.as_ref() else {
+        if self.audio_engine.is_none() {
             return false;
-        };
+        }
+
+        if self.engine_project_dirty || self.engine_media_dirty {
+            self.schedule_audio_project_sync(cx, false);
+        }
+
+        let engine = self.audio_engine.as_ref().expect("checked above");
         let stats = engine.stats();
         // State-transition signal — used to notify the root layout even
         // when the transport is paused (e.g. error appears, stream opens).
@@ -525,13 +536,15 @@ impl StudioLayout {
             + self.last_engine_sync.elapsed().as_secs_f32() * bpm.max(1.0) / 60.0
     }
 
+    /// Update smoothed meter levels in timeline state. Does not call
+    /// `cx.notify` — repaints are driven by the audio poll when transport
+    /// is active, or by user interaction when idle.
     fn apply_engine_meters(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.audio_engine.as_ref() else {
             return;
         };
         let meters = engine.meters();
-        let _ = self.timeline.update(cx, move |timeline, cx| {
-            let mut changed = false;
+        let _ = self.timeline.update(cx, |timeline, _cx| {
             for track_meter in meters.tracks {
                 if let Some(track) = timeline
                     .state
@@ -541,29 +554,37 @@ impl StudioLayout {
                 {
                     let next_l = track_meter.peak_l.clamp(0.0, 1.0) as f32;
                     let next_r = track_meter.peak_r.clamp(0.0, 1.0) as f32;
-                    changed |= smooth_meter_value(&mut track.meter_level_l, next_l);
-                    changed |= smooth_meter_value(&mut track.meter_level_r, next_r);
+                    let _ = smooth_meter_value(&mut track.meter_level_l, next_l);
+                    let _ = smooth_meter_value(&mut track.meter_level_r, next_r);
                 }
             }
-            changed |= smooth_meter_value(
+            let _ = smooth_meter_value(
                 &mut timeline.state.master.meter_level_l,
                 meters.master_peak_l.clamp(0.0, 1.0) as f32,
             );
-            changed |= smooth_meter_value(
+            let _ = smooth_meter_value(
                 &mut timeline.state.master.meter_level_r,
                 meters.master_peak_r.clamp(0.0, 1.0) as f32,
             );
-            if changed {
-                cx.notify();
-            }
         });
     }
 
-    fn sync_audio_project(&mut self, cx: &mut Context<Self>, force: bool) -> bool {
-        let Some(engine) = self.audio_engine.as_ref() else {
+    /// Queue a background engine sync. `load_project` decodes media on the
+    /// caller thread — never invoke it from the UI poll loop or render path.
+    pub(crate) fn schedule_audio_project_sync(&mut self, cx: &mut Context<Self>, force: bool) {
+        let Some(engine) = self.audio_engine.clone() else {
             self.audio_last_error = Some("audio engine unavailable".to_string());
-            return false;
+            return;
         };
+
+        if self.audio_sync_in_flight {
+            self.audio_sync_pending = true;
+            return;
+        }
+
+        if !force && !self.engine_project_dirty && !self.engine_media_dirty {
+            return;
+        }
 
         let sample_rate = self.current_audio_sample_rate();
         let snapshot = {
@@ -578,22 +599,57 @@ impl StudioLayout {
         if !force && self.last_audio_project_signature.as_deref() == Some(signature.as_str()) {
             self.engine_project_dirty = false;
             self.engine_media_dirty = false;
-            return true;
+            return;
         }
 
-        match engine.load_project(snapshot) {
+        self.audio_sync_in_flight = true;
+        let owner = cx.entity().clone();
+        cx.spawn(async move |_this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { engine.load_project(snapshot) })
+                .await;
+            let _ = owner.update(cx, |this, cx| {
+                this.complete_audio_project_sync(cx, result, signature);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn complete_audio_project_sync(
+        &mut self,
+        cx: &mut Context<Self>,
+        result: Result<(), DAUx::SphereAudioError>,
+        signature: String,
+    ) {
+        self.audio_sync_in_flight = false;
+        match result {
             Ok(()) => {
                 self.last_audio_project_signature = Some(signature);
                 self.engine_project_dirty = false;
                 self.engine_media_dirty = false;
                 self.audio_last_error = None;
-                true
             }
             Err(error) => {
                 self.audio_last_error = Some(error.to_string());
                 eprintln!("[audio] load_project failed: {error}");
-                false
+                // Clear dirty so a failed decode does not retry every poll tick.
+                self.engine_project_dirty = false;
+                self.engine_media_dirty = false;
             }
+        }
+
+        let pending_sync = self.audio_sync_pending;
+        self.audio_sync_pending = false;
+        if pending_sync {
+            self.schedule_audio_project_sync(cx, false);
+            return;
+        }
+
+        if self.pending_play_after_sync {
+            self.pending_play_after_sync = false;
+            self.start_native_playback(cx);
         }
     }
 
@@ -601,7 +657,7 @@ impl StudioLayout {
         self.engine_project_dirty = true;
     }
 
-    fn mark_engine_media_dirty(&mut self) {
+    pub(crate) fn mark_engine_media_dirty(&mut self) {
         self.engine_project_dirty = true;
         self.engine_media_dirty = true;
     }
@@ -661,9 +717,13 @@ impl StudioLayout {
             return;
         }
 
-        if (self.engine_project_dirty || self.engine_media_dirty)
-            && !self.sync_audio_project(cx, false)
-        {
+        if self.audio_sync_in_flight {
+            self.pending_play_after_sync = true;
+            return;
+        }
+        if self.engine_project_dirty || self.engine_media_dirty {
+            self.pending_play_after_sync = true;
+            self.schedule_audio_project_sync(cx, false);
             return;
         }
         self.sync_metronome_controls(cx);
@@ -792,7 +852,7 @@ impl StudioLayout {
     /// IDs (e.g. `transport:play-pause`). Unknown IDs are logged once
     /// and then ignored — this is the contract that lets future menu
     /// entries appear in the chrome without crashing the dispatcher.
-    fn dispatch_command_id(&mut self, command_id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn dispatch_command_id(&mut self, command_id: &str, cx: &mut Context<Self>) {
         self.dispatch_command_id_from_bounds(command_id, None, cx);
     }
 
@@ -840,7 +900,7 @@ impl StudioLayout {
                         let _ = layout.update(cx, |this, cx| {
                             this.mark_dirty();
                             this.mark_engine_media_dirty();
-                            this.sync_audio_project(cx, false);
+                            this.schedule_audio_project_sync(cx, false);
                         });
                         let path_key = path_for_decode.to_string_lossy().to_string();
                         let owner = layout.clone();
@@ -943,7 +1003,7 @@ impl StudioLayout {
             "dev:tracks-500" => self.stress_add_tracks(500, cx),
 
             "app:preferences" | "edit:preferences" | "project:settings" => {
-                self.open_settings_dialog(cx);
+                self.open_settings_dialog(owner_bounds, cx);
             }
 
             "track:add" | "project:add-track" => self.open_add_track_dialog(cx),
@@ -1266,7 +1326,7 @@ impl StudioLayout {
                 self.recent_projects.push(&project.name, path, now_secs());
                 self.sync_recent_to_switcher();
                 self.mark_engine_media_dirty();
-                self.sync_audio_project(cx, true);
+                self.schedule_audio_project_sync(cx, true);
                 cx.notify();
             }
             Err(e) => {
@@ -1403,22 +1463,99 @@ impl StudioLayout {
         cx.notify();
     }
 
-    fn open_settings_dialog(&mut self, cx: &mut Context<Self>) {
+    fn open_settings_dialog(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        // If window is already open, activate it
+        if let Some(handle) = self.settings_window.clone() {
+            if handle
+                .update(cx, |_settings, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.settings_window = None;
+        }
+
         self.menu_bar.open_menu_id = None;
         self.menu_bar.submenu_path.clear();
         self.open_popover = None;
         self.project_switcher.is_open = false;
         self.text_context_menu = None;
 
-        self.settings_dialog.is_open = true;
-        self.settings_dialog.active_tab = SettingsTab::General;
-        self.settings_dialog.search_query = String::new();
-        self.settings_search_input.set_value(String::new());
-        cx.notify();
+        let owner_bounds = owner_bounds.unwrap_or_else(|| Bounds {
+            origin: gpui::Point::default(),
+            size: gpui::size(px(1400.0), px(900.0)),
+        });
+        let settings = self.settings.clone();
+        let owner = cx.entity().clone();
+
+        let mut available_inputs = if let Some(ref engine) = self.audio_engine {
+            engine.list_input_devices().into_iter().map(|d| d.name).collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let schema = self.settings.read(cx).current.clone();
+        if !available_inputs.contains(&schema.hardware.audio.device_in)
+            && !schema.hardware.audio.device_in.is_empty()
+        {
+            available_inputs.push(schema.hardware.audio.device_in.clone());
+        }
+        if available_inputs.is_empty() {
+            available_inputs.push("Built-in Microphone".to_string());
+        }
+
+        let mut available_outputs = if let Some(ref engine) = self.audio_engine {
+            engine.list_output_devices().into_iter().map(|d| d.name).collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if !available_outputs.contains(&schema.hardware.audio.device_out)
+            && !schema.hardware.audio.device_out.is_empty()
+        {
+            available_outputs.push(schema.hardware.audio.device_out.clone());
+        }
+        if available_outputs.is_empty() {
+            available_outputs.push("Speakers (Realtek)".to_string());
+        }
+
+        let available_backends = vec![
+            "WASAPI Exclusive".to_string(),
+            "WASAPI Shared".to_string(),
+            "ASIO".to_string(),
+        ];
+
+        let on_update: OnSettingUpdate = Arc::new(move |updater, cx| {
+            let updater = updater.clone();
+            let _ = owner.update(cx, |this, cx| {
+                let _ = this.settings.update(cx, |settings, cx| {
+                    settings.update_setting(move |s| updater(s), cx);
+                });
+                this.sync_settings_to_systems(cx);
+                cx.notify();
+            });
+        });
+
+        match open_settings_window(
+            owner_bounds,
+            settings,
+            available_inputs,
+            available_outputs,
+            available_backends,
+            on_update,
+            cx,
+        ) {
+            Ok(handle) => self.settings_window = Some(handle),
+            Err(err) => eprintln!("[settings] failed to open settings window: {err}"),
+        }
     }
 
     fn close_settings_dialog(&mut self, cx: &mut Context<Self>) {
-        self.settings_dialog.is_open = false;
+        if let Some(handle) = self.settings_window.take() {
+            let _ = handle.update(cx, |_settings, window, _cx| window.remove_window());
+        }
         self.text_context_menu = None;
         cx.notify();
     }
@@ -1853,7 +1990,7 @@ impl StudioLayout {
                             let _ = layout.update(cx, |this, cx| {
                                 this.mark_dirty();
                                 this.mark_engine_media_dirty();
-                                this.sync_audio_project(cx, false);
+                                this.schedule_audio_project_sync(cx, false);
                             });
                             let path_key = path_for_decode.to_string_lossy().to_string();
                             let owner = layout.clone();
@@ -1886,43 +2023,12 @@ impl StudioLayout {
 
     fn handle_settings_dialog_key(
         &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        _event: &KeyDownEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
     ) -> bool {
-        if !self.settings_dialog.is_open {
-            return false;
-        }
-        if event.keystroke.key.as_str() == "escape" && self.text_context_menu.take().is_some() {
-            cx.notify();
-            return true;
-        }
-        if self.settings_search_input.is_focused(window) {
-            let action = self
-                .settings_search_input
-                .handle_key_with_clipboard(event, Some(cx));
-            self.settings_dialog.search_query = self.settings_search_input.value.clone();
-            match action {
-                TextInputAction::Cancel => self.close_settings_dialog(cx),
-                TextInputAction::Submit | TextInputAction::Consumed | TextInputAction::Pass => cx.notify(),
-            }
-            return !matches!(action, TextInputAction::Pass);
-        }
-        let key = event.keystroke.key.as_str();
-        let ctrl = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
-        match key {
-            "escape" => self.close_settings_dialog(cx),
-            "f" if ctrl => {
-                self.settings_search_input.focus_handle.focus(window);
-                cx.notify();
-            }
-            "q" | "Q" if !ctrl => {
-                self.settings_search_input.focus_handle.focus(window);
-                cx.notify();
-            }
-            _ => return false,
-        }
-        true
+        // Settings is now an external window that handles its own keyboard events.
+        false
     }
 
     fn handle_add_track_dialog_key(
@@ -1976,7 +2082,6 @@ impl StudioLayout {
             TextMenuTarget::AddTrackName => &mut self.add_track_name_input,
             TextMenuTarget::ProjectSwitcherSearch => &mut self.project_switcher_search_input,
             TextMenuTarget::BrowserSearch => &mut self.browser_search_input,
-            TextMenuTarget::SettingsSearch => &mut self.settings_search_input,
         }
     }
 
@@ -1985,7 +2090,6 @@ impl StudioLayout {
             TextMenuTarget::AddTrackName => &self.add_track_name_input,
             TextMenuTarget::ProjectSwitcherSearch => &self.project_switcher_search_input,
             TextMenuTarget::BrowserSearch => &self.browser_search_input,
-            TextMenuTarget::SettingsSearch => &self.settings_search_input,
         }
     }
 
@@ -2001,9 +2105,6 @@ impl StudioLayout {
             TextMenuTarget::BrowserSearch => {
                 self.file_browser.set_filter(&self.browser_search_input.value);
             }
-            TextMenuTarget::SettingsSearch => {
-                self.settings_dialog.search_query = self.settings_search_input.value.clone();
-            }
         }
     }
 
@@ -2011,7 +2112,6 @@ impl StudioLayout {
         self.add_track_name_input.is_focused(window)
             || self.project_switcher_search_input.is_focused(window)
             || self.browser_search_input.is_focused(window)
-            || self.settings_search_input.is_focused(window)
     }
 
     fn context_entries(
@@ -2388,83 +2488,14 @@ impl StudioLayout {
         owner: Entity<Self>,
         timeline: Entity<components::timeline::Timeline>,
         path: PathBuf,
-        path_key: String,
+        _path_key: String,
     ) {
-        cx.spawn(async move |_this, cx| {
-            let meta_path = path.clone();
-            let metadata = cx
-                .background_executor()
-                .spawn(async move { DAUx::probe_audio_file(&meta_path) })
-                .await;
-
-            match metadata {
-                Ok(info) => {
-                    let format = info.format.as_str().to_string();
-                    let meta_path_key = path_key.clone();
-                    let _ = timeline.update(cx, move |timeline, cx| {
-                        let changed = timeline.state.update_audio_clip_metadata(
-                            &meta_path_key,
-                            &format,
-                            info.sample_rate,
-                            info.channels,
-                            info.total_frames,
-                            info.duration_seconds,
-                        );
-                        cx.notify();
-                        if changed {
-                            let _ = owner.update(cx, |this, cx| {
-                                this.mark_engine_media_dirty();
-                                this.sync_audio_project(cx, false);
-                            });
-                        }
-                    });
-                }
-                Err(error) => {
-                    eprintln!(
-                        "[audio-import] WARNING using fallback duration because metadata failed: path={} error={}",
-                        path_key, error
-                    );
-                }
-            }
-
-            let decode_path = path.clone();
-            let preview = cx
-                .background_executor()
-                .spawn(async move { waveform_cache::decode_and_cache_file(&decode_path) })
-                .await;
-            match preview {
-                Some(preview) => {
-                    let _ = timeline.update(cx, move |timeline, cx| {
-                        if let Some(source_duration) =
-                            timeline.state.audio_source_duration_seconds(&path_key)
-                        {
-                            let delta = (preview.duration_seconds - source_duration).abs();
-                            if delta > 0.01 {
-                                eprintln!(
-                                    "[waveform] WARNING preview duration differs from DirectAudioEngine metadata: path={} preview_duration_seconds={:.6} metadata_duration_seconds={:.6}",
-                                    path_key, preview.duration_seconds, source_duration
-                                );
-                            }
-                        }
-                        cx.notify();
-                    });
-                }
-                None => {
-                    // decode_and_cache_file returned None — either the
-                    // extension was rejected (keep
-                    // `is_supported_audio_ext` and waveform_cache's
-                    // match arm aligned) or the file body itself failed
-                    // to decode. Either way the clip will render with
-                    // the placeholder waveform; the realtime engine
-                    // also won't be able to play it.
-                    eprintln!(
-                        "[waveform] decode produced no preview: path={} — clip will use placeholder waveform and likely fail playback",
-                        path_key
-                    );
-                }
-            }
-        })
-        .detach();
+        components::timeline::audio_import::spawn_timeline_import_from_layout(
+            path,
+            timeline,
+            owner,
+            cx,
+        );
     }
 
     /// Build the callback bundle used by the mixer. Every mutation lands in
@@ -2679,8 +2710,10 @@ impl Render for StudioLayout {
             let this = cx.entity().clone();
             std::sync::Arc::new(move |new_x: f32, _w, cx| {
                 let _ = this.update(cx, |this, cx| {
-                    this.mixer_scroll_x = new_x;
-                    cx.notify();
+                    if (this.mixer_scroll_x - new_x).abs() > 0.25 {
+                        this.mixer_scroll_x = new_x;
+                        cx.notify();
+                    }
                 });
             })
         };
@@ -2708,6 +2741,12 @@ impl Render for StudioLayout {
                 }
             },
         );
+        let on_resize_end = cx.listener(|this, _event: &gpui::MouseUpEvent, _window, cx| {
+            if this.bottom_panel_state.is_resizing {
+                this.bottom_panel_state.is_resizing = false;
+                cx.notify();
+            }
+        });
 
         // Pull the live track list and current selection out of the Timeline so
         // the Mixer and Inspector render against the same data the TrackHeader
@@ -2827,7 +2866,7 @@ impl Render for StudioLayout {
                 let _ = layout.update(cx, |this, cx| {
                     this.mark_dirty();
                     this.mark_engine_media_dirty();
-                    this.sync_audio_project(cx, false);
+                    this.schedule_audio_project_sync(cx, false);
                 });
                 let path_key = path_for_decode.to_string_lossy().to_string();
                 let owner = layout.clone();
@@ -2939,7 +2978,7 @@ impl Render for StudioLayout {
                         this.menu_bar.open_menu_id = None;
                     } else {
                         this.menu_bar.open_menu_id = Some(id);
-                        this.menu_bar.anchor_x = anchor_x;
+                        this.menu_bar.anchor = titlebar_label_anchor(anchor_x);
                     }
                     this.menu_bar.submenu_path.clear();
                     this.open_popover = None;
@@ -3002,7 +3041,7 @@ impl Render for StudioLayout {
                     this.open_popover = None;
                     this.text_context_menu = None;
                     this.project_switcher.is_open = !this.project_switcher.is_open;
-                    this.project_switcher.anchor_x = anchor_x;
+                    this.project_switcher.anchor = project_title_anchor(anchor_x);
                     if this.project_switcher.is_open {
                         this.project_switcher.query.clear();
                         this.project_switcher_search_input.set_value("");
@@ -3015,26 +3054,31 @@ impl Render for StudioLayout {
         };
 
         let open_menu_id = self.menu_bar.open_menu_id.clone();
-        let menu_anchor_x = self.menu_bar.anchor_x;
+        let menu_anchor = self.menu_bar.anchor;
         let submenu_path = self.menu_bar.submenu_path.clone();
         let viewport_width: f32 = window.bounds().size.width.into();
         let viewport_height: f32 = window.bounds().size.height.into();
 
-        let dropdown_overlay = open_menu_id.as_ref().and_then(|id| {
-            let manifest = crate::menu::MenuManifest::load();
-            manifest.menus.iter().find(|m| &m.id == id).map(|menu| {
-                components::menu_dropdown::menu_dropdown(
-                    menu,
-                    menu_anchor_x,
-                    viewport_width,
-                    viewport_height,
-                    &submenu_path,
-                    on_toggle_submenu.clone(),
-                    on_menu_command.clone(),
-                    on_close_menu.clone(),
-                )
+        let chrome_policy = crate::platform_chrome::PlatformChromePolicy::current();
+        let dropdown_overlay = if chrome_policy.show_in_window_menubar {
+            open_menu_id.as_ref().and_then(|id| {
+                let manifest = crate::menu::MenuManifest::load();
+                manifest.menus.iter().find(|m| &m.id == id).map(|menu| {
+                    components::menu_dropdown::menu_dropdown(
+                        menu,
+                        menu_anchor,
+                        viewport_width,
+                        viewport_height,
+                        &submenu_path,
+                        on_toggle_submenu.clone(),
+                        on_menu_command.clone(),
+                        on_close_menu.clone(),
+                    )
+                })
             })
-        });
+        } else {
+            None
+        };
         let on_close_popover: std::sync::Arc<dyn Fn(&(), &mut Window, &mut gpui::App) + 'static> = {
             let this = cx.entity().clone();
             std::sync::Arc::new(move |_: &(), _w, cx| {
@@ -3108,104 +3152,8 @@ impl Render for StudioLayout {
                 None => None,
             }
         };
-        let settings_overlay = if self.settings_dialog.is_open {
-            let target = cx.entity().clone();
-            
-            let search_callbacks = TextInputCallbacks {
-                on_context_menu: Some(Arc::new({
-                    let target = target.clone();
-                    move |(x, y): &(f32, f32), _w, cx| {
-                        let x = *x;
-                        let y = *y;
-                        let _ = target.update(cx, |this, cx| {
-                            this.text_context_menu = Some(TextContextMenu {
-                                target: TextMenuTarget::SettingsSearch,
-                                x,
-                                y,
-                             });
-                             cx.notify();
-                        });
-                    }
-                })),
-            };
-
-            let callbacks = SettingsDialogCallbacks {
-                on_close: Arc::new({
-                    let target = target.clone();
-                    move |_: &(), _w, cx| {
-                        let _ = target.update(cx, |this, cx| this.close_settings_dialog(cx));
-                    }
-                }),
-                on_select_tab: Arc::new({
-                    let target = target.clone();
-                    move |tab: &SettingsTab, _w, cx| {
-                        let tab = *tab;
-                        let _ = target.update(cx, |this, cx| {
-                            this.settings_dialog.active_tab = tab;
-                            cx.notify();
-                        });
-                    }
-                }),
-                on_update_setting: Arc::new({
-                    let target = target.clone();
-                    move |updater: UpdateSettingFn, _w, cx| {
-                        let updater = updater.clone();
-                        let _ = target.update(cx, |this, cx| {
-                            let _ = this.settings.update(cx, |settings, cx| {
-                                settings.update_setting(move |s| updater(s), cx);
-                            });
-                            this.sync_settings_to_systems(cx);
-                            cx.notify();
-                        });
-                    }
-                }),
-            };
-
-            let schema = self.settings.read(cx).current.clone();
-
-            let mut available_inputs = if let Some(ref engine) = self.audio_engine {
-                engine.list_input_devices().into_iter().map(|d| d.name).collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-            if !available_inputs.contains(&schema.hardware.audio.device_in) && !schema.hardware.audio.device_in.is_empty() {
-                available_inputs.push(schema.hardware.audio.device_in.clone());
-            }
-            if available_inputs.is_empty() {
-                available_inputs.push("Built-in Microphone".to_string());
-            }
-
-            let mut available_outputs = if let Some(ref engine) = self.audio_engine {
-                engine.list_output_devices().into_iter().map(|d| d.name).collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-            if !available_outputs.contains(&schema.hardware.audio.device_out) && !schema.hardware.audio.device_out.is_empty() {
-                available_outputs.push(schema.hardware.audio.device_out.clone());
-            }
-            if available_outputs.is_empty() {
-                available_outputs.push("Speakers (Realtek)".to_string());
-            }
-
-            let available_backends = vec!["WASAPI Exclusive".to_string(), "WASAPI Shared".to_string(), "ASIO".to_string()];
-
-            Some(
-                settings_dialog(
-                    &self.settings_dialog,
-                    &schema,
-                    &self.settings_search_input,
-                    self.settings_search_input.is_focused(window),
-                    search_callbacks,
-                    callbacks,
-                    &available_inputs,
-                    &available_outputs,
-                    &available_backends,
-                )
-                .into_any_element()
-            )
-        } else {
-            None
-        };
+        // Settings is now an external window — no overlay needed.
+        let settings_overlay: Option<gpui::AnyElement> = None;
         let text_context_overlay = self.text_context_menu.map(|menu| {
             let clipboard_has_text = cx
                 .read_from_clipboard()
@@ -3491,6 +3439,7 @@ impl Render for StudioLayout {
                     on_tab_click,
                     on_resize_start,
                     on_resize_move,
+                    on_resize_end,
                 )
             })
             .child({

@@ -330,6 +330,7 @@ pub fn bottom_panel(
     on_resize_start: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
     on_resize_move: impl Fn(&gpui::DragMoveEvent<BottomPanelResizeDrag>, &mut Window, &mut App)
         + 'static,
+    on_resize_end: impl Fn(&gpui::MouseUpEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let on_tab_click = std::sync::Arc::new(on_tab_click);
     div()
@@ -343,6 +344,7 @@ pub fn bottom_panel(
         .relative()
         // While dragging, listen for move events on the whole panel.
         .on_drag_move::<BottomPanelResizeDrag>(on_resize_move)
+        .on_mouse_up(gpui::MouseButton::Left, on_resize_end)
         // Resize handle — 5px strip pinned to the top edge.
         .child(
             div()

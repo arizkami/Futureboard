@@ -6,12 +6,15 @@ use gpui::{
 };
 
 use crate::assets;
+use crate::overlay::{
+    compute_overlay_position, pointer_anchor, OverlayPlacement, OverlaySize, OVERLAY_WINDOW_MARGIN,
+};
 use crate::theme::{menu as menu_style, Colors};
 
 pub type ContextCommandCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
 pub type ContextCloseCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 
-const EDGE_GAP: f32 = 8.0;
+const EDGE_GAP: f32 = OVERLAY_WINDOW_MARGIN;
 
 #[derive(Clone, Debug)]
 pub enum ContextMenuEntry {
@@ -98,11 +101,19 @@ pub fn context_menu_overlay(
 ) -> impl IntoElement {
     let width = panel_width_for_entries(&entries);
     let height = panel_height_for_entries(&entries);
-    let left = x.clamp(EDGE_GAP, (viewport_width - width - EDGE_GAP).max(EDGE_GAP));
-    let top = y.clamp(
-        EDGE_GAP,
-        (viewport_height - height - EDGE_GAP).max(EDGE_GAP),
+    let window_bounds = gpui::bounds(
+        gpui::point(px(0.0), px(0.0)),
+        gpui::size(px(viewport_width), px(viewport_height)),
     );
+    let pos = compute_overlay_position(
+        pointer_anchor(x, y).bounds,
+        OverlaySize { width, height },
+        window_bounds,
+        OverlayPlacement::Pointer,
+        EDGE_GAP,
+    );
+    let left: f32 = pos.x.into();
+    let top: f32 = pos.y.into();
 
     let close_backdrop = on_close.clone();
     div()

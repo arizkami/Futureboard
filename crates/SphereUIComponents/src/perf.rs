@@ -6,8 +6,11 @@
 //! thread without plumbing context. It aggregates by scope name over a
 //! 1-second window and dumps once per second to stderr when enabled.
 //!
-//! Enable with `FUTUREBOARD_UI_PERF=1` (or `=verbose` to also dump every
-//! repaint instead of every second).
+//! Enable with `FUTUREBOARD_UI_PERF=1`, `FUTUREBOARD_UI_PROFILE=1`, or
+//! `=verbose` to also dump every repaint instead of every second.
+//!
+//! Notify diagnostics: `FUTUREBOARD_NOTIFY_DEBUG=1` logs notify reasons
+//! at 1 Hz via `record_notify`.
 //!
 //! Cost when disabled: one thread-local flag check per scope/count call.
 //! When enabled: one `Instant::now()` + a small HashMap insert per scope.
@@ -64,11 +67,59 @@ struct Collector {
     reason_counts: BTreeMap<&'static str, u64>,
 }
 
+#[derive(Default)]
+struct NotifyAgg {
+    total: u64,
+    reasons: BTreeMap<&'static str, u64>,
+    window_start: Option<Instant>,
+}
+
+impl NotifyAgg {
+    fn enabled() -> bool {
+        static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_NOTIFY_DEBUG").is_some())
+    }
+
+    fn record(&mut self, reason: &'static str) {
+        if !Self::enabled() {
+            return;
+        }
+        let now = Instant::now();
+        if self.window_start.is_none() {
+            self.window_start = Some(now);
+        }
+        self.total = self.total.saturating_add(1);
+        *self.reasons.entry(reason).or_insert(0) += 1;
+        if self
+            .window_start
+            .is_some_and(|start| now.duration_since(start) >= Duration::from_secs(1))
+        {
+            let elapsed = self.window_start.unwrap().elapsed().as_secs_f32().max(0.001);
+            eprintln!(
+                "[notify-debug] notify/s={:.0}",
+                self.total as f32 / elapsed
+            );
+            let mut reasons: Vec<_> = self.reasons.iter().collect();
+            reasons.sort_by(|a, b| b.1.cmp(a.1));
+            for (name, count) in reasons {
+                eprintln!(
+                    "[notify-debug]   {}={:.1}/s",
+                    name,
+                    *count as f32 / elapsed
+                );
+            }
+            *self = Self::default();
+        }
+    }
+}
+
 impl Collector {
     fn new() -> Self {
         let now = Instant::now();
+        let enabled = std::env::var_os("FUTUREBOARD_UI_PERF").is_some()
+            || std::env::var_os("FUTUREBOARD_UI_PROFILE").is_some();
         Self {
-            enabled: std::env::var_os("FUTUREBOARD_UI_PERF").is_some(),
+            enabled,
             scopes: BTreeMap::new(),
             counters: BTreeMap::new(),
             frame_count: 0,
@@ -154,9 +205,33 @@ impl Collector {
         };
 
         eprintln!(
-            "[ui-perf] fps={:.1} avg={:.2}ms min={:.2}ms max={:.2}ms repaint={}/s dominant_reason={}({:.0}%)",
+            "[ui-prof] fps={:.1} frame_ms={:.2} min={:.2}ms max={:.2}ms root_renders/s={} dominant_reason={}({:.0}%)",
             fps, avg_ms, min_ms, self.frame_max_ms, self.frame_count, dominant_reason.0, reason_pct
         );
+
+        let mut scopes: Vec<_> = self
+            .scopes
+            .iter()
+            .filter(|(_, a)| a.count > 0)
+            .collect();
+        scopes.sort_by(|a, b| b.1.total_ns.cmp(&a.1.total_ns));
+        for (name, agg) in scopes.iter().take(12) {
+            let calls = agg.count;
+            let total_ms = agg.total_ns as f32 / 1_000_000.0;
+            let avg_ms = if calls > 0 {
+                total_ms / calls as f32
+            } else {
+                0.0
+            };
+            let max_ms = agg.max_ns as f32 / 1_000_000.0;
+            eprintln!(
+                "  {name} calls={calls} avg={avg_ms:.2}ms max={max_ms:.2}ms total={total_ms:.2}ms/s",
+                calls = calls,
+                avg_ms = avg_ms,
+                max_ms = max_ms,
+                total_ms = total_ms / elapsed
+            );
+        }
 
         if !reasons.is_empty() && reasons.len() > 1 {
             let mut line = String::from("[ui-perf] repaint-sources: ");
@@ -366,6 +441,19 @@ impl Collector {
 
 thread_local! {
     static COLLECTOR: RefCell<Collector> = RefCell::new(Collector::new());
+    static NOTIFY: RefCell<NotifyAgg> = RefCell::new(NotifyAgg::default());
+}
+
+/// Record a UI repaint driver (transport, meter, scroll, etc.). Logged at
+/// 1 Hz when `FUTUREBOARD_NOTIFY_DEBUG=1`.
+pub fn record_notify(reason: &'static str) {
+    NOTIFY.with(|n| n.borrow_mut().record(reason));
+}
+
+/// Whether the optional perf HUD overlay is enabled.
+pub fn perf_hud_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_PERF_HUD").is_some())
 }
 
 /// Returns whether perf instrumentation is active. Cheap — single TLS

@@ -15,6 +15,7 @@ pub mod mixer_panel;
 pub mod panel;
 pub mod project_switcher;
 pub mod project_wizard;
+pub mod settings_layout;
 pub mod settings_dialog;
 mod sidebar;
 pub mod slider;
@@ -50,6 +51,7 @@ pub use slider::slider;
 pub use status_bar::status_bar;
 pub use text_input::{text_field, TextInputAction, TextInputState};
 pub use settings_dialog::{
-    settings_dialog, SettingsDialogCallbacks, SettingsDialogState, SettingsTab,
+    settings_dialog, HardwareCombo, OnSettingUpdate, SettingsDialogCallbacks, SettingsDialogState,
+    SettingsTab, SettingsWindow, open_settings_window,
 };
 

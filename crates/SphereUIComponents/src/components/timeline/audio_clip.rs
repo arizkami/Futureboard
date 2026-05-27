@@ -55,6 +55,7 @@ pub fn audio_clip(
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
 ) -> impl IntoElement {
+    let _s = crate::perf::PerfScope::enter("AudioClip");
     let clip_id = clip.id.clone();
     let drag_clip_id = clip.id.clone();
     let drag_track_id = track_id.to_string();

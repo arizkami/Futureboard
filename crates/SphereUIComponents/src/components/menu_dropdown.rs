@@ -29,6 +29,9 @@ use gpui::{
 use crate::assets;
 use crate::components::title_bar::TITLEBAR_HEIGHT;
 use crate::menu::{Menu, MenuItem, MenuItemKind};
+use crate::overlay::{
+    compute_overlay_position, OverlayAnchor, OverlayPlacement, OverlaySize, OVERLAY_WINDOW_MARGIN,
+};
 use crate::theme::{menu as menu_style, Colors};
 
 pub const TOP_CHROME_HEIGHT: f32 = TITLEBAR_HEIGHT;
@@ -52,7 +55,7 @@ pub type ToggleSubmenuCb = Arc<dyn Fn(&(usize, String), &mut Window, &mut App) +
 /// panel, etc.
 pub fn menu_dropdown(
     menu: &Menu,
-    anchor_x: f32,
+    anchor: OverlayAnchor,
     viewport_width: f32,
     viewport_height: f32,
     submenu_path: &[String],
@@ -60,9 +63,24 @@ pub fn menu_dropdown(
     on_command: CommandCb,
     on_close: CloseCb,
 ) -> impl IntoElement {
-    let root_top = TOP_CHROME_HEIGHT;
+    let window_bounds = gpui::bounds(
+        gpui::point(px(0.0), px(0.0)),
+        gpui::size(px(viewport_width), px(viewport_height)),
+    );
     let root_width = panel_width_for_items(&menu.items);
-    let root_left = clamp_left(anchor_x, root_width, viewport_width);
+    let root_height = panel_height_for_items(&menu.items);
+    let root_pos = compute_overlay_position(
+        anchor.bounds,
+        OverlaySize {
+            width: root_width,
+            height: root_height.max(MENU_MIN_VISIBLE_HEIGHT),
+        },
+        window_bounds,
+        OverlayPlacement::BottomStart,
+        MENU_PANEL_EDGE_GAP,
+    );
+    let root_left: f32 = root_pos.x.into();
+    let root_top: f32 = root_pos.y.into();
 
     // Build the chain of panels: root, then for each open submenu in the
     // path, the nested panel positioned to the right of its parent.
@@ -123,8 +141,8 @@ pub fn menu_dropdown(
 }
 
 fn clamp_left(left: f32, width: f32, viewport_width: f32) -> f32 {
-    let max_left = (viewport_width - width - MENU_PANEL_EDGE_GAP).max(MENU_PANEL_EDGE_GAP);
-    left.clamp(MENU_PANEL_EDGE_GAP, max_left)
+    let max_left = (viewport_width - width - OVERLAY_WINDOW_MARGIN).max(OVERLAY_WINDOW_MARGIN);
+    left.clamp(OVERLAY_WINDOW_MARGIN, max_left)
 }
 
 fn clamp_top(top: f32, viewport_height: f32) -> f32 {
@@ -210,6 +228,18 @@ fn panel_width_for_items(items: &[MenuItem]) -> f32 {
     }
 
     width.clamp(menu_style::PANEL_MIN_WIDTH, menu_style::PANEL_MAX_WIDTH)
+}
+
+fn panel_height_for_items(items: &[MenuItem]) -> f32 {
+    let content = items
+        .iter()
+        .filter(|it| it.visible)
+        .map(|item| match item.kind {
+            MenuItemKind::Separator => SEPARATOR_HEIGHT,
+            _ => menu_style::ROW_HEIGHT + menu_style::ITEM_GAP,
+        })
+        .sum::<f32>();
+    menu_style::PANEL_PAD * 2.0 + content
 }
 
 fn panel_shadow() -> Vec<gpui::BoxShadow> {

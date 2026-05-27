@@ -1,8 +1,13 @@
-use gpui::{div, px, svg, Div, InteractiveElement, ParentElement, Rgba, Styled, WindowControlArea};
+use gpui::{
+    div, px, svg, App, Div, InteractiveElement, IntoElement, MouseButton, ParentElement, Rgba,
+    StatefulInteractiveElement, Styled, Window, WindowControlArea,
+};
 
+use crate::assets;
+use crate::platform_chrome::{PlatformChromePolicy, TITLEBAR_HEIGHT_PX};
 use crate::theme::Colors;
 
-pub const TITLEBAR_HEIGHT: f32 = 32.0;
+pub const TITLEBAR_HEIGHT: f32 = TITLEBAR_HEIGHT_PX;
 pub const STATUSBAR_HEIGHT: f32 = 22.0;
 pub const CHROME_ICON_BUTTON_SIZE: f32 = 26.0;
 pub const WINDOW_CONTROL_WIDTH: f32 = 34.0;
@@ -75,6 +80,71 @@ pub fn draggable_spacer() -> Div {
         .on_mouse_down(gpui::MouseButton::Left, |_, window, _cx| {
             window.start_window_move();
         })
+}
+
+/// Compact title bar for external floating dialogs (Project Wizard, Preferences).
+/// Drag on the bar; close button uses `.occlude()` so it is not swallowed by drag.
+pub fn external_window_titlebar(
+    title: impl Into<String>,
+    close_id: impl Into<gpui::ElementId>,
+    on_close: impl Fn(&mut Window, &mut App) + 'static + Clone,
+) -> impl IntoElement {
+    let policy = PlatformChromePolicy::external_dialog();
+    let on_close = on_close.clone();
+    let title_text = title.into();
+
+    let mut bar = div()
+        .window_control_area(WindowControlArea::Drag)
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+        .flex()
+        .items_center()
+        .justify_between()
+        .h(px(policy.titlebar_height_px))
+        .pl(policy.traffic_light_left_padding())
+        .pr(px(if policy.show_window_controls {
+            0.0
+        } else {
+            CHROME_PAD_X
+        }))
+        .border_b(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_titlebar())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .h_full()
+                .text_size(px(CHROME_TITLE_SIZE))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::text_primary())
+                .child(title_text),
+        );
+
+    if policy.show_window_controls {
+        bar = bar.child(
+            div()
+                .window_control_area(WindowControlArea::Close)
+                .id(close_id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(TITLEBAR_HEIGHT))
+                .h(px(TITLEBAR_HEIGHT))
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(|s| s.bg(Colors::surface_control_hover()))
+                .occlude()
+                .on_click(move |_, window, cx| on_close(window, cx))
+                .child(
+                    svg()
+                        .path(assets::ICON_X_PATH)
+                        .w(px(12.0))
+                        .h(px(12.0))
+                        .text_color(Colors::text_faint()),
+                ),
+        );
+    }
+
+    bar
 }
 
 pub fn status_item(text: impl Into<String>, strong: bool) -> impl gpui::IntoElement {

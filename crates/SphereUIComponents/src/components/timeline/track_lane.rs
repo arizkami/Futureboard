@@ -24,6 +24,7 @@ pub fn track_lane(
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
 ) -> impl IntoElement {
+    let _s = crate::perf::PerfScope::enter("TrackLane");
     let track_id = track.id.clone();
     let is_track_selected = state.selection.selected_track_id.as_ref() == Some(&track.id);
     let even = track_index % 2 == 0;
@@ -58,15 +59,26 @@ pub fn track_lane(
     let track_id_add = track_id.clone();
     let track_id_context = track_id.clone();
 
-    // Map clips
+    let viewport_w = state.viewport.viewport_width.max(1.0);
+
+    // Map clips — skip lanes outside the horizontal viewport.
     let clip_elements: Vec<_> = track
         .clips
         .iter()
-        .map(|clip| {
+        .filter_map(|clip| {
+            let seconds_per_beat = state.seconds_per_beat();
+            let pixels_per_second = state.viewport.pixels_per_second;
+            let clip_left = state.beats_to_x(clip.start_beat);
+            let clip_width =
+                (clip.duration_beats * seconds_per_beat * pixels_per_second).max(10.0);
+            if clip_left + clip_width < 0.0 || clip_left > viewport_w {
+                return None;
+            }
+
             let track_color = track.color;
             let on_sel_clip = on_select_clip.clone();
             let on_clip_context = on_clip_context_menu.clone();
-            match clip.clip_type {
+            Some(match clip.clip_type {
                 ClipType::Audio { .. } => audio_clip(
                     clip,
                     &track.id,
@@ -85,9 +97,14 @@ pub fn track_lane(
                     on_clip_context,
                 )
                 .into_any_element(),
-            }
+            })
         })
         .collect();
+
+    if crate::perf::enabled() {
+        crate::perf::count("rendered_clips", clip_elements.len() as u64);
+        crate::perf::count("total_clips", track.clips.len() as u64);
+    }
 
     let active_tool = state.active_tool;
     let state_ref = state.clone();

@@ -3,6 +3,7 @@ use crate::theme::Colors;
 use gpui::{div, px, svg, IntoElement, ParentElement, Styled};
 
 pub fn playhead(state: &TimelineState) -> impl IntoElement {
+    let _s = crate::perf::PerfScope::enter("Playhead");
     let x = state.beats_to_x(state.transport.playhead_beats);
 
     // Position it relative to the scrollable content area

@@ -5470,6 +5470,7 @@ dependencies = [
  "crc32fast",
  "dirs 5.0.1",
  "gpui",
+ "pollster 0.4.0",
  "raw-window-handle",
  "rfd",
  "serde",

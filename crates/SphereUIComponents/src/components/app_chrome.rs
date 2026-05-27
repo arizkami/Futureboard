@@ -9,8 +9,9 @@ use crate::assets;
 use crate::components::menu_bar;
 use crate::components::title_bar::{
     chrome_button, draggable_spacer, section_separator, window_control_button, CHROME_PAD_X,
-    CHROME_TITLE_SIZE, TITLEBAR_HEIGHT,
+    CHROME_TITLE_SIZE,
 };
+use crate::platform_chrome::PlatformChromePolicy;
 use crate::theme::Colors;
 
 /// Click handler for top-level menu buttons. Receives `(menu_id, anchor_x)`
@@ -434,15 +435,18 @@ pub fn app_chrome(
     project: ProjectChromeState,
     transport: TransportChromeState,
 ) -> impl IntoElement {
-    div()
+    let policy = PlatformChromePolicy::current();
+
+    let mut chrome = div()
         .flex()
         .flex_row()
         .items_center()
-        .h(px(TITLEBAR_HEIGHT))
+        .h(px(policy.titlebar_height_px))
         .w_full()
         .bg(Colors::surface_titlebar())
         .border_b_1()
         .border_color(Colors::border_subtle())
+        .pl(policy.traffic_light_left_padding())
         // Windows: NCHITTEST callback returns `HTCAPTION` for hitboxes
         // tagged Drag, letting DefWindowProc start the system move.
         .window_control_area(WindowControlArea::Drag)
@@ -457,29 +461,23 @@ pub fn app_chrome(
         // for clicks on those buttons.
         .on_mouse_down(MouseButton::Left, |_, window, _cx| {
             window.start_window_move();
-        })
-        // ── Left: menus + project ─────────────────────────────────────────────
-        .child(menu_area(open_menu_id, on_open_menu))
-        .child(section_separator())
+        });
+
+    if policy.show_in_window_menubar {
+        chrome = chrome
+            .child(menu_area(open_menu_id, on_open_menu))
+            .child(section_separator());
+    }
+
+    chrome = chrome
         .child(project_title(project))
-        // ── Drag region spacer ────────────────────────────────────────────────
-        // Carry both drag mechanisms on the spacer too — Windows reads
-        // the WindowControlArea, Linux/macOS reads the on_mouse_down.
-        // Redundant with the chrome root, but a child hitbox in the
-        // exact same band makes resolution deterministic even if a
-        // future sibling adds an `occlude()` that drifts into the
-        // central spacer.
         .child(draggable_spacer())
-        // ── Right: transport controls ─────────────────────────────────────────
         .child(transport_controls(transport))
         .child(section_separator())
-        // Panel toggles: Browser | Mixer | Inspector
         .child(panel_toggles())
         .child(section_separator())
-        // Utility: Import | Save | Share
         .child(utility_buttons())
         .child(section_separator())
-        // Report bug
         .child(
             div()
                 .flex()
@@ -487,7 +485,11 @@ pub fn app_chrome(
                 .px(px(CHROME_PAD_X))
                 .child(report_bug_button()),
         )
-        .child(section_separator())
-        // Window controls (min / max / close)
-        .child(window_controls(window))
+        .child(section_separator());
+
+    if policy.show_window_controls {
+        chrome = chrome.child(window_controls(window));
+    }
+
+    chrome
 }

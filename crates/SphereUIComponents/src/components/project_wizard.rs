@@ -5,8 +5,8 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, size, svg, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement,
     IntoElement, KeyDownEvent, MouseButton, ParentElement, Point, Render,
-    StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowDecorations, WindowHandle, WindowKind, WindowOptions,
+    StatefulInteractiveElement, Styled, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowHandle, WindowKind,
 };
 
 use crate::assets;
@@ -15,19 +15,20 @@ use crate::components::context_menu::context_menu_overlay;
 use crate::components::controls::{
     fb_button, fb_form_row, fb_section_label, fb_stepper_button, FbButtonKind,
 };
+use crate::components::title_bar::external_window_titlebar;
 use crate::components::text_input::{
     text_field_with_callbacks, text_input_context_entries, TextInputAction, TextInputCallbacks,
     TextInputState,
+};
+use crate::overlay::{
+    compute_overlay_position, form_combo_trigger_bounds, refresh_form_anchor,
+    wizard_form_column, OverlayAnchor, OverlayPlacement, OverlaySize, COMBO_TRIGGER_HEIGHT,
 };
 use crate::theme::{self, Colors};
 
 const WIZARD_WIDTH: f32 = 900.0;
 const WIZARD_HEIGHT: f32 = 620.0;
-const SETTINGS_COMBO_LEFT: f32 = 682.0;
-const SETTINGS_COMBO_WIDTH: f32 = 170.0;
-const TIME_SIG_MENU_TOP: f32 = 181.0;
-const BEAT_GRID_MENU_TOP: f32 = 227.0;
-const SAMPLE_RATE_MENU_TOP: f32 = 273.0;
+const COMBO_MENU_ESTIMATE_HEIGHT: f32 = 160.0;
 
 const TIME_SIGNATURE_OPTIONS: &[ComboBoxOption<(u32, u32)>] = &[
     ComboBoxOption {
@@ -280,6 +281,7 @@ pub struct ProjectWizardWindow {
     bpm_input: TextInputState,
     focus_handle: FocusHandle,
     open_combo: Option<WizardCombo>,
+    combo_anchor: Option<OverlayAnchor>,
     text_menu: Option<WizardTextMenu>,
     on_create: ProjectCreateCallback,
 }
@@ -322,6 +324,7 @@ impl ProjectWizardWindow {
             bpm_input,
             focus_handle: cx.focus_handle(),
             open_combo: None,
+            combo_anchor: None,
             text_menu: None,
             on_create,
         }
@@ -382,6 +385,7 @@ impl ProjectWizardWindow {
         match event.keystroke.key.as_str() {
             "escape" => {
                 if self.open_combo.take().is_some() {
+                    self.combo_anchor = None;
                     cx.notify();
                 } else {
                     window.remove_window();
@@ -423,28 +427,19 @@ pub fn open_project_wizard_window(
         y: px(parent_y + ((parent_h - WIZARD_HEIGHT) / 2.0).max(24.0)),
     };
 
+    let mut options = crate::platform_chrome::external_dialog_window_options_partial();
+    options.window_bounds = Some(WindowBounds::Windowed(Bounds {
+        origin,
+        size: size(px(WIZARD_WIDTH), px(WIZARD_HEIGHT)),
+    }));
+    options.kind = WindowKind::Floating;
+    options.is_resizable = false;
+    options.is_minimizable = false;
+    options.window_background = WindowBackgroundAppearance::Transparent;
+    options.window_min_size = Some(size(px(WIZARD_WIDTH), px(WIZARD_HEIGHT)));
+
     cx.open_window(
-        WindowOptions {
-            titlebar: Some(TitlebarOptions {
-                title: None,
-                appears_transparent: true,
-                traffic_light_position: None,
-            }),
-            window_bounds: Some(WindowBounds::Windowed(Bounds {
-                origin,
-                size: size(px(WIZARD_WIDTH), px(WIZARD_HEIGHT)),
-            })),
-            focus: true,
-            show: true,
-            kind: WindowKind::Floating,
-            is_movable: true,
-            is_resizable: false,
-            is_minimizable: false,
-            window_background: WindowBackgroundAppearance::Transparent,
-            window_decorations: Some(WindowDecorations::Client),
-            window_min_size: Some(size(px(WIZARD_WIDTH), px(WIZARD_HEIGHT))),
-            ..Default::default()
-        },
+        options,
         |_window, cx| cx.new(|cx| ProjectWizardWindow::new(on_create, cx)),
     )
     .map_err(|error| error.to_string())
@@ -647,6 +642,21 @@ fn stepper_button(
     fb_stepper_button(id, label, on_click)
 }
 
+fn wizard_combo_menu_position(anchor: OverlayAnchor, window: &Window) -> crate::overlay::OverlayPosition {
+    let layout = wizard_form_column(window);
+    let refreshed = refresh_form_anchor(anchor, layout);
+    compute_overlay_position(
+        refreshed.bounds,
+        OverlaySize {
+            width: layout.value_width,
+            height: COMBO_MENU_ESTIMATE_HEIGHT,
+        },
+        window.bounds(),
+        OverlayPlacement::BottomStart,
+        4.0,
+    )
+}
+
 fn settings_row(label: &'static str, child: impl IntoElement) -> impl IntoElement {
     fb_form_row(label, child)
 }
@@ -769,13 +779,22 @@ impl Render for ProjectWizardWindow {
             self.open_combo == Some(WizardCombo::TimeSignature),
             {
                 let target = target.clone();
-                move |_, _, cx| {
+                move |event, window, cx| {
                     let _ = target.update(cx, |this, cx| {
-                        this.open_combo = if this.open_combo == Some(WizardCombo::TimeSignature) {
-                            None
+                        if this.open_combo == Some(WizardCombo::TimeSignature) {
+                            this.open_combo = None;
+                            this.combo_anchor = None;
                         } else {
-                            Some(WizardCombo::TimeSignature)
-                        };
+                            let layout = wizard_form_column(window);
+                            this.combo_anchor = Some(OverlayAnchor {
+                                bounds: form_combo_trigger_bounds(
+                                    layout,
+                                    event,
+                                    COMBO_TRIGGER_HEIGHT,
+                                ),
+                            });
+                            this.open_combo = Some(WizardCombo::TimeSignature);
+                        }
                         cx.notify();
                     });
                 }
@@ -788,13 +807,22 @@ impl Render for ProjectWizardWindow {
             self.open_combo == Some(WizardCombo::BeatGrid),
             {
                 let target = target.clone();
-                move |_, _, cx| {
+                move |event, window, cx| {
                     let _ = target.update(cx, |this, cx| {
-                        this.open_combo = if this.open_combo == Some(WizardCombo::BeatGrid) {
-                            None
+                        if this.open_combo == Some(WizardCombo::BeatGrid) {
+                            this.open_combo = None;
+                            this.combo_anchor = None;
                         } else {
-                            Some(WizardCombo::BeatGrid)
-                        };
+                            let layout = wizard_form_column(window);
+                            this.combo_anchor = Some(OverlayAnchor {
+                                bounds: form_combo_trigger_bounds(
+                                    layout,
+                                    event,
+                                    COMBO_TRIGGER_HEIGHT,
+                                ),
+                            });
+                            this.open_combo = Some(WizardCombo::BeatGrid);
+                        }
                         cx.notify();
                     });
                 }
@@ -807,21 +835,34 @@ impl Render for ProjectWizardWindow {
             self.open_combo == Some(WizardCombo::SampleRate),
             {
                 let target = target.clone();
-                move |_, _, cx| {
+                move |event, window, cx| {
                     let _ = target.update(cx, |this, cx| {
-                        this.open_combo = if this.open_combo == Some(WizardCombo::SampleRate) {
-                            None
+                        if this.open_combo == Some(WizardCombo::SampleRate) {
+                            this.open_combo = None;
+                            this.combo_anchor = None;
                         } else {
-                            Some(WizardCombo::SampleRate)
-                        };
+                            let layout = wizard_form_column(window);
+                            this.combo_anchor = Some(OverlayAnchor {
+                                bounds: form_combo_trigger_bounds(
+                                    layout,
+                                    event,
+                                    COMBO_TRIGGER_HEIGHT,
+                                ),
+                            });
+                            this.open_combo = Some(WizardCombo::SampleRate);
+                        }
                         cx.notify();
                     });
                 }
             },
         );
 
-        let combo_overlay = self.open_combo.map(|open_combo| {
+        let combo_overlay = if let (Some(open_combo), Some(anchor)) =
+            (self.open_combo, self.combo_anchor)
+        {
+            let position = wizard_combo_menu_position(anchor, window);
             let close_target = target.clone();
+            Some(
             div()
                 .absolute()
                 .inset_0()
@@ -829,6 +870,7 @@ impl Render for ProjectWizardWindow {
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                     let _ = close_target.update(cx, |this, cx| {
                         this.open_combo = None;
+                        this.combo_anchor = None;
                         cx.notify();
                     });
                 })
@@ -837,9 +879,7 @@ impl Render for ProjectWizardWindow {
                         let select_target = target.clone();
                         combo_box_menu(
                             "project-time-signature-menu",
-                            SETTINGS_COMBO_LEFT,
-                            TIME_SIG_MENU_TOP,
-                            SETTINGS_COMBO_WIDTH,
+                            position,
                             (self.state.time_sig_num, self.state.time_sig_den),
                             TIME_SIGNATURE_OPTIONS,
                             Arc::new(move |(num, den), _, cx| {
@@ -848,6 +888,7 @@ impl Render for ProjectWizardWindow {
                                     this.state.time_sig_den = den;
                                     this.state.error = None;
                                     this.open_combo = None;
+                                    this.combo_anchor = None;
                                     cx.notify();
                                 });
                             }),
@@ -858,17 +899,16 @@ impl Render for ProjectWizardWindow {
                         let select_target = target.clone();
                         combo_box_menu(
                             "project-beat-grid-menu",
-                            SETTINGS_COMBO_LEFT,
-                            BEAT_GRID_MENU_TOP,
-                            SETTINGS_COMBO_WIDTH,
+                            position,
                             self.state.beat_value,
                             BEAT_GRID_OPTIONS,
                             Arc::new(move |value, _, cx| {
                                 let _ = select_target.update(cx, |this, cx| {
                                     this.state.beat_value = value;
                                     this.state.error = None;
-                                    cx.notify();
                                     this.open_combo = None;
+                                    this.combo_anchor = None;
+                                    cx.notify();
                                 });
                             }),
                         )
@@ -878,9 +918,7 @@ impl Render for ProjectWizardWindow {
                         let select_target = target.clone();
                         combo_box_menu(
                             "project-sample-rate-menu",
-                            SETTINGS_COMBO_LEFT,
-                            SAMPLE_RATE_MENU_TOP,
-                            SETTINGS_COMBO_WIDTH,
+                            position,
                             self.state.sample_rate,
                             SAMPLE_RATE_OPTIONS,
                             Arc::new(move |value, _, cx| {
@@ -888,6 +926,7 @@ impl Render for ProjectWizardWindow {
                                     this.state.sample_rate = value;
                                     this.state.error = None;
                                     this.open_combo = None;
+                                    this.combo_anchor = None;
                                     cx.notify();
                                 });
                             }),
@@ -895,7 +934,10 @@ impl Render for ProjectWizardWindow {
                         .into_any_element()
                     }
                 })
-        });
+            )
+        } else {
+            None
+        };
 
         let text_input_callbacks = |text_target: WizardTextTarget| TextInputCallbacks {
             on_context_menu: Some(Arc::new({
@@ -905,6 +947,7 @@ impl Render for ProjectWizardWindow {
                     let y = *y;
                     let _ = target.update(cx, |this, cx| {
                         this.open_combo = None;
+                        this.combo_anchor = None;
                         this.text_menu = Some(WizardTextMenu {
                             target: text_target,
                             x,
@@ -968,41 +1011,22 @@ impl Render for ProjectWizardWindow {
             })
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
             .child(
-                div()
-                    .window_control_area(WindowControlArea::Drag)
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(32.0))
-                    .pl(px(11.0))
-                    .border_b(px(1.0))
-                    .border_color(Colors::border_subtle())
-                    .bg(Colors::surface_titlebar())
-                    .child(
-                        div()
-                        .flex()
-                        .items_center()
-                            .h_full()
-                            .text_size(px(11.5))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(Colors::text_primary())
-                            .child("New Project"),
-                    )
-                    .child(
-                        div()
-                            .window_control_area(WindowControlArea::Close)
-                            .id("project-wizard-close")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .w(px(32.0))
-                            .h(px(32.0))
-                            .cursor(gpui::CursorStyle::PointingHand)
-                            .hover(|s| s.bg(Colors::surface_control_hover()))
-                            .on_click(|_, window, _| window.remove_window())
-                            .child(icon(assets::ICON_X_PATH, 12.0, Colors::text_faint())),
-                    ),
+                external_window_titlebar(
+                    "New Project",
+                    "project-wizard-close",
+                    {
+                        let target = target.clone();
+                        move |window, cx| {
+                            let _ = target.update(cx, |this, cx| {
+                                this.open_combo = None;
+                                this.combo_anchor = None;
+                                this.text_menu = None;
+                                cx.notify();
+                            });
+                            window.remove_window();
+                        }
+                    },
+                ),
             )
             .child(
                 div()

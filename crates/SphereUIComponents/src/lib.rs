@@ -1,10 +1,13 @@
 pub mod assets;
+pub mod overlay;
 pub mod components;
 pub mod embedded_assets;
 pub mod layout;
 pub mod menu;
+pub mod native_macos_menu;
 pub mod paths;
 pub mod perf;
+pub mod platform_chrome;
 pub mod project;
 pub mod theme;
 pub mod settings;

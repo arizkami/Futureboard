@@ -10,7 +10,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-gpu-renderer = ["dep:raw-window-handle", "dep:wgpu"]
+gpu-renderer = ["dep:pollster", "dep:raw-window-handle", "dep:wgpu"]
 
 [dependencies]
 gpui = "0.2.2"
@@ -24,6 +24,7 @@ dirs = "5"
 # Menu manifest is shared with Electron/Web via a generated JSON file.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+pollster = { version = "0.4", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 wgpu = { version = "29.0.3", default-features = false, features = ["std", "vulkan", "wgsl"], optional = true }
 # Native file dialogs (open/save/folder picker).

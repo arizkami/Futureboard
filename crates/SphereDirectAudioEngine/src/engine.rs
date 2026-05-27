@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, Sample, SampleFormat, SizedSample};
@@ -44,6 +44,11 @@ use crate::types::{
 // ── Version ───────────────────────────────────────────────────────────────────
 
 pub const ENGINE_VERSION: &str = "0.1.0";
+
+fn command_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_AUDIO_COMMAND_DEBUG").is_some())
+}
 
 // ── Realtime constants shared with render.rs ──────────────────────────────────
 
@@ -1891,28 +1896,34 @@ where
                         EngineCommand::StartTransport => {
                             let pos = shared.position_samples.load(Ordering::Relaxed);
                             let active_clips = runtime.active_clip_count_at_sample(pos);
-                            eprintln!(
-                                "[SphereAudio callback] StartTransport: position={}sa ({:.3}s), active_clip_count={}, scheduled_clip_count={}",
-                                pos,
-                                pos as f64 / output_sample_rate as f64,
-                                active_clips,
-                                runtime.clips.len(),
-                            );
+                            if command_debug_enabled() {
+                                eprintln!(
+                                    "[SphereAudio callback] StartTransport: position={}sa ({:.3}s), active_clip_count={}, scheduled_clip_count={}",
+                                    pos,
+                                    pos as f64 / output_sample_rate as f64,
+                                    active_clips,
+                                    runtime.clips.len(),
+                                );
+                            }
                             playing_local = true;
                             shared.playing.store(true, Ordering::Relaxed);
                         }
                         EngineCommand::StopTransport => {
-                            eprintln!("[SphereAudio callback] StopTransport");
+                            if command_debug_enabled() {
+                                eprintln!("[SphereAudio callback] StopTransport");
+                            }
                             playing_local = false;
                             shared.playing.store(false, Ordering::Relaxed);
                         }
                         EngineCommand::Seek { position_seconds } => {
                             let sr_local = shared.sample_rate.load(Ordering::Relaxed) as f64;
                             let pos = (position_seconds * sr_local) as u64;
-                            eprintln!(
-                                "[SphereAudio callback] Seek → {:.3}s ({}sa)",
-                                position_seconds, pos
-                            );
+                            if command_debug_enabled() {
+                                eprintln!(
+                                    "[SphereAudio callback] Seek -> {:.3}s ({}sa)",
+                                    position_seconds, pos
+                                );
+                            }
                             shared.position_samples.store(pos, Ordering::Relaxed);
                             metronome.reset_metronome_schedule(pos, output_sample_rate);
                         }

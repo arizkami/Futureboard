@@ -26,6 +26,23 @@ pub enum ClipType {
     },
 }
 
+/// Background import/decode state for a real audio file (waveform + engine).
+#[derive(Debug, Clone, PartialEq)]
+pub enum AudioImportState {
+    Pending,
+    Probing,
+    Decoding { progress: f32 },
+    GeneratingPeaks { progress: f32 },
+    Ready,
+    Failed { message: String },
+}
+
+impl Default for AudioImportState {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClipState {
     pub id: String,
@@ -37,6 +54,8 @@ pub struct ClipState {
     pub gain: f32,
     pub clip_type: ClipType,
     pub muted: bool,
+    /// Populated for imported audio clips; drives clip chrome + waveform UI.
+    pub audio_import: AudioImportState,
 }
 
 #[derive(Debug, Clone)]
@@ -341,6 +360,7 @@ impl TimelineState {
                         source_path: None,
                     },
                     muted: false,
+                    audio_import: AudioImportState::Ready,
                 },
                 ClipState {
                     id: "clip-2".to_string(),
@@ -355,6 +375,7 @@ impl TimelineState {
                         source_path: None,
                     },
                     muted: false,
+                    audio_import: AudioImportState::Ready,
                 },
             ],
             automation_lanes: vec![AutomationLaneState {
@@ -404,6 +425,7 @@ impl TimelineState {
                     source_path: None,
                 },
                 muted: false,
+                audio_import: AudioImportState::Ready,
             }],
             automation_lanes: vec![],
         };
@@ -469,6 +491,7 @@ impl TimelineState {
                     ],
                 },
                 muted: false,
+                audio_import: AudioImportState::default(),
             }],
             automation_lanes: vec![],
         };
@@ -672,6 +695,7 @@ impl TimelineState {
     pub fn get_arrangement_grid_lines(&self, viewport_width: f32) -> Vec<GridLine> {
         const MIN_LINE_SPACING_PX: f32 = 8.0;
         const MIN_LABEL_SPACING_PX: f32 = 46.0;
+        const MAX_GRID_LINES: usize = 1200;
 
         let ppb = self.pixels_per_beat().max(0.0001);
         let bpb = self.beats_per_bar();
@@ -748,7 +772,12 @@ impl TimelineState {
 
         lines.sort_by(|a, b| a.x.total_cmp(&b.x));
 
+        if lines.len() > MAX_GRID_LINES {
+            lines.truncate(MAX_GRID_LINES);
+        }
+
         let mut last_label_x = f32::NEG_INFINITY;
+        let mut ruler_labels = 0u64;
         for line in &mut lines {
             let can_label_level = match line.level {
                 GridLineLevel::Bar => true,
@@ -758,7 +787,19 @@ impl TimelineState {
             if can_label_level && line.x - last_label_x >= MIN_LABEL_SPACING_PX {
                 line.show_label = true;
                 last_label_x = line.x;
+                ruler_labels += 1;
             }
+        }
+
+        if crate::perf::enabled() {
+            let major = lines
+                .iter()
+                .filter(|l| matches!(l.level, GridLineLevel::Bar))
+                .count() as u64;
+            let minor = lines.len() as u64 - major;
+            crate::perf::count("visible_major_lines", major);
+            crate::perf::count("visible_minor_lines", minor);
+            crate::perf::count("ruler_labels_drawn", ruler_labels);
         }
 
         lines
@@ -1239,6 +1280,7 @@ impl TimelineState {
                 source_path: Some(source_path),
             },
             muted: false,
+            audio_import: AudioImportState::Pending,
         };
 
         if let Some(track) = self.tracks.iter_mut().find(|track| track.id == track_id) {
@@ -1319,6 +1361,22 @@ impl TimelineState {
             self.log_audio_import(duration_beats);
         }
         changed
+    }
+
+    pub fn set_audio_import_for_path(&mut self, source_path: &str, state: AudioImportState) {
+        for track in &mut self.tracks {
+            for clip in &mut track.clips {
+                if let ClipType::Audio {
+                    source_path: Some(path),
+                    ..
+                } = &clip.clip_type
+                {
+                    if path == source_path {
+                        clip.audio_import = state.clone();
+                    }
+                }
+            }
+        }
     }
 
     pub fn audio_source_duration_seconds(&self, source_path: &str) -> Option<f64> {

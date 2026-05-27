@@ -7,7 +7,7 @@
 //! with the shared `SharedState` and the mutable `RuntimeProject`.
 
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::command::EngineCommand;
 use crate::dsp::{meter::smooth_peak, oscillator::SineOscillator};
@@ -16,6 +16,11 @@ use crate::runtime::{RuntimePreviewMode, RuntimeProject};
 
 // Re-export helpers so wasapi_exclusive.rs can use them through render.
 pub use crate::engine::{render_project_block_interleaved, render_project_sample};
+
+fn command_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_AUDIO_COMMAND_DEBUG").is_some())
+}
 
 // ── Per-stream oscillator + local playback state ──────────────────────────────
 
@@ -187,25 +192,31 @@ pub fn drain_commands(
             EngineCommand::StartTransport => {
                 let pos = shared.position_samples.load(Ordering::Relaxed);
                 let active_clips = runtime.active_clip_count_at_sample(pos);
-                eprintln!(
-                    "[DAUx] StartTransport: pos={}sa ({:.3}s), active={}, scheduled={}",
-                    pos,
-                    pos as f64 / output_sample_rate as f64,
-                    active_clips,
-                    runtime.clips.len(),
-                );
+                if command_debug_enabled() {
+                    eprintln!(
+                        "[DAUx] StartTransport: pos={}sa ({:.3}s), active={}, scheduled={}",
+                        pos,
+                        pos as f64 / output_sample_rate as f64,
+                        active_clips,
+                        runtime.clips.len(),
+                    );
+                }
                 local.playing_local = true;
                 shared.playing.store(true, Ordering::Relaxed);
             }
             EngineCommand::StopTransport => {
-                eprintln!("[DAUx] StopTransport");
+                if command_debug_enabled() {
+                    eprintln!("[DAUx] StopTransport");
+                }
                 local.playing_local = false;
                 shared.playing.store(false, Ordering::Relaxed);
             }
             EngineCommand::Seek { position_seconds } => {
                 let sr = shared.sample_rate.load(Ordering::Relaxed) as f64;
                 let pos = (position_seconds * sr) as u64;
-                eprintln!("[DAUx] Seek → {:.3}s ({}sa)", position_seconds, pos);
+                if command_debug_enabled() {
+                    eprintln!("[DAUx] Seek -> {:.3}s ({}sa)", position_seconds, pos);
+                }
                 shared.position_samples.store(pos, Ordering::Relaxed);
                 local.reset_metronome_schedule(pos, output_sample_rate);
             }

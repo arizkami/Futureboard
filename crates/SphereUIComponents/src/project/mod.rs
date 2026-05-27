@@ -443,6 +443,7 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                         gain: pc.gain,
                         clip_type,
                         muted: pc.muted,
+                        audio_import: crate::components::timeline::timeline_state::AudioImportState::default(),
                     }
                 })
                 .collect();

@@ -293,17 +293,22 @@ fn render_knob(
             }
         });
 
-    div()
+    let mut stack = div()
         .flex()
         .flex_col()
         .items_center()
-        .gap(px(2.0))
         .w(px(size))
-        .child(disk)
-        .children(label.map(|label_text| {
+        .child(disk);
+
+    if let Some(label_text) = label {
+        stack = stack.child(
             div()
+                .mt(px(2.0))
                 .text_size(px(10.0))
                 .text_color(Colors::text_faint())
-                .child(label_text)
-        }))
+                .child(label_text),
+        );
+    }
+
+    stack
 }

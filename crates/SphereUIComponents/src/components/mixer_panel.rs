@@ -27,7 +27,7 @@ use gpui::{div, px, svg, InteractiveElement, IntoElement, ParentElement, Styled}
 
 use crate::assets;
 use crate::components::fader::{db_scale_column, db_value_pill, fader as render_fader};
-use crate::components::knob::{format_pan_label, knob_bipolar};
+use crate::components::knob::knob_bipolar;
 use crate::components::timeline::timeline_state::{volume, MasterBusState, TrackState, TrackType};
 use crate::components::timeline::vu_meter::vu_meter_vertical_full;
 use crate::theme::Colors;
@@ -322,6 +322,9 @@ fn strip_header(track: &TrackState, index: usize) -> impl IntoElement {
                 .min_w(px(0.0))
                 .child(
                     div()
+                        .min_w(px(0.0))
+                        .flex_1()
+                        .truncate()
                         .text_size(px(10.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_primary())
@@ -378,14 +381,14 @@ fn pan_section(
     callbacks: &MixerCallbacks,
     _is_selected: bool,
 ) -> impl IntoElement {
-    let pan_label: gpui::SharedString = format_pan_label(track.pan).into();
-
     let track_id = track.id.clone();
     let pan_cb = callbacks.on_pan_change.clone();
     let on_pan_change = move |new_pan: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
         pan_cb(&(track_id.clone(), *new_pan), w, cx);
     };
 
+    // Match web MixerPanel pan row: knob only, then a tight L/R legend (no caption
+    // under the disk — center is shown by the bipolar tick + arc).
     div()
         .flex()
         .flex_col()
@@ -393,7 +396,7 @@ fn pan_section(
         .justify_center()
         .gap(px(2.0))
         .h(px(SEC_PAN_H))
-        .py(px(4.0))
+        .py(px(5.0))
         .border_b(px(1.0))
         .border_color(Colors::divider())
         .child(knob_bipolar(
@@ -402,19 +405,18 @@ fn pan_section(
             -1.0,
             1.0,
             track.color,
-            Some(pan_label),
+            None,
             0.0,
             on_pan_change,
         ))
-        // L / R legend under the pill so the user can read the knob axis.
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .w(px(40.0))
-                .mt(px(1.0))
+                .w_full()
+                .px(px(8.0))
                 .child(
                     div()
                         .text_size(px(7.0))
@@ -499,6 +501,9 @@ fn strip_footer(name: &str) -> impl IntoElement {
         .bg(Colors::surface_panel_alt())
         .child(
             div()
+                .w_full()
+                .min_w(px(0.0))
+                .truncate()
                 .text_size(px(10.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_secondary())

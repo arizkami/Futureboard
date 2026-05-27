@@ -1,36 +1,48 @@
 use std::sync::Arc;
 
-use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, svg, App, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, Window,
+    div, px, size, svg, App, AppContext, Bounds, Context, Entity, FocusHandle,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Point,
+    Render, StatefulInteractiveElement, Styled, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowHandle, WindowKind,
 };
 
 use crate::assets;
+use crate::components::combo_box::{combo_box_string_menu, combo_box_trigger};
 use crate::components::text_input::{
-    text_field_with_callbacks, TextInputCallbacks, TextInputState,
+    text_field_with_callbacks, TextInputAction, TextInputCallbacks, TextInputState,
 };
+use crate::components::title_bar::external_window_titlebar;
 use crate::components::slider::slider;
 use crate::components::controls::{
-    fb_button, fb_field_label, fb_form_row, fb_section_label, fb_segmented_button,
-    fb_stepper_button, FbButtonKind,
+    fb_button, fb_segmented_button, fb_stepper_button, FbButtonKind,
 };
-use crate::theme::Colors;
-use crate::settings::SettingsSchema;
+use crate::components::settings_layout::{
+    settings_daw_row, settings_nav_group_header, settings_nav_item,
+    settings_page_header, settings_section_card, settings_section_hint, settings_section_title,
+    settings_status_badge, settings_value_readout, SETTINGS_CONTENT_PAD, SETTINGS_SIDEBAR_WIDTH,
+    SETTINGS_WINDOW_HEIGHT, SETTINGS_WINDOW_WIDTH,
+};
+use crate::overlay::{
+    compute_overlay_position, form_combo_trigger_bounds, refresh_form_anchor,
+    settings_form_column, OverlayAnchor, OverlayPlacement, OverlaySize, COMBO_TRIGGER_HEIGHT,
+};
+use crate::settings::{SettingsModel, SettingsSchema};
+use crate::theme::{self, Colors};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
     General,
-    Hardware,
-    Appearance,
-    Editing,
+    Audio,
+    Midi,
     Recording,
     Playback,
+    Editing,
+    Appearance,
     Plugins,
-    FilesFolders,
+    FilesMedia,
     Shortcuts,
-    Accessibility,
-    CloudAccount,
+    Performance,
     Advanced,
     About,
 }
@@ -39,16 +51,16 @@ impl SettingsTab {
     pub fn label(self) -> &'static str {
         match self {
             Self::General => "General",
-            Self::Hardware => "Hardware",
-            Self::Appearance => "Appearance",
-            Self::Editing => "Editing",
+            Self::Audio => "Audio",
+            Self::Midi => "MIDI",
             Self::Recording => "Recording",
             Self::Playback => "Playback",
+            Self::Editing => "Editing",
+            Self::Appearance => "Appearance",
             Self::Plugins => "Plugins",
-            Self::FilesFolders => "Files & Folders",
-            Self::Shortcuts => "Shortcuts",
-            Self::Accessibility => "Accessibility",
-            Self::CloudAccount => "Cloud & Account",
+            Self::FilesMedia => "Files & Media",
+            Self::Shortcuts => "Key Commands",
+            Self::Performance => "Performance",
             Self::Advanced => "Advanced",
             Self::About => "About",
         }
@@ -57,34 +69,73 @@ impl SettingsTab {
     pub fn icon(self) -> &'static str {
         match self {
             Self::General => assets::ICON_FILE_PATH,
-            Self::Hardware => assets::ICON_MIC_PATH,
-            Self::Appearance => assets::ICON_SLIDERS_HORIZONTAL_PATH,
-            Self::Editing => assets::ICON_PENCIL_PATH,
+            Self::Audio => assets::ICON_MIC_PATH,
+            Self::Midi => assets::ICON_LINK_PATH,
             Self::Recording => assets::ICON_CIRCLE_PATH,
             Self::Playback => assets::ICON_PLAY_PATH,
+            Self::Editing => assets::ICON_PENCIL_PATH,
+            Self::Appearance => assets::ICON_SLIDERS_HORIZONTAL_PATH,
             Self::Plugins => assets::ICON_CPU_PATH,
-            Self::FilesFolders => assets::ICON_FOLDER_PATH,
+            Self::FilesMedia => assets::ICON_FOLDER_PATH,
             Self::Shortcuts => assets::ICON_LINK_PATH,
-            Self::Accessibility => assets::ICON_BUG_PATH,
-            Self::CloudAccount => assets::ICON_SHARE_PATH,
+            Self::Performance => assets::ICON_CPU_PATH,
             Self::Advanced => assets::ICON_CLOCK_PATH,
             Self::About => assets::ICON_CIRCLE_DOT_PATH,
         }
     }
 
-    pub fn all() -> [Self; 13] {
-        [
+    pub fn page_description(self) -> &'static str {
+        match self {
+            Self::General => "Application behavior, project defaults, and autosave.",
+            Self::Audio => "Driver, devices, sample rate, buffer size, and latency.",
+            Self::Midi => "MIDI ports, clock, and external sync.",
+            Self::Recording => "Record format, monitoring, and metronome.",
+            Self::Playback => "Transport, looping, and playback behavior.",
+            Self::Editing => "Mouse, grid snap, and undo history.",
+            Self::Appearance => "Theme, timeline, mixer, and metering display.",
+            Self::Plugins => "Scan paths, formats, and plugin hosting.",
+            Self::FilesMedia => "Projects, samples, recordings, and cache locations.",
+            Self::Shortcuts => "Keyboard commands and shortcut conflicts.",
+            Self::Performance => "Engine load, buffering, and UI responsiveness.",
+            Self::Advanced => "Experimental options and developer tools.",
+            Self::About => "Version, licenses, and credits.",
+        }
+    }
+
+    pub fn nav_groups() -> &'static [(&'static str, &'static [Self])] {
+        &[
+            ("General", &[Self::General]),
+            (
+                "Studio",
+                &[
+                    Self::Audio,
+                    Self::Midi,
+                    Self::Recording,
+                    Self::Playback,
+                ],
+            ),
+            (
+                "Workflow",
+                &[Self::Editing, Self::Plugins, Self::FilesMedia],
+            ),
+            ("Interface", &[Self::Appearance, Self::Shortcuts]),
+            ("System", &[Self::Performance, Self::Advanced, Self::About]),
+        ]
+    }
+
+    pub fn all() -> &'static [Self] {
+        &[
             Self::General,
-            Self::Hardware,
-            Self::Appearance,
-            Self::Editing,
+            Self::Audio,
+            Self::Midi,
             Self::Recording,
             Self::Playback,
+            Self::Editing,
+            Self::Appearance,
             Self::Plugins,
-            Self::FilesFolders,
+            Self::FilesMedia,
             Self::Shortcuts,
-            Self::Accessibility,
-            Self::CloudAccount,
+            Self::Performance,
             Self::Advanced,
             Self::About,
         ]
@@ -118,15 +169,54 @@ impl SettingsDialogState {
 
 pub type UpdateSettingFn = Arc<dyn Fn(&mut SettingsSchema) + Send + Sync + 'static>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardwareCombo {
+    AudioDriver,
+    InputDevice,
+    OutputDevice,
+    ClockSource,
+}
+
 #[derive(Clone)]
 pub struct SettingsDialogCallbacks {
     pub on_close: Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>,
     pub on_select_tab: Arc<dyn Fn(&SettingsTab, &mut Window, &mut App) + 'static>,
     pub on_update_setting: Arc<dyn Fn(UpdateSettingFn, &mut Window, &mut App) + 'static>,
+    pub open_hardware_combo: Option<HardwareCombo>,
+    pub on_toggle_hardware_combo:
+        Arc<dyn Fn(HardwareCombo, Option<OverlayAnchor>, &mut Window, &mut App) + 'static>,
 }
 
 fn icon(path: &'static str, size: f32, color: gpui::Rgba) -> impl IntoElement {
     svg().path(path).w(px(size)).h(px(size)).text_color(color)
+}
+
+fn hardware_select(
+    combo: HardwareCombo,
+    trigger_id: &'static str,
+    selected: &str,
+    open_combo: Option<HardwareCombo>,
+    on_toggle: Arc<dyn Fn(HardwareCombo, Option<OverlayAnchor>, &mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
+    let open = open_combo == Some(combo);
+    let toggle = on_toggle.clone();
+    div()
+        .w_full()
+        .child(combo_box_trigger(
+            trigger_id,
+            selected.to_string(),
+            open,
+            move |event, window, cx| {
+                let layout = settings_form_column(window);
+                let bounds = form_combo_trigger_bounds(layout, event, COMBO_TRIGGER_HEIGHT);
+                let anchor = if open {
+                    None
+                } else {
+                    Some(OverlayAnchor { bounds })
+                };
+                toggle(combo, anchor, window, cx);
+            },
+        ))
 }
 
 pub fn fb_checkbox(
@@ -164,39 +254,75 @@ pub fn fb_checkbox(
         })
 }
 
-fn settings_header(title: &'static str, icon_path: &'static str) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(6.0))
-        .pb(px(8.0))
-        .border_b(px(1.0))
-        .border_color(Colors::divider())
-        .child(icon(icon_path, 12.0, Colors::accent_primary()))
-        .child(
-            div()
-                .text_size(px(11.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(Colors::text_primary())
-                .child(title),
-        )
+fn settings_header(title: &'static str, _icon_path: &'static str) -> impl IntoElement {
+    settings_section_title(title)
 }
 
-pub fn settings_dialog(
+fn tab_matches_search(tab: SettingsTab, query: &str, is_match: &dyn Fn(&str, &[&str]) -> bool) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    match tab {
+        SettingsTab::General => {
+            is_match("Language", &["language"])
+                || is_match("Start screen", &["wizard", "start"])
+                || is_match("Autosave", &["autosave", "backup"])
+                || is_match("Tempo", &["tempo", "bpm"])
+                || is_match("Sample Rate", &["sample", "rate", "hz"])
+                || is_match("Buffer", &["buffer", "latency"])
+        }
+        SettingsTab::Audio => {
+            is_match("Audio Driver", &["driver", "wasapi", "backend"])
+                || is_match("Input Device", &["input", "microphone"])
+                || is_match("Output Device", &["output", "speakers"])
+        }
+        SettingsTab::Midi => {
+            is_match("MIDI", &["midi", "port", "keyboard"])
+                || is_match("Clock", &["clock", "sync", "ltc"])
+        }
+        SettingsTab::Appearance => {
+            is_match("Theme", &["theme"])
+                || is_match("UI Scale", &["scale"])
+                || is_match("Grid", &["grid", "timeline"])
+                || is_match("Mixer", &["mixer", "meter"])
+        }
+        SettingsTab::Editing => {
+            is_match("Zoom", &["mouse", "zoom"])
+                || is_match("Snap", &["snap", "grid"])
+                || is_match("Undo", &["undo", "history"])
+        }
+        SettingsTab::Recording => {
+            is_match("Recording", &["record", "wav", "bit"])
+                || is_match("Metronome", &["metronome", "click"])
+        }
+        SettingsTab::Playback => {
+            is_match("Transport", &["transport", "play", "stop"])
+        }
+        SettingsTab::Plugins => {
+            is_match("VST3", &["vst3", "plugin"])
+                || is_match("CLAP", &["clap"])
+                || is_match("Scan", &["scan"])
+        }
+        SettingsTab::FilesMedia => {
+            is_match("Projects", &["project", "folder", "path"])
+                || is_match("Samples", &["sample", "media"])
+        }
+        SettingsTab::Shortcuts => is_match("Shortcut", &["key", "command"]),
+        SettingsTab::Performance => is_match("Performance", &["cpu", "engine"]),
+        SettingsTab::Advanced => is_match("Advanced", &["experimental"]),
+        SettingsTab::About => is_match("About", &["version"]),
+    }
+}
+
+
+fn build_settings_content(
     state: &SettingsDialogState,
     schema: &SettingsSchema,
-    search_input: &TextInputState,
-    search_focused: bool,
-    search_callbacks: TextInputCallbacks,
-    callbacks: SettingsDialogCallbacks,
+    callbacks: &SettingsDialogCallbacks,
     available_inputs: &[String],
     available_outputs: &[String],
     available_backends: &[String],
-) -> impl IntoElement {
-    let close_backdrop = callbacks.on_close.clone();
-    let close_button = callbacks.on_close.clone();
-
+) -> (Vec<gpui::AnyElement>, Vec<gpui::AnyElement>) {
     let query = state.search_query.trim().to_lowercase();
     let is_match = |label: &str, keywords: &[&str]| {
         if query.is_empty() {
@@ -206,100 +332,37 @@ pub fn settings_dialog(
         label.to_lowercase().contains(q) || keywords.iter().any(|k| k.to_lowercase().contains(q))
     };
 
-    // Sidebar Category Tabs
-    let sidebar_items = SettingsTab::all().into_iter().enumerate().map(|(index, tab)| {
-        let active = state.active_tab == tab && query.is_empty();
-        let cb = callbacks.on_select_tab.clone();
-        
-        let has_matching_settings = if query.is_empty() {
-            true
-        } else {
-            match tab {
-                SettingsTab::General => {
-                    is_match("Language", &["language", "english"]) ||
-                    is_match("Show start screen", &["start", "screen", "wizard"]) ||
-                    is_match("Check updates", &["updates", "check"]) ||
-                    is_match("Tempo", &["tempo", "bpm"]) ||
-                    is_match("Sample Rate", &["sample", "rate"]) ||
-                    is_match("Buffer Size", &["buffer", "size"]) ||
-                    is_match("Autosave", &["autosave", "backup", "minutes"]) ||
-                    is_match("Notifications", &["warnings", "alerts"])
-                }
-                SettingsTab::Hardware => {
-                    is_match("Audio Driver", &["driver", "backend", "wasapi", "shared"]) ||
-                    is_match("Input Device", &["input", "mic", "microphone"]) ||
-                    is_match("Output Device", &["output", "speakers"]) ||
-                    is_match("MIDI Enabled Inputs", &["midi", "inputs", "keyboard"]) ||
-                    is_match("Sync", &["clock", "sync", "ltc"])
-                }
-                SettingsTab::Appearance => {
-                    is_match("Theme", &["theme", "variant", "fleet"]) ||
-                    is_match("UI Scale", &["scale", "size"]) ||
-                    is_match("Arrangement Grid", &["grid", "intensity", "opacity"]) ||
-                    is_match("Piano Roll Guides", &["piano", "roll", "guides", "keys"]) ||
-                    is_match("Mixer Meter", &["mixer", "decay", "peak", "hold"])
-                }
-                SettingsTab::Editing => {
-                    is_match("Mouse Zoom", &["mouse", "zoom", "sensitivity", "natural"]) ||
-                    is_match("Snap to Grid", &["snap", "grid", "default"]) ||
-                    is_match("Undo History", &["undo", "redo", "history", "max"])
-                }
-                SettingsTab::Recording => {
-                    is_match("Audio Recording Format", &["format", "bit", "depth", "wav"]) ||
-                    is_match("Metronome Click", &["metronome", "click", "sound", "volume"])
-                }
-                SettingsTab::Playback => {
-                    is_match("Transport Playback", &["spacebar", "transport", "stop", "start"])
-                }
-                SettingsTab::Plugins => {
-                    is_match("VST3 CLAP Formats", &["vst3", "clap", "plugins"]) ||
-                    is_match("Paths Directories", &["paths", "directories", "folders"]) ||
-                    is_match("Plugin Scanning", &["scan", "background"])
-                }
-                _ => false,
-            }
-        };
-
-        let is_visible = query.is_empty() || has_matching_settings;
-
-        if is_visible {
-            div()
-                .id(("settings-tab", index))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .h(px(26.0))
-                .px(px(8.0))
-                .rounded_md()
-                .bg(if active {
-                    Colors::surface_hover()
-                } else {
-                    gpui::transparent_black().into()
-                })
-                .text_size(px(10.5))
-                .font_weight(if active {
-                    gpui::FontWeight::SEMIBOLD
-                } else {
-                    gpui::FontWeight::MEDIUM
-                })
-                .text_color(if active {
-                    Colors::text_primary()
-                } else if !query.is_empty() {
-                    Colors::accent_primary()
-                } else {
-                    Colors::text_secondary()
-                })
-                .cursor(gpui::CursorStyle::PointingHand)
-                .hover(|s| s.bg(Colors::surface_control_hover()))
-                .on_click(move |_, window, cx| cb(&tab, window, cx))
-                .child(icon(tab.icon(), 12.0, if active { Colors::accent_primary() } else { Colors::text_faint() }))
-                .child(tab.label())
-                .into_any_element()
-        } else {
-            div().into_any_element()
+    let mut sidebar_items: Vec<gpui::AnyElement> = Vec::new();
+    let mut nav_index = 0usize;
+    for (group_title, tabs) in SettingsTab::nav_groups() {
+        let visible_tabs: Vec<SettingsTab> = tabs
+            .iter()
+            .copied()
+            .filter(|tab| tab_matches_search(*tab, query.as_str(), &is_match))
+            .collect();
+        if visible_tabs.is_empty() {
+            continue;
         }
-    }).collect::<Vec<_>>();
+        sidebar_items.push(settings_nav_group_header(group_title).into_any_element());
+        for tab in visible_tabs {
+            let active = state.active_tab == tab && query.is_empty();
+            let search_hit = !query.is_empty();
+            let cb = callbacks.on_select_tab.clone();
+            let idx = nav_index;
+            nav_index += 1;
+            sidebar_items.push(
+                settings_nav_item(
+                    ("settings-tab", idx),
+                    tab.label(),
+                    tab.icon(),
+                    active,
+                    search_hit,
+                    move |window, cx| cb(&tab, window, cx),
+                )
+                .into_any_element(),
+            );
+        }
+    }
 
     // Right Side Content Views Builder
     let mut sections = Vec::new();
@@ -312,12 +375,9 @@ pub fn settings_dialog(
     )) {
         let on_update = callbacks.on_update_setting.clone();
         sections.push(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .child(settings_header("General > Application", assets::ICON_FILE_PATH))
-                .child(fb_form_row(
+            settings_section_card()
+                .child(settings_header("Application", assets::ICON_FILE_PATH))
+                .child(settings_daw_row(
                     "Language",
                     div()
                         .flex()
@@ -338,7 +398,7 @@ pub fn settings_dialog(
                             })
                         })
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Start Wizard",
                     div()
                         .flex()
@@ -359,7 +419,7 @@ pub fn settings_dialog(
                                 .child("Show welcome wizard project templates on launch"),
                         )
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Update Check",
                     div()
                         .flex()
@@ -391,13 +451,9 @@ pub fn settings_dialog(
     )) {
         let on_update = callbacks.on_update_setting.clone();
         sections.push(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .mt(px(12.0))
-                .child(settings_header("General > Autosave & Backup", assets::ICON_FILE_PATH))
-                .child(fb_form_row(
+            settings_section_card()
+                .child(settings_header("Autosave & Backup", assets::ICON_FILE_PATH))
+                .child(settings_daw_row(
                     "Autosave",
                     div()
                         .flex()
@@ -418,7 +474,7 @@ pub fn settings_dialog(
                                 .child("Automatically save projects periodically"),
                         )
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Interval",
                     div()
                         .flex()
@@ -461,7 +517,7 @@ pub fn settings_dialog(
                                 .child("minutes")
                         )
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Max Backups",
                     div()
                         .flex()
@@ -502,13 +558,9 @@ pub fn settings_dialog(
         );
 
         sections.push(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .mt(px(12.0))
-                .child(settings_header("General > Notifications", assets::ICON_FILE_PATH))
-                .child(fb_form_row(
+            settings_section_card()
+                .child(settings_header("Notifications", assets::ICON_FILE_PATH))
+                .child(settings_daw_row(
                     "Warnings",
                     div()
                         .flex()
@@ -529,7 +581,7 @@ pub fn settings_dialog(
                                 .child("Show warnings on critical errors or file conflicts"),
                         )
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "System Notifications",
                     div()
                         .flex()
@@ -554,21 +606,15 @@ pub fn settings_dialog(
         );
     }
 
-    // Project Defaults Defaults (within General Tab as per specs)
     if (state.active_tab == SettingsTab::General && query.is_empty()) || (!query.is_empty() && (
-        is_match("Tempo", &["tempo", "bpm"]) ||
-        is_match("Sample Rate", &["sample", "rate"]) ||
-        is_match("Buffer Size", &["buffer", "size"])
+        is_match("Tempo", &["tempo", "bpm"])
     )) {
         let on_update = callbacks.on_update_setting.clone();
         sections.push(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .mt(px(12.0))
-                .child(settings_header("General > Project Defaults", assets::ICON_FILE_PATH))
-                .child(fb_form_row(
+            settings_section_card()
+                .child(settings_header("Project Defaults", assets::ICON_FILE_PATH))
+                .child(settings_section_hint("Default values applied when creating a new session."))
+                .child(settings_daw_row(
                     "Default Tempo",
                     div()
                         .flex()
@@ -608,10 +654,70 @@ pub fn settings_dialog(
                             div()
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
-                                .child("bpm")
-                        )
+                                .child("BPM"),
+                        ),
                 ))
-                .child(fb_form_row(
+                .into_any_element(),
+        );
+    }
+
+    // Audio panel
+    if (state.active_tab == SettingsTab::Audio && query.is_empty()) || (!query.is_empty() && (
+        is_match("Audio Driver", &["driver", "backend", "wasapi"]) ||
+        is_match("Input Device", &["input", "microphone"]) ||
+        is_match("Output Device", &["output", "speakers"]) ||
+        is_match("Sample Rate", &["sample", "rate", "hz"]) ||
+        is_match("Buffer Size", &["buffer", "latency"])
+    )) {
+        let on_update = callbacks.on_update_setting.clone();
+        let open_combo = callbacks.open_hardware_combo;
+        let on_toggle = callbacks.on_toggle_hardware_combo.clone();
+
+        let driver_select = hardware_select(
+            HardwareCombo::AudioDriver,
+            "settings-audio-driver",
+            &schema.hardware.audio.driver_type,
+            open_combo,
+            on_toggle.clone(),
+        );
+
+        let input_select = hardware_select(
+            HardwareCombo::InputDevice,
+            "settings-audio-input",
+            &schema.hardware.audio.device_in,
+            open_combo,
+            on_toggle.clone(),
+        );
+
+        let output_select = hardware_select(
+            HardwareCombo::OutputDevice,
+            "settings-audio-output",
+            &schema.hardware.audio.device_out,
+            open_combo,
+            on_toggle.clone(),
+        );
+
+        let buffer_ms = schema.general.project_defaults.buffer_size as f32
+            / schema.general.project_defaults.sample_rate as f32
+            * 1000.0;
+
+        sections.push(
+            settings_section_card()
+                .child(settings_header("Audio Engine", assets::ICON_MIC_PATH))
+                .child(settings_daw_row("Backend", driver_select))
+                .child(settings_daw_row("Input Device", input_select))
+                .child(settings_daw_row("Output Device", output_select))
+                .child(settings_daw_row(
+                    "Driver Status",
+                    settings_status_badge("Ready", true),
+                ))
+                .into_any_element(),
+        );
+
+        sections.push(
+            settings_section_card()
+                .child(settings_header("Sample Rate & Buffer", assets::ICON_MIC_PATH))
+                .child(settings_daw_row(
                     "Sample Rate",
                     div()
                         .flex()
@@ -620,26 +726,26 @@ pub fn settings_dialog(
                         .child({
                             let val = schema.general.project_defaults.sample_rate;
                             let up = on_update.clone();
-                            fb_segmented_button("sr-44100", "44.1k", val == 44100, move |_, w, cx| {
+                            fb_segmented_button("audio-sr-44100", "44.1 kHz", val == 44100, move |_, w, cx| {
                                 up(Arc::new(|s| s.general.project_defaults.sample_rate = 44100), w, cx);
                             })
                         })
                         .child({
                             let val = schema.general.project_defaults.sample_rate;
                             let up = on_update.clone();
-                            fb_segmented_button("sr-48000", "48k", val == 48000, move |_, w, cx| {
+                            fb_segmented_button("audio-sr-48000", "48 kHz", val == 48000, move |_, w, cx| {
                                 up(Arc::new(|s| s.general.project_defaults.sample_rate = 48000), w, cx);
                             })
                         })
                         .child({
                             let val = schema.general.project_defaults.sample_rate;
                             let up = on_update.clone();
-                            fb_segmented_button("sr-96000", "96k", val == 96000, move |_, w, cx| {
+                            fb_segmented_button("audio-sr-96000", "96 kHz", val == 96000, move |_, w, cx| {
                                 up(Arc::new(|s| s.general.project_defaults.sample_rate = 96000), w, cx);
                             })
-                        })
+                        }),
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Buffer Size",
                     div()
                         .flex()
@@ -648,122 +754,47 @@ pub fn settings_dialog(
                         .child({
                             let val = schema.general.project_defaults.buffer_size;
                             let up = on_update.clone();
-                            fb_segmented_button("buf-64", "64", val == 64, move |_, w, cx| {
-                                up(Arc::new(|s| s.general.project_defaults.buffer_size = 64), w, cx);
-                            })
-                        })
-                        .child({
-                            let val = schema.general.project_defaults.buffer_size;
-                            let up = on_update.clone();
-                            fb_segmented_button("buf-128", "128", val == 128, move |_, w, cx| {
+                            fb_segmented_button("audio-buf-128", "128", val == 128, move |_, w, cx| {
                                 up(Arc::new(|s| s.general.project_defaults.buffer_size = 128), w, cx);
                             })
                         })
                         .child({
                             let val = schema.general.project_defaults.buffer_size;
                             let up = on_update.clone();
-                            fb_segmented_button("buf-256", "256", val == 256, move |_, w, cx| {
+                            fb_segmented_button("audio-buf-256", "256", val == 256, move |_, w, cx| {
                                 up(Arc::new(|s| s.general.project_defaults.buffer_size = 256), w, cx);
                             })
                         })
                         .child({
                             let val = schema.general.project_defaults.buffer_size;
                             let up = on_update.clone();
-                            fb_segmented_button("buf-512", "512", val == 512, move |_, w, cx| {
+                            fb_segmented_button("audio-buf-512", "512", val == 512, move |_, w, cx| {
                                 up(Arc::new(|s| s.general.project_defaults.buffer_size = 512), w, cx);
                             })
-                        })
+                        }),
                 ))
-                .into_any_element()
+                .child(settings_daw_row(
+                    "Round-trip Latency",
+                    settings_value_readout(format!("~{buffer_ms:.1} ms")),
+                ))
+                .child(settings_section_hint(
+                    "Lower buffer sizes reduce latency but increase CPU load.",
+                ))
+                .into_any_element(),
         );
     }
 
-    // Hardware Panel (Audio Driver device etc.)
-    if (state.active_tab == SettingsTab::Hardware && query.is_empty()) || (!query.is_empty() && (
-        is_match("Audio Driver", &["driver", "backend", "wasapi"]) ||
-        is_match("Input Device", &["input", "microphone"]) ||
-        is_match("Output Device", &["output", "speakers"]) ||
+    // MIDI panel
+    if (state.active_tab == SettingsTab::Midi && query.is_empty()) || (!query.is_empty() && (
         is_match("MIDI Enabled Inputs", &["midi", "inputs", "outputs", "port", "keyboard"]) ||
         is_match("Sync Clock", &["sync", "clock", "source", "ltc"])
     )) {
         let on_update = callbacks.on_update_setting.clone();
-        
-        let mut driver_buttons = div().flex().flex_row().gap(px(4.0));
-        for (i, backend) in available_backends.iter().enumerate() {
-            let active = schema.hardware.audio.driver_type == *backend;
-            let backend_name = backend.clone();
-            let up = on_update.clone();
-            driver_buttons = driver_buttons.child(
-                fb_segmented_button(
-                    ("driver-backend", i),
-                    backend.as_str(),
-                    active,
-                    move |_, w, cx| {
-                        let backend_clone = backend_name.clone();
-                        up(Arc::new(move |s| s.hardware.audio.driver_type = backend_clone.clone()), w, cx);
-                    }
-                )
-            );
-        }
-
-        let mut input_buttons = div().flex().flex_row().gap(px(4.0));
-        for (i, input_dev) in available_inputs.iter().enumerate() {
-            let active = schema.hardware.audio.device_in == *input_dev;
-            let input_name = input_dev.clone();
-            let up = on_update.clone();
-            input_buttons = input_buttons.child(
-                fb_segmented_button(
-                    ("audio-input-device", i),
-                    input_dev.as_str(),
-                    active,
-                    move |_, w, cx| {
-                        let input_clone = input_name.clone();
-                        up(Arc::new(move |s| s.hardware.audio.device_in = input_clone.clone()), w, cx);
-                    }
-                )
-            );
-        }
-
-        let mut output_buttons = div().flex().flex_row().gap(px(4.0));
-        for (i, output_dev) in available_outputs.iter().enumerate() {
-            let active = schema.hardware.audio.device_out == *output_dev;
-            let output_name = output_dev.clone();
-            let up = on_update.clone();
-            output_buttons = output_buttons.child(
-                fb_segmented_button(
-                    ("audio-output-device", i),
-                    output_dev.as_str(),
-                    active,
-                    move |_, w, cx| {
-                        let output_clone = output_name.clone();
-                        up(Arc::new(move |s| s.hardware.audio.device_out = output_clone.clone()), w, cx);
-                    }
-                )
-            );
-        }
-
-        sections.push(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .child(settings_header("Hardware > Audio", assets::ICON_MIC_PATH))
-                .child(fb_form_row("Audio Driver", driver_buttons))
-                .child(fb_form_row("Input Device", input_buttons))
-                .child(fb_form_row("Output Device", output_buttons))
-                .into_any_element()
-        );
-
-        // MIDI Section
         let up = on_update.clone();
         sections.push(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .mt(px(12.0))
-                .child(settings_header("Hardware > MIDI", assets::ICON_MIC_PATH))
-                .child(fb_form_row(
+            settings_section_card()
+                .child(settings_header("MIDI Devices", assets::ICON_LINK_PATH))
+                .child(settings_daw_row(
                     "MIDI Inputs",
                     div()
                         .flex()
@@ -810,7 +841,7 @@ pub fn settings_dialog(
                                 .child(div().text_size(px(10.5)).text_color(Colors::text_primary()).child("Midi Device 2"))
                         })
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "MIDI Outputs",
                     div()
                         .flex()
@@ -837,7 +868,7 @@ pub fn settings_dialog(
                                 .child(div().text_size(px(10.5)).text_color(Colors::text_primary()).child("Synth Out"))
                         })
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "MIDI Clock Sync",
                     div()
                         .flex()
@@ -858,40 +889,21 @@ pub fn settings_dialog(
                                 .child("Send MIDI clock to output devices"),
                         )
                 ))
-                .into_any_element()
+                .into_any_element(),
         );
 
-        // Sync Section
-        let up = on_update.clone();
+        let clock_select = hardware_select(
+            HardwareCombo::ClockSource,
+            "settings-clock-source",
+            &schema.hardware.sync.clock_source,
+            callbacks.open_hardware_combo,
+            callbacks.on_toggle_hardware_combo.clone(),
+        );
         sections.push(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .mt(px(12.0))
-                .child(settings_header("Hardware > Sync", assets::ICON_CLOCK_PATH))
-                .child(fb_form_row(
-                    "Clock Source",
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap(px(4.0))
-                        .child({
-                            let val = schema.hardware.sync.clock_source.clone();
-                            let up_clk = up.clone();
-                            fb_segmented_button("sync-internal", "Internal", val == "Internal", move |_, w, cx| {
-                                up_clk(Arc::new(|s| s.hardware.sync.clock_source = "Internal".to_string()), w, cx);
-                            })
-                        })
-                        .child({
-                            let val = schema.hardware.sync.clock_source.clone();
-                            let up_clk = up.clone();
-                            fb_segmented_button("sync-midi", "MIDI", val == "MIDI", move |_, w, cx| {
-                                up_clk(Arc::new(|s| s.hardware.sync.clock_source = "MIDI".to_string()), w, cx);
-                            })
-                        })
-                ))
-                .child(fb_form_row(
+            settings_section_card()
+                .child(settings_header("Sync & External Clock", assets::ICON_CLOCK_PATH))
+                .child(settings_daw_row("Clock Source", clock_select))
+                .child(settings_daw_row(
                     "LTC Reader",
                     div()
                         .flex()
@@ -910,9 +922,9 @@ pub fn settings_dialog(
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
                                 .child("Enable linear timecode (LTC) reader on input"),
-                        )
+                        ),
                 ))
-                .into_any_element()
+                .into_any_element(),
         );
     }
 
@@ -926,12 +938,9 @@ pub fn settings_dialog(
     )) {
         let on_update = callbacks.on_update_setting.clone();
         sections.push(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .child(settings_header("Appearance > Theme & UI", assets::ICON_SLIDERS_HORIZONTAL_PATH))
-                .child(fb_form_row(
+            settings_section_card()
+                .child(settings_header("Theme & Interface", assets::ICON_SLIDERS_HORIZONTAL_PATH))
+                .child(settings_daw_row(
                     "Theme Preset",
                     div()
                         .flex()
@@ -952,7 +961,7 @@ pub fn settings_dialog(
                             })
                         })
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "UI Scale",
                     div()
                         .flex()
@@ -977,9 +986,15 @@ pub fn settings_dialog(
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
                                 .child(format!("{:.1}x", schema.appearance.ui_scale))
-                        )
+                        ),
                 ))
-                .child(fb_form_row(
+                .into_any_element(),
+        );
+
+        sections.push(
+            settings_section_card()
+                .child(settings_header("Timeline", assets::ICON_SLIDERS_HORIZONTAL_PATH))
+                .child(settings_daw_row(
                     "Grid Intensity",
                     div()
                         .flex()
@@ -1009,16 +1024,11 @@ pub fn settings_dialog(
                 .into_any_element()
         );
 
-        // Piano Roll Section
         let up = on_update.clone();
         sections.push(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .mt(px(12.0))
-                .child(settings_header("Appearance > Piano Roll", assets::ICON_PENCIL_PATH))
-                .child(fb_form_row(
+            settings_section_card()
+                .child(settings_header("Piano Roll", assets::ICON_PENCIL_PATH))
+                .child(settings_daw_row(
                     "Key Guides",
                     div()
                         .flex()
@@ -1042,16 +1052,11 @@ pub fn settings_dialog(
                 .into_any_element()
         );
 
-        // Mixer Section
         let up = on_update.clone();
         sections.push(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .mt(px(12.0))
-                .child(settings_header("Appearance > Mixer", assets::ICON_SLIDERS_HORIZONTAL_PATH))
-                .child(fb_form_row(
+            settings_section_card()
+                .child(settings_header("Mixer & Metering", assets::ICON_SLIDERS_HORIZONTAL_PATH))
+                .child(settings_daw_row(
                     "Meter Decay",
                     div()
                         .flex()
@@ -1078,7 +1083,7 @@ pub fn settings_dialog(
                                 .child(format!("{:.1} dB/s", schema.appearance.mixer.meter_decay_db_per_sec))
                         )
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Peak Hold",
                     div()
                         .flex()
@@ -1123,7 +1128,7 @@ pub fn settings_dialog(
                 .flex_col()
                 .gap(px(8.0))
                 .child(settings_header("Editing > Mouse & Navigation", assets::ICON_PENCIL_PATH))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Zoom Sensitivity",
                     div()
                         .flex()
@@ -1150,7 +1155,7 @@ pub fn settings_dialog(
                                 .child(format!("{:.1}x", schema.editing.mouse.zoom_sensitivity))
                         )
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Natural Scroll",
                     div()
                         .flex()
@@ -1182,7 +1187,7 @@ pub fn settings_dialog(
                 .gap(px(8.0))
                 .mt(px(12.0))
                 .child(settings_header("Editing > Grid & Snap", assets::ICON_SLIDERS_HORIZONTAL_PATH))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Snap to Grid",
                     div()
                         .flex()
@@ -1203,7 +1208,7 @@ pub fn settings_dialog(
                                 .child("Snap clips/notes to current grid lines"),
                         )
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Default Snap",
                     div()
                         .flex()
@@ -1249,7 +1254,7 @@ pub fn settings_dialog(
                 .gap(px(8.0))
                 .mt(px(12.0))
                 .child(settings_header("Editing > History", assets::ICON_CLOCK_PATH))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Max Undo Steps",
                     div()
                         .flex()
@@ -1303,7 +1308,7 @@ pub fn settings_dialog(
                 .flex_col()
                 .gap(px(8.0))
                 .child(settings_header("Recording > Audio Format", assets::ICON_CIRCLE_PATH))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Format Type",
                     div()
                         .flex()
@@ -1331,7 +1336,7 @@ pub fn settings_dialog(
                             })
                         })
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Bit Depth",
                     div()
                         .flex()
@@ -1370,7 +1375,7 @@ pub fn settings_dialog(
                 .gap(px(8.0))
                 .mt(px(12.0))
                 .child(settings_header("Recording > Metronome Click", assets::ICON_CIRCLE_PATH))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Enable Click",
                     div()
                         .flex()
@@ -1391,7 +1396,7 @@ pub fn settings_dialog(
                                 .child("Hear metronome click during recording & playback"),
                         )
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Click Volume",
                     div()
                         .flex()
@@ -1418,7 +1423,7 @@ pub fn settings_dialog(
                                 .child(format!("{:.0}%", schema.recording.metronome.volume * 100.0))
                         )
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Click Sound",
                     div()
                         .flex()
@@ -1439,7 +1444,7 @@ pub fn settings_dialog(
                             })
                         })
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Count-in Bars",
                     div()
                         .flex()
@@ -1496,7 +1501,7 @@ pub fn settings_dialog(
                 .flex_col()
                 .gap(px(8.0))
                 .child(settings_header("Playback > Transport", assets::ICON_PLAY_PATH))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Spacebar Action",
                     div()
                         .flex()
@@ -1505,7 +1510,7 @@ pub fn settings_dialog(
                         .child(fb_segmented_button("space-play-pause", "Play / Pause", true, |_e, _w, _cx| {}))
                         .child(fb_segmented_button("space-play-stop", "Play / Stop (Soon)", false, |_e, _w, _cx| {}))
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Return to Start",
                     div()
                         .flex()
@@ -1536,7 +1541,7 @@ pub fn settings_dialog(
                 .flex_col()
                 .gap(px(8.0))
                 .child(settings_header("Plugins > Formats & Folders", assets::ICON_CPU_PATH))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Formats",
                     div()
                         .flex()
@@ -1604,7 +1609,7 @@ pub fn settings_dialog(
                                 )
                         )
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "VST3 Folders",
                     div()
                         .flex()
@@ -1617,7 +1622,7 @@ pub fn settings_dialog(
                                 .child(path.clone())
                         }))
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "CLAP Folders",
                     div()
                         .flex()
@@ -1630,7 +1635,7 @@ pub fn settings_dialog(
                                 .child(path.clone())
                         }))
                 ))
-                .child(fb_form_row(
+                .child(settings_daw_row(
                     "Actions",
                     fb_button("trigger-plugins-scan", "Scan Plugins Now", FbButtonKind::Primary, true, |_e, _w, _cx| {
                         eprintln!("[plugins] manual scan triggered from settings dialog");
@@ -1645,11 +1650,8 @@ pub fn settings_dialog(
         is_match("Version About", &["version", "credits", "about"])
     )) {
         sections.push(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .child(settings_header("About Futureboard Studio", assets::ICON_CIRCLE_DOT_PATH))
+            settings_section_card()
+                .child(settings_header("Futureboard Studio", assets::ICON_CIRCLE_DOT_PATH))
                 .child(
                     div()
                         .text_size(px(10.5))
@@ -1672,7 +1674,40 @@ pub fn settings_dialog(
         );
     }
 
-    // Fill placeholder sections for other panels if not matches
+    // Placeholder panels for categories not yet fully wired
+    if sections.is_empty() && query.is_empty() {
+        let hint = match state.active_tab {
+            SettingsTab::FilesMedia => {
+                "Project folders, sample libraries, recording paths, and media cache settings."
+            }
+            SettingsTab::Shortcuts => {
+                "Search, edit, and reset keyboard commands grouped by workflow area."
+            }
+            SettingsTab::Performance => {
+                "Audio engine buffering, UI frame budget, and waveform cache controls."
+            }
+            SettingsTab::Advanced => {
+                "Experimental features, developer tools, and low-level engine options."
+            }
+            _ => "",
+        };
+        if !hint.is_empty() {
+            sections.push(
+                settings_section_card()
+                    .child(settings_section_title(state.active_tab.label()))
+                    .child(settings_section_hint(hint))
+                    .child(
+                        div()
+                            .pt(px(6.0))
+                            .text_size(px(10.0))
+                            .text_color(Colors::text_muted())
+                            .child("This section is scaffolded for future settings."),
+                    )
+                    .into_any_element(),
+            );
+        }
+    }
+
     if sections.is_empty() {
         sections.push(
             div()
@@ -1689,6 +1724,31 @@ pub fn settings_dialog(
                 .into_any_element()
         );
     }
+    (sidebar_items, sections)
+}
+
+pub fn settings_dialog(
+    state: &SettingsDialogState,
+    schema: &SettingsSchema,
+    search_input: &TextInputState,
+    search_focused: bool,
+    search_callbacks: TextInputCallbacks,
+    callbacks: SettingsDialogCallbacks,
+    available_inputs: &[String],
+    available_outputs: &[String],
+    available_backends: &[String],
+) -> impl IntoElement {
+    let close_backdrop = callbacks.on_close.clone();
+    let close_button = callbacks.on_close.clone();
+
+    let (sidebar_items, sections) = build_settings_content(
+        state,
+        schema,
+        &callbacks,
+        available_inputs,
+        available_outputs,
+        available_backends,
+    );
 
     // Overlay shell
     div()
@@ -1731,55 +1791,40 @@ pub fn settings_dialog(
                 .on_mouse_down(gpui::MouseButton::Left, |_, _window, cx| {
                     cx.stop_propagation();
                 })
-                // Title Bar
+                // Title Bar — matches project wizard style
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
                         .justify_between()
-                        .h(px(40.0))
-                        .px(px(16.0))
+                        .h(px(32.0))
+                        .pl(px(12.0))
                         .border_b(px(1.0))
-                        .border_color(Colors::divider())
+                        .border_color(Colors::border_subtle())
+                        .bg(Colors::surface_titlebar())
                         .child(
                             div()
                                 .flex()
-                                .flex_row()
                                 .items_center()
-                                .gap(px(8.0))
-                                .child(icon(assets::ICON_SLIDERS_HORIZONTAL_PATH, 13.0, Colors::accent_primary()))
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(Colors::text_primary())
-                                        .child("Preferences"),
-                                ),
-                        )
-                        // Search bar inside title bar
-                        .child(
-                            div()
-                                .w(px(220.0))
-                                .child(text_field_with_callbacks(
-                                    search_input,
-                                    search_focused,
-                                    search_callbacks,
-                                ))
+                                .h_full()
+                                .text_size(px(11.5))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(Colors::text_primary())
+                                .child("Preferences"),
                         )
                         .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .w(px(24.0))
-                                .h(px(24.0))
-                                .rounded_md()
+                                .w(px(32.0))
+                                .h(px(32.0))
                                 .id("settings-close")
                                 .cursor(gpui::CursorStyle::PointingHand)
                                 .hover(|s| s.bg(Colors::surface_control_hover()))
                                 .on_click(move |_, window, cx| close_button(&(), window, cx))
-                                .child(icon(assets::ICON_X_PATH, 13.0, Colors::text_faint())),
+                                .child(icon(assets::ICON_X_PATH, 12.0, Colors::text_faint())),
                         ),
                 )
                 // Two-column layout
@@ -1789,7 +1834,7 @@ pub fn settings_dialog(
                         .flex_row()
                         .flex_1()
                         .min_h_0()
-                        // Left Sidebar: Tabs List
+                        // Left Sidebar: Search + Tabs List
                         .child(
                             div()
                                 .id("settings-sidebar-scroll")
@@ -1802,7 +1847,16 @@ pub fn settings_dialog(
                                 .p(px(8.0))
                                 .flex()
                                 .flex_col()
-                                .gap(px(2.0))
+                                .gap(px(8.0))
+                                .child(
+                                    div()
+                                        .pb(px(4.0))
+                                        .child(text_field_with_callbacks(
+                                            search_input,
+                                            search_focused,
+                                            search_callbacks,
+                                        )),
+                                )
                                 .children(sidebar_items)
                         )
                         // Right Content Panel
@@ -1820,4 +1874,461 @@ pub fn settings_dialog(
                         )
                 )
         )
+}
+
+const SETTINGS_WIDTH: f32 = SETTINGS_WINDOW_WIDTH;
+const SETTINGS_HEIGHT: f32 = SETTINGS_WINDOW_HEIGHT;
+const COMBO_MENU_ESTIMATE_HEIGHT: f32 = 148.0;
+const CLOCK_SOURCE_OPTIONS: &[&str] = &["Internal", "MIDI"];
+
+fn combo_menu_position(anchor: OverlayAnchor, window: &Window) -> crate::overlay::OverlayPosition {
+    let layout = settings_form_column(window);
+    let refreshed = refresh_form_anchor(anchor, layout);
+    compute_overlay_position(
+        refreshed.bounds,
+        OverlaySize {
+            width: layout.value_width,
+            height: COMBO_MENU_ESTIMATE_HEIGHT,
+        },
+        window.bounds(),
+        OverlayPlacement::BottomStart,
+        4.0,
+    )
+}
+
+fn hardware_combo_overlay(
+    open_combo: HardwareCombo,
+    anchor: OverlayAnchor,
+    window: &Window,
+    schema: &SettingsSchema,
+    available_inputs: &[String],
+    available_outputs: &[String],
+    available_backends: &[String],
+    on_update: Arc<dyn Fn(UpdateSettingFn, &mut Window, &mut App) + 'static>,
+    close_target: Entity<SettingsWindow>,
+) -> impl IntoElement {
+    let position = combo_menu_position(anchor, window);
+    let close_target = close_target.clone();
+
+    let menu = match open_combo {
+        HardwareCombo::AudioDriver => {
+            let selected = schema.hardware.audio.driver_type.clone();
+            let up = on_update.clone();
+            combo_box_string_menu(
+                "settings-audio-driver-menu",
+                position,
+                &selected,
+                available_backends,
+                Arc::new(move |value, window, cx| {
+                    up(
+                        Arc::new(move |s| s.hardware.audio.driver_type = value.clone()),
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .into_any_element()
+        }
+        HardwareCombo::InputDevice => {
+            let selected = schema.hardware.audio.device_in.clone();
+            let up = on_update.clone();
+            combo_box_string_menu(
+                "settings-audio-input-menu",
+                position,
+                &selected,
+                available_inputs,
+                Arc::new(move |value, window, cx| {
+                    up(
+                        Arc::new(move |s| s.hardware.audio.device_in = value.clone()),
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .into_any_element()
+        }
+        HardwareCombo::OutputDevice => {
+            let selected = schema.hardware.audio.device_out.clone();
+            let up = on_update.clone();
+            combo_box_string_menu(
+                "settings-audio-output-menu",
+                position,
+                &selected,
+                available_outputs,
+                Arc::new(move |value, window, cx| {
+                    up(
+                        Arc::new(move |s| s.hardware.audio.device_out = value.clone()),
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .into_any_element()
+        }
+        HardwareCombo::ClockSource => {
+            let selected = schema.hardware.sync.clock_source.clone();
+            let options: Vec<String> = CLOCK_SOURCE_OPTIONS.iter().map(|s| s.to_string()).collect();
+            let up = on_update;
+            combo_box_string_menu(
+                "settings-clock-source-menu",
+                position,
+                &selected,
+                &options,
+                Arc::new(move |value, window, cx| {
+                    up(
+                        Arc::new(move |s| s.hardware.sync.clock_source = value.clone()),
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .into_any_element()
+        }
+    };
+
+    div()
+        .absolute()
+        .inset_0()
+        .id("settings-hardware-combo-overlay")
+        .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+            let _ = close_target.update(cx, |this, cx| {
+                this.open_hardware_combo = None;
+                this.hardware_combo_anchor = None;
+                cx.notify();
+            });
+        })
+        .child(menu)
+}
+
+pub type OnSettingUpdate = Arc<dyn Fn(UpdateSettingFn, &mut App) + 'static>;
+
+pub struct SettingsWindow {
+    settings: Entity<SettingsModel>,
+    active_tab: SettingsTab,
+    search_input: TextInputState,
+    available_inputs: Vec<String>,
+    available_outputs: Vec<String>,
+    available_backends: Vec<String>,
+    open_hardware_combo: Option<HardwareCombo>,
+    hardware_combo_anchor: Option<OverlayAnchor>,
+    on_update: OnSettingUpdate,
+    focus_handle: FocusHandle,
+}
+
+impl SettingsWindow {
+    pub fn new(
+        settings: Entity<SettingsModel>,
+        available_inputs: Vec<String>,
+        available_outputs: Vec<String>,
+        available_backends: Vec<String>,
+        on_update: OnSettingUpdate,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let search_input =
+            TextInputState::new("settings-search", cx.focus_handle()).with_placeholder("Search settings...");
+        Self {
+            settings,
+            active_tab: SettingsTab::General,
+            search_input,
+            available_inputs,
+            available_outputs,
+            available_backends,
+            open_hardware_combo: None,
+            hardware_combo_anchor: None,
+            on_update,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+
+    fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.keystroke.key.as_str() == "escape" && self.open_hardware_combo.take().is_some() {
+            self.hardware_combo_anchor = None;
+            cx.notify();
+            return;
+        }
+
+        let search_focused = self.search_input.is_focused(window);
+        if search_focused {
+            let action = self.search_input.handle_key_with_clipboard(event, Some(cx));
+            match action {
+                TextInputAction::Cancel => window.remove_window(),
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
+        let key = event.keystroke.key.as_str();
+        let ctrl = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
+        match key {
+            "escape" => window.remove_window(),
+            "f" if ctrl => {
+                self.search_input.focus_handle.focus(window);
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Render for SettingsWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let schema = self.settings.read(cx).current.clone();
+        let target = cx.entity().clone();
+        let on_update = self.on_update.clone();
+        let search_focused = self.search_input.is_focused(window);
+
+        let state = SettingsDialogState {
+            is_open: true,
+            active_tab: self.active_tab,
+            search_query: self.search_input.value.clone(),
+        };
+
+        let callbacks = SettingsDialogCallbacks {
+            on_close: Arc::new(|_: &(), window: &mut Window, _cx: &mut App| {
+                window.remove_window();
+            }),
+            on_select_tab: Arc::new({
+                let target = target.clone();
+                move |tab: &SettingsTab, _w: &mut Window, cx: &mut App| {
+                    let tab = *tab;
+                    let _ = target.update(cx, |this, cx| {
+                        this.active_tab = tab;
+                        this.open_hardware_combo = None;
+                        this.hardware_combo_anchor = None;
+                        cx.notify();
+                    });
+                }
+            }),
+            on_update_setting: Arc::new({
+                let on_update = on_update.clone();
+                let target = target.clone();
+                move |updater: UpdateSettingFn, _w: &mut Window, cx: &mut App| {
+                    (on_update)(updater, cx);
+                    let _ = target.update(cx, |this, cx| {
+                        this.open_hardware_combo = None;
+                        this.hardware_combo_anchor = None;
+                        cx.notify();
+                    });
+                }
+            }),
+            open_hardware_combo: self.open_hardware_combo,
+            on_toggle_hardware_combo: Arc::new({
+                let target = target.clone();
+                move |combo: HardwareCombo, anchor: Option<OverlayAnchor>, _w: &mut Window, cx: &mut App| {
+                    let _ = target.update(cx, |this, cx| {
+                        if this.open_hardware_combo == Some(combo) {
+                            this.open_hardware_combo = None;
+                            this.hardware_combo_anchor = None;
+                        } else {
+                            this.open_hardware_combo = Some(combo);
+                            this.hardware_combo_anchor = anchor;
+                        }
+                        cx.notify();
+                    });
+                }
+            }),
+        };
+
+        let search_callbacks = TextInputCallbacks {
+            on_context_menu: None,
+        };
+
+        let (sidebar_items, sections) = build_settings_content(
+            &state,
+            &schema,
+            &callbacks,
+            &self.available_inputs,
+            &self.available_outputs,
+            &self.available_backends,
+        );
+
+        let sw_target = target.clone();
+
+        let combo_overlay = if let (Some(open_combo), Some(anchor)) =
+            (self.open_hardware_combo, self.hardware_combo_anchor)
+        {
+            let close_target = sw_target.clone();
+            let overlay_update = Arc::new({
+                let on_update = on_update.clone();
+                let target = sw_target.clone();
+                move |updater: UpdateSettingFn, _w: &mut Window, cx: &mut App| {
+                    (on_update)(updater, cx);
+                    let _ = target.update(cx, |this, cx| {
+                        this.open_hardware_combo = None;
+                        this.hardware_combo_anchor = None;
+                        cx.notify();
+                    });
+                }
+            });
+            Some(hardware_combo_overlay(
+                open_combo,
+                anchor,
+                window,
+                &schema,
+                &self.available_inputs,
+                &self.available_outputs,
+                &self.available_backends,
+                overlay_update,
+                close_target,
+            ))
+        } else {
+            None
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .relative()
+            .font_family(theme::FONT_FAMILY)
+            .bg(Colors::surface_window())
+            .overflow_hidden()
+            .capture_key_down({
+                let target = sw_target.clone();
+                move |event, window, cx| {
+                    let _ = target.update(cx, |this, cx| this.handle_key(event, window, cx));
+                }
+            })
+            .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
+            .child(
+                external_window_titlebar(
+                    "Preferences",
+                    "settings-window-close",
+                    {
+                        let target = sw_target.clone();
+                        move |window, cx| {
+                            let _ = target.update(cx, |this, cx| {
+                                this.open_hardware_combo = None;
+                                this.hardware_combo_anchor = None;
+                                cx.notify();
+                            });
+                            window.remove_window();
+                        }
+                    },
+                ),
+            )
+            // Two-column body — DAW studio control center layout
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .id("settings-sidebar")
+                            .w(px(SETTINGS_SIDEBAR_WIDTH))
+                            .flex_shrink_0()
+                            .border_r(px(1.0))
+                            .border_color(Colors::divider())
+                            .bg(Colors::surface_panel_alt())
+                            .overflow_y_scroll()
+                            .py(px(6.0))
+                            .flex()
+                            .flex_col()
+                            .children(sidebar_items),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .bg(Colors::surface_panel())
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .px(px(SETTINGS_CONTENT_PAD))
+                                    .pt(px(10.0))
+                                    .pb(px(8.0))
+                                    .border_b(px(1.0))
+                                    .border_color(Colors::divider())
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_start()
+                                            .justify_between()
+                                            .gap(px(12.0))
+                                            .child(
+                                                settings_page_header(
+                                                    self.active_tab.label(),
+                                                    self.active_tab.page_description(),
+                                                ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .w(px(208.0))
+                                                    .flex_shrink_0()
+                                                    .child(text_field_with_callbacks(
+                                                        &self.search_input,
+                                                        search_focused,
+                                                        search_callbacks,
+                                                    )),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("settings-content-scroll")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .p(px(SETTINGS_CONTENT_PAD))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(10.0))
+                                    .children(sections),
+                            ),
+                    ),
+            )
+            .children(combo_overlay)
+    }
+}
+
+pub fn open_settings_window(
+    owner_bounds: Bounds<gpui::Pixels>,
+    settings: Entity<SettingsModel>,
+    available_inputs: Vec<String>,
+    available_outputs: Vec<String>,
+    available_backends: Vec<String>,
+    on_update: OnSettingUpdate,
+    cx: &mut App,
+) -> Result<WindowHandle<SettingsWindow>, String> {
+    let parent_x: f32 = owner_bounds.origin.x.into();
+    let parent_y: f32 = owner_bounds.origin.y.into();
+    let parent_w: f32 = owner_bounds.size.width.into();
+    let parent_h: f32 = owner_bounds.size.height.into();
+    let origin = Point {
+        x: px(parent_x + ((parent_w - SETTINGS_WIDTH) / 2.0).max(24.0)),
+        y: px(parent_y + ((parent_h - SETTINGS_HEIGHT) / 2.0).max(24.0)),
+    };
+
+    let mut options = crate::platform_chrome::external_dialog_window_options_partial();
+    options.window_bounds = Some(WindowBounds::Windowed(Bounds {
+        origin,
+        size: size(px(SETTINGS_WIDTH), px(SETTINGS_HEIGHT)),
+    }));
+    options.kind = WindowKind::Floating;
+    options.is_resizable = true;
+    options.is_minimizable = false;
+    options.window_background = WindowBackgroundAppearance::Transparent;
+    options.window_min_size = Some(size(px(SETTINGS_WIDTH), px(SETTINGS_HEIGHT)));
+
+    cx.open_window(
+        options,
+        move |_window, cx| {
+            cx.new(|cx| {
+                SettingsWindow::new(
+                    settings,
+                    available_inputs,
+                    available_outputs,
+                    available_backends,
+                    on_update,
+                    cx,
+                )
+            })
+        },
+    )
+    .map_err(|error| error.to_string())
 }

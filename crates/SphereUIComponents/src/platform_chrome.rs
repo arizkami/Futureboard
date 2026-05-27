@@ -1,0 +1,197 @@
+//! Central platform chrome policy for Futureboard Native.
+//!
+//! All `cfg(target_os = …)` checks for titlebar / menubar / window controls live
+//! here. UI code should call [`PlatformChromePolicy::current()`] instead of
+//! scattering platform conditionals.
+
+use gpui::{px, point, Point, Pixels, TitlebarOptions, WindowDecorations, WindowOptions};
+
+/// Shared titlebar height across platforms (matches GPUI chrome layout).
+pub const TITLEBAR_HEIGHT_PX: f32 = 32.0;
+
+/// macOS traffic-light reserved width in the custom titlebar row.
+pub const MACOS_TRAFFIC_LIGHT_PADDING_PX: f32 = 72.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlatformChromeKind {
+    Windows,
+    Linux,
+    MacOS,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PlatformChromePolicy {
+    pub kind: PlatformChromeKind,
+    pub show_in_window_menubar: bool,
+    pub use_native_macos_menubar: bool,
+    pub show_window_controls: bool,
+    pub traffic_light_left_padding_px: f32,
+    pub titlebar_height_px: f32,
+}
+
+impl PlatformChromePolicy {
+    pub fn current() -> Self {
+        platform_policy()
+    }
+
+    /// Chrome for floating external dialogs (wizard, preferences).
+    pub fn external_dialog() -> Self {
+        let main = Self::current();
+        Self {
+            show_in_window_menubar: false,
+            use_native_macos_menubar: false,
+            ..main
+        }
+    }
+
+    pub fn titlebar_height(&self) -> gpui::Pixels {
+        px(self.titlebar_height_px)
+    }
+
+    pub fn traffic_light_left_padding(&self) -> gpui::Pixels {
+        px(self.traffic_light_left_padding_px)
+    }
+
+    /// `TitlebarOptions` for the main studio window.
+    pub fn studio_titlebar_options() -> TitlebarOptions {
+        let policy = Self::current();
+        TitlebarOptions {
+            title: None,
+            // Windows: transparent titlebar + GPUI `WindowControlArea` hit-testing.
+            // macOS: blend custom chrome with native traffic lights.
+            // Linux: same client chrome path as Windows.
+            appears_transparent: true,
+            traffic_light_position: policy.native_traffic_light_position(),
+        }
+    }
+
+    /// `TitlebarOptions` for wizard / settings floating windows.
+    pub fn external_dialog_titlebar_options() -> TitlebarOptions {
+        let policy = Self::external_dialog();
+        TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            traffic_light_position: policy.native_traffic_light_position(),
+        }
+    }
+
+    /// Window decorations for external floating dialogs.
+    pub fn external_dialog_window_decorations() -> Option<WindowDecorations> {
+        match Self::current().kind {
+            PlatformChromeKind::MacOS => None,
+            PlatformChromeKind::Windows | PlatformChromeKind::Linux => {
+                Some(WindowDecorations::Client)
+            }
+        }
+    }
+
+    /// Whether the OS may draw its own window frame (avoid duplicating GPUI WCO).
+    pub fn use_client_window_decorations_for_studio() -> bool {
+        matches!(
+            Self::current().kind,
+            PlatformChromeKind::Windows | PlatformChromeKind::Linux
+        )
+    }
+
+    fn native_traffic_light_position(&self) -> Option<Point<Pixels>> {
+        if self.kind != PlatformChromeKind::MacOS {
+            return None;
+        }
+        // Position native traffic lights in the titlebar band (GPUI macOS API).
+        Some(point(px(12.0), px(10.0)))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn platform_policy() -> PlatformChromePolicy {
+    PlatformChromePolicy {
+        kind: PlatformChromeKind::Windows,
+        show_in_window_menubar: true,
+        use_native_macos_menubar: false,
+        show_window_controls: true,
+        traffic_light_left_padding_px: 0.0,
+        titlebar_height_px: TITLEBAR_HEIGHT_PX,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn platform_policy() -> PlatformChromePolicy {
+    PlatformChromePolicy {
+        kind: PlatformChromeKind::Linux,
+        show_in_window_menubar: true,
+        use_native_macos_menubar: false,
+        show_window_controls: true,
+        traffic_light_left_padding_px: 0.0,
+        titlebar_height_px: TITLEBAR_HEIGHT_PX,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform_policy() -> PlatformChromePolicy {
+    PlatformChromePolicy {
+        kind: PlatformChromeKind::MacOS,
+        show_in_window_menubar: false,
+        use_native_macos_menubar: true,
+        show_window_controls: false,
+        traffic_light_left_padding_px: MACOS_TRAFFIC_LIGHT_PADDING_PX,
+        titlebar_height_px: TITLEBAR_HEIGHT_PX,
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+fn platform_policy() -> PlatformChromePolicy {
+    PlatformChromePolicy {
+        kind: PlatformChromeKind::Linux,
+        show_in_window_menubar: true,
+        use_native_macos_menubar: false,
+        show_window_controls: true,
+        traffic_light_left_padding_px: 0.0,
+        titlebar_height_px: TITLEBAR_HEIGHT_PX,
+    }
+}
+
+/// Studio window options (main Futureboard window).
+pub fn studio_window_options() -> WindowOptions {
+    WindowOptions {
+        titlebar: Some(PlatformChromePolicy::studio_titlebar_options()),
+        focus: true,
+        show: true,
+        is_movable: true,
+        is_resizable: true,
+        is_minimizable: true,
+        window_decorations: if PlatformChromePolicy::use_client_window_decorations_for_studio() {
+            Some(WindowDecorations::Client)
+        } else {
+            None
+        },
+        ..Default::default()
+    }
+}
+
+/// Wire macOS native menubar command dispatch to the studio layout entity.
+pub fn register_studio_menu_dispatcher(
+    studio: gpui::Entity<crate::layout::StudioLayout>,
+    cx: &mut gpui::Context<crate::layout::StudioLayout>,
+) {
+    use std::sync::Arc;
+
+    crate::native_macos_menu::set_command_dispatcher(Arc::new(move |command_id, app| {
+        let _ = studio.update(app, |this, cx| {
+            this.dispatch_command_id(command_id, cx);
+            cx.notify();
+        });
+    }));
+    crate::native_macos_menu::install_native_macos_menu(cx);
+}
+
+/// Partial options shared by settings / project wizard windows.
+pub fn external_dialog_window_options_partial() -> WindowOptions {
+    WindowOptions {
+        titlebar: Some(PlatformChromePolicy::external_dialog_titlebar_options()),
+        focus: true,
+        show: true,
+        is_movable: true,
+        window_decorations: PlatformChromePolicy::external_dialog_window_decorations(),
+        ..Default::default()
+    }
+}

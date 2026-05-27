@@ -1,29 +1,15 @@
-//! UI-side façade over the DirectAudioEngine peak generator.
+//! UI-side waveform peak cache — render path is read-only.
 //!
-//! Peak generation lives in `crates/SphereDirectAudioEngine/src/
-//! audio_file.rs::generate_audio_peaks` — this module is now a thin
-//! adapter that:
-//!   * tracks per-path Pending / Ready / Error status (the UI's render
-//!     code needs the tri-state to draw placeholders cleanly),
-//!   * converts the engine's `AudioPeakFile` into the UI-local
-//!     `WaveformPreview` shape consumed by `waveform_canvas` and
-//!     `pick_lod`,
-//!   * keeps the synthetic demo-clip preview path for clips that have
-//!     no source file (e.g. the dev-flag demo project tracks).
-//!
-//! Realtime / audio rules:
-//!   * decoding happens on `std::thread::spawn` background threads.
-//!   * render / layout only reads the cache via [`get_file_status`] /
-//!     [`get_file_waveform`].
-//!   * the engine path never runs on the audio callback.
+//! Decoding and peak generation run on background threads via [`super::audio_import`].
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use super::timeline_state::AudioImportState;
 use DAUx::{generate_audio_peaks, AudioPeak as EnginePeak, AudioPeakFile, PEAK_LOD_LEVELS};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct WaveformPeak {
     pub min: f32,
     pub max: f32,
@@ -38,21 +24,18 @@ impl From<EnginePeak> for WaveformPeak {
     }
 }
 
-/// One mip level of the waveform: every entry summarises `samples_per_peak`
-/// consecutive mono samples as a (min, max) pair.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WaveformLod {
     pub samples_per_peak: usize,
     pub peaks: Vec<WaveformPeak>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WaveformPreview {
     pub sample_rate: u32,
     pub channels: u16,
     pub duration_seconds: f64,
     pub total_frames: u64,
-    /// LODs sorted ascending by `samples_per_peak`.
     pub lods: Vec<WaveformLod>,
 }
 
@@ -75,118 +58,529 @@ impl From<AudioPeakFile> for WaveformPreview {
     }
 }
 
+/// Matches Electron/WebUI `WaveformStatus` + native partial progressive draw.
 #[derive(Debug, Clone)]
-pub enum WaveformStatus {
+pub enum WaveformDisplayStatus {
     Pending,
-    Ready(WaveformPreview),
+    Partial {
+        meta: Arc<WaveformFileMeta>,
+        chunks_ready: usize,
+        chunks_total: usize,
+    },
+    Ready {
+        meta: Arc<WaveformFileMeta>,
+    },
     Error(String),
 }
 
-/// LOD levels exactly as required by the spec: a power-of-two ladder
-/// from 256 to 65536. Mirrors `DAUx::PEAK_LOD_LEVELS`; kept here in
-/// `usize` form because `pick_lod` and the waveform canvas use it as
-/// a Vec index basis. Asserted equal at runtime initialisation.
+/// Legacy alias used during migration.
+pub type WaveformStatus = WaveformDisplayStatus;
+
+/// Per-file peak metadata (chunk bytes live in `FileEntry::chunks`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WaveformFileMeta {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub duration_seconds: f64,
+    pub total_frames: u64,
+    pub peak_count: usize,
+    pub primary_spp: usize,
+}
+
+/// Peaks per chunk — mirrors WebUI `CHUNK_PEAKS` (`peakChunkCache.ts`).
+pub const CHUNK_PEAKS: usize = 4096;
+/// Finest LOD used for chunking — mirrors WebUI `PEAK_FINE_SPP`.
+pub const PEAK_FINE_SPP: usize = 256;
+pub const WAVEFORM_ALGORITHM_VERSION: u32 = 2;
+
+pub const MAX_PEAKS_PER_COLUMN: usize = 16;
+
+pub(crate) struct FileEntry {
+    import: AudioImportState,
+    meta: Option<Arc<WaveformFileMeta>>,
+    chunks_total: usize,
+    chunks_ready: usize,
+    /// `(samples_per_peak, chunk_index)` → peaks
+    chunks: HashMap<(u32, u32), Arc<Vec<WaveformPeak>>>,
+    /// Full LOD ladder for zoom selection once complete.
+    preview: Option<Arc<WaveformPreview>>,
+}
+
+/// LOD levels — mirrors `DAUx::PEAK_LOD_LEVELS`.
 pub const LOD_LEVELS: [usize; 9] = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536];
 
 const _: () = {
-    // Compile-time guard that PEAK_LOD_LEVELS length matches LOD_LEVELS.
-    // Mismatched LOD ladders between engine and UI would silently
-    // truncate or insert empty LODs.
     assert!(LOD_LEVELS.len() == PEAK_LOD_LEVELS.len());
 };
 
-/// Two caches: synthetic demo clips keyed by id, decoded files keyed by absolute path.
-static CLIP_CACHE: OnceLock<Mutex<HashMap<String, WaveformPreview>>> = OnceLock::new();
-static FILE_CACHE: OnceLock<Mutex<HashMap<String, WaveformStatus>>> = OnceLock::new();
+static CLIP_CACHE: OnceLock<Mutex<HashMap<String, Arc<WaveformPreview>>>> = OnceLock::new();
+static FILE_CACHE: OnceLock<Mutex<HashMap<String, FileEntry>>> = OnceLock::new();
 
-fn clip_cache() -> &'static Mutex<HashMap<String, WaveformPreview>> {
+static TIMELINE_DEBUG: OnceLock<bool> = OnceLock::new();
+static RENDER_STATS: OnceLock<Mutex<TimelineRenderStats>> = OnceLock::new();
+
+#[derive(Default)]
+struct TimelineRenderStats {
+    visible_clips: u64,
+    waveform_bars: u64,
+    cache_hits: u64,
+    cache_misses: u64,
+    window_start: Option<std::time::Instant>,
+}
+
+fn timeline_debug() -> bool {
+    *TIMELINE_DEBUG.get_or_init(|| std::env::var_os("FUTUREBOARD_TIMELINE_DEBUG").is_some())
+}
+
+pub fn record_timeline_render(visible_clips: usize, waveform_bars: usize, cache_hit: bool) {
+    if crate::perf::enabled() {
+        crate::perf::count("waveform_bars", waveform_bars as u64);
+        crate::perf::count("visible_clips", visible_clips as u64);
+        if cache_hit {
+            crate::perf::count("waveform_cache_hit", 1);
+        }
+    }
+    if !timeline_debug() {
+        return;
+    }
+    let stats = RENDER_STATS.get_or_init(|| Mutex::new(TimelineRenderStats::default()));
+    let mut s = stats.lock().expect("timeline render stats");
+    if s.window_start.is_none() {
+        s.window_start = Some(std::time::Instant::now());
+    }
+    s.visible_clips += visible_clips as u64;
+    s.waveform_bars += waveform_bars as u64;
+    if cache_hit {
+        s.cache_hits += 1;
+    } else {
+        s.cache_misses += 1;
+    }
+    if let Some(start) = s.window_start {
+        if start.elapsed() >= std::time::Duration::from_secs(1) {
+            eprintln!(
+                "[timeline-debug] visible_clips={} waveform_bars={} cache_hits={} cache_misses={}",
+                s.visible_clips, s.waveform_bars, s.cache_hits, s.cache_misses
+            );
+            *s = TimelineRenderStats::default();
+        }
+    }
+}
+
+fn clip_cache() -> &'static Mutex<HashMap<String, Arc<WaveformPreview>>> {
     CLIP_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn file_cache() -> &'static Mutex<HashMap<String, WaveformStatus>> {
+fn file_cache() -> &'static Mutex<HashMap<String, FileEntry>> {
     FILE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Cheap render-path lookup — no decoding, no allocation beyond a clone.
-pub fn get_file_waveform(path: &str) -> Option<WaveformPreview> {
-    match file_cache().lock().ok()?.get(path).cloned()? {
-        WaveformStatus::Ready(preview) => Some(preview),
-        _ => None,
+pub fn get_preview_arc(path: &str) -> Option<Arc<WaveformPreview>> {
+    file_cache()
+        .lock()
+        .ok()?
+        .get(path)
+        .and_then(|e| e.preview.clone())
+}
+
+pub fn get_file_status(path: &str) -> WaveformDisplayStatus {
+    let Ok(cache) = file_cache().lock() else {
+        return WaveformDisplayStatus::Pending;
+    };
+    let Some(entry) = cache.get(path) else {
+        return WaveformDisplayStatus::Pending;
+    };
+    if let (Some(meta), true) = (&entry.meta, entry.preview.is_some()) {
+        return WaveformDisplayStatus::Ready {
+            meta: Arc::clone(meta),
+        };
+    }
+    if let Some(meta) = &entry.meta {
+        if entry.chunks_ready > 0 {
+            return WaveformDisplayStatus::Partial {
+                meta: Arc::clone(meta),
+                chunks_ready: entry.chunks_ready,
+                chunks_total: entry.chunks_total.max(1),
+            };
+        }
+    }
+    match &entry.import {
+        AudioImportState::Failed { message } => WaveformDisplayStatus::Error(message.clone()),
+        _ => WaveformDisplayStatus::Pending,
     }
 }
 
-pub fn get_file_status(path: &str) -> WaveformStatus {
+/// WebUI `pickBestLevel` — coarsest LOD with ≤ ~2× ideal samples-per-peak.
+pub fn pick_best_samples_per_peak(pixels_per_second: f32, sample_rate: u32) -> usize {
+    let ideal = (sample_rate as f32 / pixels_per_second.max(1.0))
+        .round()
+        .max(1.0) as usize;
+    let mut best = LOD_LEVELS[0];
+    for &spp in &LOD_LEVELS {
+        if spp <= ideal.saturating_mul(2) {
+            best = spp;
+        }
+    }
+    best
+}
+
+/// Pick the closest LOD that is actually present in the locked cache entry.
+///
+/// During progressive import the fine primary chunks can be visible before the
+/// full preview/LOD ladder is installed. Falling back here keeps partial
+/// waveform rendering non-blocking without regenerating peaks in render.
+pub(crate) fn best_available_samples_per_peak_in_entry(
+    entry: &FileEntry,
+    desired_samples_per_peak: usize,
+) -> usize {
+    if let Some(preview) = &entry.preview {
+        if preview
+            .lods
+            .iter()
+            .any(|lod| lod.samples_per_peak == desired_samples_per_peak)
+        {
+            return desired_samples_per_peak;
+        }
+    }
+
+    if entry
+        .chunks
+        .keys()
+        .any(|(spp, _)| *spp as usize == desired_samples_per_peak)
+    {
+        return desired_samples_per_peak;
+    }
+
+    let mut available: Vec<usize> = entry
+        .chunks
+        .keys()
+        .map(|(spp, _)| *spp as usize)
+        .collect();
+    if let Some(preview) = &entry.preview {
+        available.extend(preview.lods.iter().map(|lod| lod.samples_per_peak));
+    }
+    available.sort_unstable();
+    available.dedup();
+
+    available
+        .iter()
+        .copied()
+        .filter(|spp| *spp <= desired_samples_per_peak.saturating_mul(2))
+        .last()
+        .or_else(|| available.first().copied())
+        .or_else(|| entry.meta.as_ref().map(|meta| meta.primary_spp))
+        .unwrap_or(desired_samples_per_peak)
+}
+
+pub fn get_import_state(path: &str) -> AudioImportState {
     file_cache()
         .lock()
         .ok()
-        .and_then(|cache| cache.get(path).cloned())
-        .unwrap_or(WaveformStatus::Pending)
+        .and_then(|c| c.get(path).map(|e| e.import.clone()))
+        .unwrap_or(AudioImportState::Pending)
 }
 
-pub fn request_decode_file(path: PathBuf) {
-    let key = path.to_string_lossy().to_string();
-    let should_start = {
-        let Ok(mut cache) = file_cache().lock() else {
+/// Returns false if import already running or file is ready.
+pub fn try_begin_import(path_key: &str) -> bool {
+    let Ok(mut cache) = file_cache().lock() else {
+        return false;
+    };
+    if let Some(entry) = cache.get(path_key) {
+        if entry.preview.is_some() || (entry.chunks_ready > 0 && entry.chunks_ready >= entry.chunks_total) {
+            return false;
+        }
+        if matches!(
+            entry.import,
+            AudioImportState::Probing
+                | AudioImportState::Decoding { .. }
+                | AudioImportState::GeneratingPeaks { .. }
+        ) {
+            return false;
+        }
+    }
+    cache.insert(
+        path_key.to_string(),
+        FileEntry {
+            import: AudioImportState::Pending,
+            meta: None,
+            chunks_total: 0,
+            chunks_ready: 0,
+            chunks: HashMap::new(),
+            preview: None,
+        },
+    );
+    true
+}
+
+pub fn set_import_state(path_key: &str, state: AudioImportState) {
+    if let Ok(mut cache) = file_cache().lock() {
+        let entry = cache.entry(path_key.to_string()).or_insert_with(|| FileEntry {
+            import: state.clone(),
+            meta: None,
+            chunks_total: 0,
+            chunks_ready: 0,
+            chunks: HashMap::new(),
+            preview: None,
+        });
+        entry.import = state;
+    }
+}
+
+pub fn begin_peak_build(path_key: &str, meta: Arc<WaveformFileMeta>, chunks_total: usize) {
+    if let Ok(mut cache) = file_cache().lock() {
+        let entry = cache.entry(path_key.to_string()).or_insert_with(|| FileEntry {
+            import: AudioImportState::GeneratingPeaks { progress: 0.0 },
+            meta: None,
+            chunks_total: 0,
+            chunks_ready: 0,
+            chunks: HashMap::new(),
+            preview: None,
+        });
+        entry.meta = Some(Arc::clone(&meta));
+        entry.chunks_total = chunks_total;
+        entry.chunks_ready = 0;
+        entry.chunks.clear();
+        entry.import = AudioImportState::GeneratingPeaks { progress: 0.0 };
+    }
+}
+
+pub fn install_chunk(path_key: &str, samples_per_peak: u32, chunk_index: u32, peaks: Arc<Vec<WaveformPeak>>) {
+    if let Ok(mut cache) = file_cache().lock() {
+        let Some(entry) = cache.get_mut(path_key) else {
             return;
         };
-        if cache.contains_key(&key) {
-            false
-        } else {
-            cache.insert(key.clone(), WaveformStatus::Pending);
-            true
+        entry
+            .chunks
+            .insert((samples_per_peak, chunk_index), peaks);
+        let primary = entry
+            .meta
+            .as_ref()
+            .map(|m| m.primary_spp as u32)
+            .unwrap_or(samples_per_peak);
+        entry.chunks_ready = entry
+            .chunks
+            .keys()
+            .filter(|(spp, _)| *spp == primary)
+            .count();
+        if entry.preview.is_none() {
+            let progress = entry.chunks_ready as f32 / entry.chunks_total.max(1) as f32;
+            entry.import = AudioImportState::GeneratingPeaks { progress };
         }
+    }
+}
+
+pub fn finish_peak_build(path_key: &str, preview: Arc<WaveformPreview>) {
+    if let Ok(mut cache) = file_cache().lock() {
+        let Some(entry) = cache.get_mut(path_key) else {
+            return;
+        };
+        entry.preview = Some(preview);
+        entry.import = AudioImportState::Ready;
+        if let Some(meta) = &entry.meta {
+            entry.chunks_ready = entry.chunks_total.max(entry.chunks_ready);
+            waveform_debug_log(&format!(
+                "ready path={path_key} peaks={} chunks={}",
+                meta.peak_count, entry.chunks_total
+            ));
+        }
+    }
+}
+
+/// Split finest LOD into chunks and store (background thread only).
+pub fn ingest_preview_as_chunks(path_key: &str, preview: Arc<WaveformPreview>) -> usize {
+    let primary_lod = preview
+        .lods
+        .iter()
+        .find(|l| l.samples_per_peak == PEAK_FINE_SPP)
+        .or_else(|| preview.lods.first());
+    let Some(primary_lod) = primary_lod else {
+        return 0;
     };
-
-    if !should_start {
-        return;
-    }
-
-    std::thread::spawn(move || {
-        let decoded = decode_file_uncached(&path);
-        if let Ok(mut cache) = file_cache().lock() {
-            cache.insert(
-                key,
-                decoded
-                    .map(WaveformStatus::Ready)
-                    .unwrap_or_else(|| WaveformStatus::Error("Decode failed".to_string())),
-            );
-        }
+    let meta = Arc::new(WaveformFileMeta {
+        sample_rate: preview.sample_rate,
+        channels: preview.channels,
+        duration_seconds: preview.duration_seconds,
+        total_frames: preview.total_frames,
+        peak_count: primary_lod.peaks.len(),
+        primary_spp: primary_lod.samples_per_peak,
     });
+    let chunks_total = primary_lod.peaks.len().div_ceil(CHUNK_PEAKS);
+    begin_peak_build(path_key, Arc::clone(&meta), chunks_total);
+    for lod in &preview.lods {
+        let spp = lod.samples_per_peak as u32;
+        let lod_chunks_total = lod.peaks.len().div_ceil(CHUNK_PEAKS);
+        for chunk_index in 0..lod_chunks_total {
+            let start = chunk_index * CHUNK_PEAKS;
+            let end = (start + CHUNK_PEAKS).min(lod.peaks.len());
+            let slice = Arc::new(lod.peaks[start..end].to_vec());
+            install_chunk(path_key, spp, chunk_index as u32, slice);
+        }
+    }
+    finish_peak_build(path_key, preview);
+    chunks_total
 }
 
-/// Decode a WAV/MP3 (or symphonia-supported) file into a multi-LOD preview.
-/// Cached by path; safe to call repeatedly. Returns None on decode failure;
-/// callers should fall back to `placeholder_waveform`.
-pub fn decode_and_cache_file(path: &Path) -> Option<WaveformPreview> {
+pub fn install_ready(path_key: &str, preview: Arc<WaveformPreview>) {
+    ingest_preview_as_chunks(path_key, preview);
+}
+
+pub fn install_failed(path_key: &str, message: String) {
+    if let Ok(mut cache) = file_cache().lock() {
+        cache.insert(
+            path_key.to_string(),
+            FileEntry {
+                import: AudioImportState::Failed {
+                    message: message.clone(),
+                },
+                meta: None,
+                chunks_total: 0,
+                chunks_ready: 0,
+                chunks: HashMap::new(),
+                preview: None,
+            },
+        );
+    }
+}
+
+/// Run `f` while holding the file cache lock once. Use this from render paths
+/// instead of calling `aggregate_peak_range` per column (which re-locks).
+pub(crate) fn with_file_entry<R>(path: &str, f: impl FnOnce(Option<&FileEntry>) -> R) -> R {
+    let Ok(cache) = file_cache().lock() else {
+        return f(None);
+    };
+    f(cache.get(path))
+}
+
+/// Display status from an already-locked entry (no extra lock).
+pub(crate) fn display_status_from_entry(entry: &FileEntry) -> WaveformDisplayStatus {
+    if let (Some(meta), true) = (&entry.meta, entry.preview.is_some()) {
+        return WaveformDisplayStatus::Ready {
+            meta: Arc::clone(meta),
+        };
+    }
+    if let Some(meta) = &entry.meta {
+        if entry.chunks_ready > 0 {
+            return WaveformDisplayStatus::Partial {
+                meta: Arc::clone(meta),
+                chunks_ready: entry.chunks_ready,
+                chunks_total: entry.chunks_total.max(1),
+            };
+        }
+    }
+    match &entry.import {
+        AudioImportState::Failed { message } => WaveformDisplayStatus::Error(message.clone()),
+        _ => WaveformDisplayStatus::Pending,
+    }
+}
+
+/// Aggregate min/max for peak indices `[peak_start, peak_end)` on a locked entry.
+pub(crate) fn aggregate_peak_range_in_entry(
+    entry: &FileEntry,
+    samples_per_peak: usize,
+    peak_start: usize,
+    peak_end: usize,
+) -> WaveformPeak {
+    if let Some(preview) = &entry.preview {
+        if let Some(lod) = preview
+            .lods
+            .iter()
+            .find(|l| l.samples_per_peak == samples_per_peak)
+        {
+            let end = peak_end.min(lod.peaks.len());
+            let start = peak_start.min(end);
+            if start >= end {
+                return WaveformPeak { min: 0.0, max: 0.0 };
+            }
+            return aggregate_slice(&lod.peaks[start..end]);
+        }
+    }
+
+    let spp = samples_per_peak as u32;
+    let mut mn = f32::MAX;
+    let mut mx = f32::MIN;
+    let mut any = false;
+    for pk in peak_start..peak_end {
+        let ci = (pk / CHUNK_PEAKS) as u32;
+        let local = pk % CHUNK_PEAKS;
+        if let Some(chunk) = entry.chunks.get(&(spp, ci)) {
+            if let Some(p) = chunk.get(local) {
+                if p.min < mn {
+                    mn = p.min;
+                }
+                if p.max > mx {
+                    mx = p.max;
+                }
+                any = true;
+            }
+        }
+    }
+    if any {
+        WaveformPeak { min: mn, max: mx }
+    } else {
+        WaveformPeak { min: 0.0, max: 0.0 }
+    }
+}
+
+/// Aggregate min/max for peak indices `[start, end)` using chunked storage.
+pub fn aggregate_peak_range(
+    path: &str,
+    samples_per_peak: usize,
+    peak_start: usize,
+    peak_end: usize,
+) -> WaveformPeak {
+    with_file_entry(path, |entry| {
+        entry
+            .map(|e| aggregate_peak_range_in_entry(e, samples_per_peak, peak_start, peak_end))
+            .unwrap_or(WaveformPeak { min: 0.0, max: 0.0 })
+    })
+}
+
+fn aggregate_slice(peaks: &[WaveformPeak]) -> WaveformPeak {
+    if peaks.is_empty() {
+        return WaveformPeak { min: 0.0, max: 0.0 };
+    }
+    let mut mn = peaks[0].min;
+    let mut mx = peaks[0].max;
+    for p in &peaks[1..] {
+        if p.min < mn {
+            mn = p.min;
+        }
+        if p.max > mx {
+            mx = p.max;
+        }
+    }
+    WaveformPeak { min: mn, max: mx }
+}
+
+fn waveform_debug_log(msg: &str) {
+    if std::env::var_os("FUTUREBOARD_WAVEFORM_DEBUG").is_some() {
+        eprintln!("[waveform] {msg}");
+    }
+}
+
+/// Legacy entry: marks pending; actual work is started by `audio_import::start_file_import`.
+pub fn request_decode_file(path: PathBuf) {
     let key = path.to_string_lossy().to_string();
-    if let Some(existing) = file_cache().lock().ok().and_then(|c| c.get(&key).cloned()) {
-        if let WaveformStatus::Ready(preview) = existing {
-            return Some(preview);
-        }
-    }
-
-    let preview = decode_file_uncached(path)?;
-
-    if let Ok(mut c) = file_cache().lock() {
-        c.insert(key, WaveformStatus::Ready(preview.clone()));
-    }
-    Some(preview)
+    let _ = try_begin_import(&key);
 }
 
-fn decode_file_uncached(path: &std::path::Path) -> Option<WaveformPreview> {
-    // The engine handles every format `DAUx::probe_audio_file` accepts;
-    // the UI no longer needs a parallel decoder. If `generate_audio_peaks`
-    // returns Err we surface the message and let the caller record
-    // `WaveformStatus::Error`.
+/// Background-only peak decode. Prefer `audio_import` pipeline.
+pub fn decode_and_cache_file(path: &Path) -> Option<Arc<WaveformPreview>> {
+    let key = path.to_string_lossy().to_string();
+    if let Some(arc) = get_preview_arc(&key) {
+        return Some(arc);
+    }
+    let preview = decode_file_uncached(path)?;
+    let arc = Arc::new(preview);
+    install_ready(&key, Arc::clone(&arc));
+    Some(arc)
+}
+
+fn decode_file_uncached(path: &Path) -> Option<WaveformPreview> {
     match generate_audio_peaks(path) {
-        Ok(peaks) => {
-            let preview: WaveformPreview = peaks.into();
-            log_decoded(path, &preview);
-            Some(preview)
-        }
+        Ok(peaks) => Some(peaks.into()),
         Err(error) => {
             eprintln!(
-                "[waveform] DAUx::generate_audio_peaks failed: path={} error={}",
+                "[waveform] generate_audio_peaks failed: path={} error={}",
                 path.display(),
                 error
             );
@@ -195,30 +589,76 @@ fn decode_file_uncached(path: &std::path::Path) -> Option<WaveformPreview> {
     }
 }
 
-fn log_decoded(path: &Path, p: &WaveformPreview) {
-    let total_peaks: usize = p.lods.iter().map(|l| l.peaks.len()).sum();
-    eprintln!(
-        "[waveform] decoded {} | {:.2}s @ {}Hz ch={} frames={} lods={} total_peaks={}",
-        path.display(),
-        p.duration_seconds,
-        p.sample_rate,
-        p.channels,
-        p.total_frames,
-        p.lods.len(),
-        total_peaks,
-    );
-    for lod in &p.lods {
-        eprintln!(
-            "[waveform]   lod spp={:>6} peaks={}",
-            lod.samples_per_peak,
-            lod.peaks.len()
-        );
+// ── Demo / placeholder previews ───────────────────────────────────────────────
+
+pub fn get_or_generate_waveform(
+    clip_id: &str,
+    name: &str,
+    duration_beats: f32,
+    bpm: f32,
+) -> Arc<WaveformPreview> {
+    let mut cache = clip_cache().lock().unwrap();
+    if let Some(preview) = cache.get(clip_id) {
+        return Arc::clone(preview);
+    }
+    let preview = Arc::new(generate_waveform_preview(name, duration_beats, bpm));
+    cache.insert(clip_id.to_string(), Arc::clone(&preview));
+    preview
+}
+
+pub fn placeholder_waveform(duration_seconds: f64) -> WaveformPreview {
+    let lod = WaveformLod {
+        samples_per_peak: LOD_LEVELS[LOD_LEVELS.len() / 2],
+        peaks: (0..32)
+            .map(|_| WaveformPeak {
+                min: -0.03,
+                max: 0.03,
+            })
+            .collect(),
+    };
+    WaveformPreview {
+        sample_rate: 44_100,
+        channels: 1,
+        duration_seconds,
+        total_frames: (duration_seconds * 44_100.0) as u64,
+        lods: vec![lod],
     }
 }
 
-// ── LOD builder ────────────────────────────────────────────────────────────────
+fn generate_waveform_preview(name: &str, duration_beats: f32, bpm: f32) -> WaveformPreview {
+    let sample_rate: u32 = 44_100;
+    let duration_seconds = duration_beats as f64 * (60.0 / bpm.max(1.0) as f64);
+    let total_samples = (duration_seconds * sample_rate as f64) as u64;
+    let total_samples = total_samples.min(sample_rate as u64 * 30);
 
-/// Single-pass min/max accumulator for one LOD level.
+    let mut lods = LodSet::new(total_samples);
+    let name_lower = name.to_lowercase();
+    let kind = if name_lower.contains("drum") || name_lower.contains("loop") {
+        SynthKind::Drums
+    } else if name_lower.contains("vocal")
+        || name_lower.contains("harmony")
+        || name_lower.contains("dry")
+    {
+        SynthKind::Vocals
+    } else {
+        SynthKind::Generic
+    };
+
+    for i in 0..total_samples as usize {
+        let t = i as f32 / sample_rate as f32;
+        let v = synth_sample(kind, t, duration_seconds as f32);
+        lods.push(v.clamp(-1.0, 1.0));
+    }
+
+    WaveformPreview {
+        sample_rate,
+        channels: 1,
+        duration_seconds,
+        total_frames: total_samples,
+        lods: lods.finalize(),
+    }
+}
+
 struct LodBuilder {
     samples_per_peak: usize,
     min: f32,
@@ -239,7 +679,6 @@ impl LodBuilder {
         }
     }
 
-    #[inline]
     fn push(&mut self, v: f32) {
         if v < self.min {
             self.min = v;
@@ -287,8 +726,6 @@ impl LodSet {
         }
     }
 
-    /// Fold a single mono sample (already clamped) into every LOD builder.
-    #[inline]
     fn push(&mut self, mono: f32) {
         for b in &mut self.builders {
             b.push(mono);
@@ -303,87 +740,6 @@ impl LodSet {
     }
 }
 
-// Real-audio decoding now lives in DAUx::generate_audio_peaks. The
-// LodSet / LodBuilder above remain only for the synthetic demo-clip
-// preview path that has no source file to feed the engine.
-
-// ── Demo / placeholder previews ───────────────────────────────────────────────
-
-/// Used by the synthetic demo clips that don't have a real source file.
-/// Generates pseudo-PCM, then folds it into the same multi-LOD pipeline.
-pub fn get_or_generate_waveform(
-    clip_id: &str,
-    name: &str,
-    duration_beats: f32,
-    bpm: f32,
-) -> WaveformPreview {
-    let mut cache = clip_cache().lock().unwrap();
-    if let Some(preview) = cache.get(clip_id) {
-        return preview.clone();
-    }
-    let preview = generate_waveform_preview(name, duration_beats, bpm);
-    cache.insert(clip_id.to_string(), preview.clone());
-    preview
-}
-
-/// Flat preview returned when decoding fails. Single LOD with zero amplitude.
-pub fn placeholder_waveform(duration_seconds: f64) -> WaveformPreview {
-    // One coarse LOD is enough — there's nothing to zoom into.
-    let lod = WaveformLod {
-        samples_per_peak: LOD_LEVELS[LOD_LEVELS.len() / 2],
-        peaks: (0..256)
-            .map(|_| WaveformPeak {
-                min: -0.03,
-                max: 0.03,
-            })
-            .collect(),
-    };
-    WaveformPreview {
-        sample_rate: 44_100,
-        channels: 1,
-        duration_seconds,
-        total_frames: (duration_seconds * 44_100.0) as u64,
-        lods: vec![lod],
-    }
-}
-
-/// Produce a synthetic PCM buffer for the demo clips, then push it through the
-/// real LOD builder so the demo and decoded paths share rendering code.
-fn generate_waveform_preview(name: &str, duration_beats: f32, bpm: f32) -> WaveformPreview {
-    let sample_rate: u32 = 44_100;
-    let duration_seconds = duration_beats as f64 * (60.0 / bpm.max(1.0) as f64);
-    let total_samples = (duration_seconds * sample_rate as f64) as u64;
-    // Cap synthetic size so we don't burn megabytes for the demo defaults.
-    let total_samples = total_samples.min(sample_rate as u64 * 30);
-
-    let mut lods = LodSet::new(total_samples);
-    let name_lower = name.to_lowercase();
-    let kind = if name_lower.contains("drum") || name_lower.contains("loop") {
-        SynthKind::Drums
-    } else if name_lower.contains("vocal")
-        || name_lower.contains("harmony")
-        || name_lower.contains("dry")
-    {
-        SynthKind::Vocals
-    } else {
-        SynthKind::Generic
-    };
-
-    for i in 0..total_samples as usize {
-        let t = i as f32 / sample_rate as f32;
-        let v = synth_sample(kind, t, duration_seconds as f32);
-        lods.push(v.clamp(-1.0, 1.0));
-    }
-
-    WaveformPreview {
-        sample_rate,
-        channels: 1,
-        duration_seconds,
-        total_frames: total_samples,
-        lods: lods.finalize(),
-    }
-}
-
 #[derive(Copy, Clone)]
 enum SynthKind {
     Drums,
@@ -392,7 +748,7 @@ enum SynthKind {
 }
 
 fn synth_sample(kind: SynthKind, t: f32, duration: f32) -> f32 {
-    let beat = t * 2.0; // arbitrary tempo for synthetic preview
+    let beat = t * 2.0;
     match kind {
         SynthKind::Drums => {
             let beat_fract = beat.fract();
@@ -431,13 +787,6 @@ fn synth_sample(kind: SynthKind, t: f32, duration: f32) -> f32 {
     }
 }
 
-// ── LOD selection helper used by the renderer ────────────────────────────────
-
-/// Return the LOD whose `samples_per_peak` best matches the requested density,
-/// preferring the coarsest LOD that still gives ≥ ~0.5 peaks per pixel.
-///
-/// `samples_per_pixel`: how many decoded samples fall under one screen pixel for
-/// the clip at the current zoom level.
 pub fn pick_lod<'a>(
     preview: &'a WaveformPreview,
     samples_per_pixel: f32,
@@ -445,9 +794,6 @@ pub fn pick_lod<'a>(
     if preview.lods.is_empty() {
         return None;
     }
-    // Target: choose the largest spp that is still ≤ samples_per_pixel.
-    // i.e. coarser than 1 peak per pixel by no more than 1 level — keeps detail
-    // without overdrawing thousands of bars per clip.
     let target = samples_per_pixel.max(1.0);
     let mut best: &WaveformLod = &preview.lods[0];
     for lod in &preview.lods {

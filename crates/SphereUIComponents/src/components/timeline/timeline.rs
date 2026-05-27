@@ -7,7 +7,6 @@ use crate::components::timeline::timeline_state::{
     TrackDragItem, TrackType, HEADER_WIDTH, RULER_HEIGHT, TRACK_HEIGHT,
 };
 use crate::components::timeline::track_list::track_list;
-use crate::components::timeline::waveform_cache;
 use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -275,71 +274,8 @@ impl Timeline {
             .import_audio_at(path_key.clone(), clip_name, drop_x, drop_y);
         self.mark_project_changed(cx);
         self.mark_media_changed(cx);
-        Self::spawn_audio_import_jobs(path.to_path_buf(), path_key, cx);
+        super::audio_import::spawn_timeline_import(path.to_path_buf(), cx.entity().clone(), None, cx);
         true
-    }
-
-    pub fn spawn_audio_import_jobs(
-        path: std::path::PathBuf,
-        path_key: String,
-        cx: &mut Context<Self>,
-    ) {
-        cx.spawn(async move |this, cx| {
-            let meta_path = path.clone();
-            let metadata = cx
-                .background_executor()
-                .spawn(async move { DAUx::probe_audio_file(&meta_path) })
-                .await;
-
-            match metadata {
-                Ok(info) => {
-                    let format = info.format.as_str().to_string();
-                    let meta_path_key = path_key.clone();
-                    let _ = this.update(cx, move |this, cx| {
-                        this.state.update_audio_clip_metadata(
-                            &meta_path_key,
-                            &format,
-                            info.sample_rate,
-                            info.channels,
-                            info.total_frames,
-                            info.duration_seconds,
-                        );
-                        this.mark_project_changed(cx);
-                        this.mark_media_changed(cx);
-                        cx.notify();
-                    });
-                }
-                Err(error) => {
-                    eprintln!(
-                        "[audio-import] WARNING using fallback duration because metadata failed: path={} error={}",
-                        path_key, error
-                    );
-                }
-            }
-
-            let decode_path = path.clone();
-            let preview = cx
-                .background_executor()
-                .spawn(async move { waveform_cache::decode_and_cache_file(&decode_path) })
-                .await;
-            if let Some(preview) = preview {
-                let _ = this.update(cx, move |this, cx| {
-                    if let Some(source_duration) =
-                        this.state.audio_source_duration_seconds(&path_key)
-                    {
-                        let delta = (preview.duration_seconds - source_duration).abs();
-                        if delta > 0.01 {
-                            eprintln!(
-                                "[waveform] WARNING preview duration differs from DirectAudioEngine metadata: path={} preview_duration_seconds={:.6} metadata_duration_seconds={:.6}",
-                                path_key, preview.duration_seconds, source_duration
-                            );
-                        }
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
     }
 }
 
@@ -485,6 +421,7 @@ impl Render for Timeline {
                     gain: 1.0,
                     clip_type,
                     muted: false,
+                    audio_import: crate::components::timeline::timeline_state::AudioImportState::default(),
                 });
                 this.mark_project_changed(cx);
             }
