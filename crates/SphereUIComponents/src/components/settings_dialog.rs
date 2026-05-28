@@ -27,7 +27,10 @@ use crate::overlay::{
     compute_overlay_position, form_combo_trigger_bounds, refresh_form_anchor,
     settings_form_column, OverlayAnchor, OverlayPlacement, OverlaySize, COMBO_TRIGGER_HEIGHT,
 };
-use crate::settings::{SettingsModel, SettingsSchema};
+use crate::components::timeline::render::{list_available_gpu_devices, GpuDeviceInfo};
+use crate::settings::{
+    GpuDevicePreference, RenderMode, SettingsModel, SettingsSchema,
+};
 use crate::theme::{self, Colors};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +183,8 @@ pub enum HardwareCombo {
     AutosaveMaxBackups,
     SampleRate,
     BufferSize,
+    Renderer,
+    GpuDevice,
 }
 
 #[derive(Clone)]
@@ -320,6 +325,97 @@ fn settings_header(title: &'static str, _icon_path: &'static str) -> impl IntoEl
     settings_section_title(title)
 }
 
+/// Performance > Rendering section. Renderer and GPU Device choices are
+/// "restart required" — applied at next launch by `WgpuTimelineRenderer`
+/// construction. We deliberately don't hot-swap the renderer at runtime
+/// to avoid mid-session GPU device churn.
+fn performance_section(
+    schema: &SettingsSchema,
+    open_combo: Option<HardwareCombo>,
+    on_toggle: Arc<dyn Fn(HardwareCombo, Option<OverlayAnchor>, &mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
+    let render_mode = schema.performance.render_mode;
+    let gpu_pref = schema.performance.gpu_device.clone();
+    // Enumerate once for label/status; the dropdown re-enumerates on open
+    // to stay current with hot-pluggable eGPUs / driver changes.
+    let detected = list_available_gpu_devices();
+    let detected_count = detected.len();
+    let enumeration_failed_unexpectedly = false; // catch_unwind path inside list_available_gpu_devices already returns Vec::new on panic; treat empty as "no GPU" rather than failure.
+
+    let renderer_label = render_mode.label().to_string();
+    let renderer_row = hardware_select(
+        HardwareCombo::Renderer,
+        "settings-performance-renderer-trigger",
+        &renderer_label,
+        open_combo,
+        on_toggle.clone(),
+    );
+
+    let gpu_device_label = match &gpu_pref {
+        GpuDevicePreference::Auto => "Auto".to_string(),
+        GpuDevicePreference::DeviceId(id) => detected
+            .iter()
+            .find(|d| &d.id == id)
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| "Auto".to_string()),
+    };
+    let gpu_device_row = hardware_select(
+        HardwareCombo::GpuDevice,
+        "settings-performance-gpu-device-trigger",
+        &gpu_device_label,
+        open_combo,
+        on_toggle,
+    );
+
+    let (status_text, status_color) = match (render_mode, detected_count) {
+        (RenderMode::CpuRender, _) => (
+            "CPU Render active (GPUI paint fallback).".to_string(),
+            Colors::text_secondary(),
+        ),
+        (RenderMode::GpuAcceleration, 0) => (
+            "No GPU adapter detected. CPU Render fallback will be used.".to_string(),
+            Colors::status_warning(),
+        ),
+        (RenderMode::GpuAcceleration, n) => (
+            format!("GPU Acceleration ready — {n} adapter(s) detected."),
+            Colors::status_success(),
+        ),
+    };
+
+    let mut card = settings_section_card()
+        .child(settings_section_title("Rendering"))
+        .child(settings_section_hint(
+            "Choose how the timeline is drawn. GPU Acceleration uses WGPU when available; CPU Render forces the GPUI paint fallback (best compatibility).",
+        ))
+        .child(settings_daw_row("Renderer *", renderer_row))
+        .child(settings_daw_row("GPU Device *", gpu_device_row))
+        .child(settings_daw_row(
+            "Status",
+            div()
+                .text_size(px(10.5))
+                .text_color(status_color)
+                .child(status_text),
+        ));
+
+    if enumeration_failed_unexpectedly {
+        card = card.child(
+            div()
+                .pt(px(4.0))
+                .text_size(px(10.0))
+                .text_color(Colors::status_warning())
+                .child("GPU enumeration failed. CPU Render fallback is available."),
+        );
+    }
+
+    card.child(
+        div()
+            .pt(px(8.0))
+            .text_size(px(10.0))
+            .text_color(Colors::text_faint())
+            .child("* Restart Futureboard Studio to apply this change."),
+    )
+}
+
 fn tab_matches_search(tab: SettingsTab, query: &str, is_match: &dyn Fn(&str, &[&str]) -> bool) -> bool {
     if query.is_empty() {
         return true;
@@ -370,7 +466,11 @@ fn tab_matches_search(tab: SettingsTab, query: &str, is_match: &dyn Fn(&str, &[&
                 || is_match("Samples", &["sample", "media"])
         }
         SettingsTab::Shortcuts => is_match("Shortcut", &["key", "command"]),
-        SettingsTab::Performance => is_match("Performance", &["cpu", "engine"]),
+        SettingsTab::Performance => {
+            is_match("Renderer", &["renderer", "gpu", "cpu", "wgpu"])
+                || is_match("GPU Device", &["gpu", "device", "adapter"])
+                || is_match("Performance", &["cpu", "engine"])
+        }
         SettingsTab::Advanced => is_match("Advanced", &["experimental"]),
         SettingsTab::About => is_match("About", &["version"]),
     }
@@ -1506,6 +1606,22 @@ fn build_settings_content(
         );
     }
 
+    // Performance Panel — Renderer + GPU Device selection.
+    if (state.active_tab == SettingsTab::Performance && query.is_empty())
+        || (!query.is_empty()
+            && (is_match("Renderer", &["renderer", "gpu", "cpu", "wgpu"])
+                || is_match("GPU Device", &["gpu", "device", "adapter"])))
+    {
+        sections.push(
+            performance_section(
+                schema,
+                callbacks.open_hardware_combo,
+                callbacks.on_toggle_hardware_combo.clone(),
+            )
+            .into_any_element(),
+        );
+    }
+
     // Plugins Panel (vst directories list etc.)
     if (state.active_tab == SettingsTab::Plugins && query.is_empty()) || (!query.is_empty() && (
         is_match("VST3 CLAP Formats", &["vst3", "clap", "plugins"]) ||
@@ -1641,9 +1757,6 @@ fn build_settings_content(
             }
             SettingsTab::Shortcuts => {
                 "Search, edit, and reset keyboard commands grouped by workflow area."
-            }
-            SettingsTab::Performance => {
-                "Audio engine buffering, UI frame budget, and waveform cache controls."
             }
             SettingsTab::Advanced => {
                 "Experimental features, developer tools, and low-level engine options."
@@ -2063,6 +2176,87 @@ fn hardware_combo_overlay(
                     let buf = value.parse::<u32>().unwrap_or(256);
                     up(
                         Arc::new(move |s| s.general.project_defaults.buffer_size = buf),
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .into_any_element()
+        }
+        HardwareCombo::Renderer => {
+            let selected = schema.performance.render_mode.label().to_string();
+            let options: Vec<String> = vec![
+                RenderMode::GpuAcceleration.label().to_string(),
+                RenderMode::CpuRender.label().to_string(),
+            ];
+            let up = on_update;
+            combo_box_string_menu(
+                "settings-performance-renderer-menu",
+                position,
+                &selected,
+                &options,
+                Arc::new(move |value, window, cx| {
+                    let mode = if value == RenderMode::CpuRender.label() {
+                        RenderMode::CpuRender
+                    } else {
+                        RenderMode::GpuAcceleration
+                    };
+                    up(
+                        Arc::new(move |s| s.performance.render_mode = mode),
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .into_any_element()
+        }
+        HardwareCombo::GpuDevice => {
+            // Enumerate adapters on open. Cheap on Windows/macOS; the
+            // dropdown shows the actual device names instead of a stale
+            // cached list. Falls back to "Auto" only on enumeration failure.
+            let detected = list_available_gpu_devices();
+            let mut options: Vec<String> = Vec::with_capacity(detected.len() + 1);
+            options.push("Auto".to_string());
+            for device in &detected {
+                options.push(device.name.clone());
+            }
+            if detected.is_empty() {
+                options.push("No GPU device found".to_string());
+            }
+            let selected = match &schema.performance.gpu_device {
+                GpuDevicePreference::Auto => "Auto".to_string(),
+                GpuDevicePreference::DeviceId(id) => detected
+                    .iter()
+                    .find(|d| &d.id == id)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_else(|| "Auto".to_string()),
+            };
+            // Build a stable label -> id map for commit time.
+            let id_lookup: Vec<(String, String)> = detected
+                .iter()
+                .map(|d| (d.name.clone(), d.id.clone()))
+                .collect();
+            let up = on_update;
+            combo_box_string_menu(
+                "settings-performance-gpu-device-menu",
+                position,
+                &selected,
+                &options,
+                Arc::new(move |value, window, cx| {
+                    if value == "No GPU device found" {
+                        return;
+                    }
+                    let next = if value == "Auto" {
+                        GpuDevicePreference::Auto
+                    } else {
+                        id_lookup
+                            .iter()
+                            .find(|(name, _)| name == &value)
+                            .map(|(_, id)| GpuDevicePreference::DeviceId(id.clone()))
+                            .unwrap_or(GpuDevicePreference::Auto)
+                    };
+                    up(
+                        Arc::new(move |s| s.performance.gpu_device = next.clone()),
                         window,
                         cx,
                     );

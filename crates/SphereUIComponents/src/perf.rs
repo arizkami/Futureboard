@@ -450,6 +450,85 @@ pub fn record_notify(reason: &'static str) {
     NOTIFY.with(|n| n.borrow_mut().record(reason));
 }
 
+/// Render-cost setting profile applied by the UI to reduce frame cost on
+/// low-end GPUs. Controlled at runtime via `FUTUREBOARD_POWER_MODE`
+/// (`lowend` / `balanced` / `performance`) and read by render code via
+/// the cheap accessors below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerMode {
+    Balanced,
+    Performance,
+    LowEnd,
+}
+
+impl PowerMode {
+    /// Cap minor grid line density: drop sub-beat lines on low-end so the
+    /// timeline grid stops drawing 100+ thin lines per frame.
+    pub fn allow_sub_grid_lines(self) -> bool {
+        !matches!(self, PowerMode::LowEnd)
+    }
+
+    /// Cap meter update rate (Hz). Lower = fewer notify/redraw triggers.
+    pub fn meter_update_hz(self) -> f32 {
+        match self {
+            PowerMode::Performance => 60.0,
+            PowerMode::Balanced => 30.0,
+            PowerMode::LowEnd => 15.0,
+        }
+    }
+
+    /// Minimum meter delta required to mark the meter dirty. Tiny meter
+    /// flicker doesn't justify a repaint on low-end GPUs.
+    pub fn meter_min_delta(self) -> f32 {
+        match self {
+            PowerMode::Performance => 0.005,
+            PowerMode::Balanced => 0.01,
+            PowerMode::LowEnd => 0.025,
+        }
+    }
+
+    /// Whether expensive visual effects (shadows, glows, blurs over dense
+    /// timeline regions) should be drawn.
+    pub fn allow_expensive_effects(self) -> bool {
+        !matches!(self, PowerMode::LowEnd)
+    }
+
+    /// Multiplier on the maximum grid line count budget for the arrangement
+    /// view. < 1.0 caps grid density on low-end GPUs.
+    pub fn grid_line_budget_scale(self) -> f32 {
+        match self {
+            PowerMode::Performance => 1.0,
+            PowerMode::Balanced => 1.0,
+            PowerMode::LowEnd => 0.5,
+        }
+    }
+}
+
+/// Returns the currently active power mode. Driven by the
+/// `FUTUREBOARD_POWER_MODE` env var so we can ship and dogfood it without
+/// blocking on a full settings UI. The result is cached on first read —
+/// changing the env var requires a restart.
+pub fn power_mode() -> PowerMode {
+    static MODE: std::sync::OnceLock<PowerMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("FUTUREBOARD_POWER_MODE")
+        .map(|v| v.to_ascii_lowercase())
+        .ok()
+        .as_deref()
+    {
+        Some("lowend") | Some("low-end") | Some("low_end") | Some("low") => PowerMode::LowEnd,
+        Some("performance") | Some("perf") | Some("high") => PowerMode::Performance,
+        _ => PowerMode::Balanced,
+    })
+}
+
+/// Whether the `FUTUREBOARD_PERF_DEBUG` flag is active. Enables per-second
+/// perf summary lines covering FPS, visible counts, notify/sec, and meter
+/// update rate.
+pub fn perf_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_PERF_DEBUG").is_some())
+}
+
 /// Whether the optional perf HUD overlay is enabled.
 pub fn perf_hud_enabled() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

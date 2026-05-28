@@ -149,6 +149,26 @@ pub mod volume {
     }
 }
 
+/// Playback follow / auto-scroll behavior for the timeline viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoScrollMode {
+    /// Never auto-scroll. User controls the viewport entirely.
+    Off,
+    /// When the playhead reaches the right edge, page forward by ~90% of
+    /// the viewport width so the playhead lands near the left side again.
+    /// Cheap, predictable, and friendly to low-end GPUs.
+    Page,
+    /// Keep the playhead at a roughly fixed fraction of the viewport while
+    /// playing. Smoother, but more scroll churn — left as an opt-in.
+    Continuous,
+}
+
+impl Default for AutoScrollMode {
+    fn default() -> Self {
+        AutoScrollMode::Page
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimelineTool {
     Pointer,
@@ -275,6 +295,11 @@ pub struct TimelineState {
     pub drag_origin_index: Option<usize>,
     pub drag_current_y: f32,
     pub drag_target_index: Option<usize>,
+    /// True when the timeline viewport should follow the playhead during
+    /// playback. Toggled off temporarily when the user manually scrolls or
+    /// drags the viewport; can be re-enabled from the Follow button.
+    pub follow_playhead: bool,
+    pub auto_scroll_mode: AutoScrollMode,
 }
 
 impl Default for TimelineState {
@@ -324,6 +349,8 @@ impl Default for TimelineState {
             drag_origin_index: None,
             drag_current_y: 0.0,
             drag_target_index: None,
+            follow_playhead: true,
+            auto_scroll_mode: AutoScrollMode::Page,
         }
     }
 }
@@ -538,6 +565,8 @@ impl TimelineState {
             drag_origin_index: None,
             drag_current_y: 0.0,
             drag_target_index: None,
+            follow_playhead: true,
+            auto_scroll_mode: AutoScrollMode::Page,
         }
     }
 
@@ -693,9 +722,18 @@ impl TimelineState {
     }
 
     pub fn get_arrangement_grid_lines(&self, viewport_width: f32) -> Vec<GridLine> {
-        const MIN_LINE_SPACING_PX: f32 = 8.0;
+        let power = crate::perf::power_mode();
+        const MIN_LINE_SPACING_PX_BASE: f32 = 8.0;
+        // Force sub lines further apart on low-end so we draw fewer of them.
+        let min_line_spacing_px = if matches!(power, crate::perf::PowerMode::LowEnd) {
+            16.0
+        } else {
+            MIN_LINE_SPACING_PX_BASE
+        };
         const MIN_LABEL_SPACING_PX: f32 = 46.0;
-        const MAX_GRID_LINES: usize = 1200;
+        const MAX_GRID_LINES_BASE: usize = 1200;
+        let max_grid_lines =
+            (MAX_GRID_LINES_BASE as f32 * power.grid_line_budget_scale()) as usize;
 
         let ppb = self.pixels_per_beat().max(0.0001);
         let bpb = self.beats_per_bar();
@@ -752,7 +790,9 @@ impl TimelineState {
             }
         }
 
-        let sub_step = if ppb >= 96.0 {
+        let sub_step = if !power.allow_sub_grid_lines() {
+            None
+        } else if ppb >= 96.0 {
             Some(1.0 / 16.0)
         } else if ppb >= 32.0 {
             Some(1.0 / 4.0)
@@ -760,7 +800,7 @@ impl TimelineState {
             None
         };
 
-        if let Some(step) = sub_step.filter(|step| step * ppb >= MIN_LINE_SPACING_PX) {
+        if let Some(step) = sub_step.filter(|step| step * ppb >= min_line_spacing_px) {
             let first_sub = (start_beat / step).floor() - 1.0;
             let last_sub = (end_beat / step).ceil() + 1.0;
             let mut slot = first_sub;
@@ -772,8 +812,8 @@ impl TimelineState {
 
         lines.sort_by(|a, b| a.x.total_cmp(&b.x));
 
-        if lines.len() > MAX_GRID_LINES {
-            lines.truncate(MAX_GRID_LINES);
+        if lines.len() > max_grid_lines {
+            lines.truncate(max_grid_lines);
         }
 
         let mut last_label_x = f32::NEG_INFINITY;
@@ -1150,6 +1190,68 @@ impl TimelineState {
         self.viewport.scroll_y = self.viewport.scroll_y.clamp(0.0, max_y);
         self.viewport.target_scroll_x = self.viewport.target_scroll_x.clamp(0.0, max_x);
         self.viewport.target_scroll_y = self.viewport.target_scroll_y.clamp(0.0, max_y);
+    }
+
+    /// Keep the playhead inside the visible viewport while playing.
+    /// Returns true when the viewport scrolled (caller should `cx.notify`).
+    /// Cheap — no allocation, just a couple of float comparisons.
+    pub fn update_auto_scroll_for_playhead(&mut self, playhead_beats: f32) -> bool {
+        if !self.follow_playhead || self.auto_scroll_mode == AutoScrollMode::Off {
+            return false;
+        }
+        let viewport_width = self.viewport.viewport_width;
+        if viewport_width <= 1.0 {
+            return false;
+        }
+        let pps = self.viewport.pixels_per_second.max(0.0001);
+        let playhead_content_x = playhead_beats.max(0.0) * self.seconds_per_beat() * pps;
+        let scroll_x = self.viewport.scroll_x;
+
+        // Trigger thresholds: right 15% / left 5% of the viewport.
+        let right_trigger = scroll_x + viewport_width * 0.85;
+        let left_trigger = scroll_x + viewport_width * 0.05;
+
+        let new_scroll_x = match self.auto_scroll_mode {
+            AutoScrollMode::Off => return false,
+            AutoScrollMode::Page => {
+                if playhead_content_x > right_trigger {
+                    // Page forward so the playhead lands ~10% into the new viewport.
+                    (playhead_content_x - viewport_width * 0.10).max(0.0)
+                } else if playhead_content_x < scroll_x {
+                    // Playhead seeked or wrapped back behind the viewport — recenter.
+                    (playhead_content_x - viewport_width * 0.10).max(0.0)
+                } else {
+                    return false;
+                }
+            }
+            AutoScrollMode::Continuous => {
+                if playhead_content_x > right_trigger || playhead_content_x < left_trigger {
+                    (playhead_content_x - viewport_width * 0.40).max(0.0)
+                } else {
+                    return false;
+                }
+            }
+        };
+
+        if (new_scroll_x - scroll_x).abs() < 0.5 {
+            return false;
+        }
+        self.viewport.scroll_x = new_scroll_x;
+        self.viewport.target_scroll_x = new_scroll_x;
+        true
+    }
+
+    /// Called when the user manually scrolls/drags the viewport — temporarily
+    /// disables follow-playhead so playback won't fight the user. Re-enable
+    /// by toggling the Follow control.
+    pub fn note_user_scrolled(&mut self) {
+        if self.follow_playhead {
+            self.follow_playhead = false;
+        }
+    }
+
+    pub fn set_follow_playhead(&mut self, follow: bool) {
+        self.follow_playhead = follow;
     }
 
     pub fn smooth_scroll_towards_target(&mut self) -> bool {

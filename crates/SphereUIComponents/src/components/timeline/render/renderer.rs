@@ -35,6 +35,20 @@ pub enum TimelineRendererBackend {
     Wgpu,
 }
 
+/// Process-wide renderer preference set from saved Settings at startup.
+/// The thread-local renderer construction in `timeline_surface.rs` reads
+/// this on first use. `FUTUREBOARD_WGPU_TIMELINE=1` continues to win as
+/// a developer override.
+static PREFERRED_BACKEND: std::sync::OnceLock<TimelineRendererBackend> =
+    std::sync::OnceLock::new();
+
+/// Called once at app startup with the user's saved Renderer choice.
+/// Settings UI is gated on a restart marker, so we never mutate this
+/// after the first call. Subsequent calls are no-ops.
+pub fn set_preferred_backend(backend: TimelineRendererBackend) {
+    let _ = PREFERRED_BACKEND.set(backend);
+}
+
 impl TimelineRendererBackend {
     pub fn from_env() -> Self {
         #[cfg(feature = "gpu-renderer")]
@@ -42,6 +56,9 @@ impl TimelineRendererBackend {
             if std::env::var_os("FUTUREBOARD_WGPU_TIMELINE").is_some() {
                 return Self::Wgpu;
             }
+        }
+        if let Some(saved) = PREFERRED_BACKEND.get() {
+            return *saved;
         }
         Self::GpuiPaint
     }

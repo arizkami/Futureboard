@@ -28,7 +28,7 @@ sphere_ui_components = { path = "../../crates/SphereUIComponents" }
 sphere-direct-audio-engine = { path = "../../crates/SphereDirectAudioEngine", default-features = false }
 
 [features]
-default = []
+default = ["gpu-renderer"]
 gpu-renderer = ["sphere_ui_components/gpu-renderer"]
 
 [build-dependencies]

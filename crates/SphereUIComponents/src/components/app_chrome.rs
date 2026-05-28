@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, px, svg, App, InteractiveElement, IntoElement, MouseButton, ParentElement, Styled,
-    Window, WindowControlArea,
+    div, px, svg, App, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement,
+    MouseButton, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
+    WindowControlArea,
 };
 
 use crate::assets;
@@ -20,6 +21,46 @@ use crate::theme::Colors;
 pub type MenuOpenCb = menu_bar::MenuOpenCb;
 pub type ChromeActionCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 pub type ProjectOpenCb = Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>;
+pub type BpmChangeCb = Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>;
+pub type BpmDragCb = Arc<dyn Fn(&BpmDragSample, &mut Window, &mut App) + 'static>;
+
+pub const BPM_MIN: f32 = 20.0;
+pub const BPM_MAX: f32 = 300.0;
+
+static BPM_DRAG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_bpm_drag_id() -> u64 {
+    BPM_DRAG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// One drag move sample. The handler on the owning entity accumulates
+/// `cur_y - prev_y` deltas across samples — never the absolute distance
+/// from the drag origin — so the cursor hitting the top/bottom of the
+/// window doesn't cap the BPM range (FL Studio–style behavior).
+#[derive(Clone, Copy, Debug)]
+pub struct BpmDragSample {
+    pub drag_id: u64,
+    pub start_bpm: f32,
+    pub cur_y: f32,
+    pub shift: bool,
+    pub control: bool,
+    pub platform: bool,
+}
+
+/// Drag state for the transport BPM display. Carries the unique `drag_id`
+/// so the receiver can tell a new drag from a continuation of the active
+/// one, plus the captured `start_bpm`.
+#[derive(Clone, Debug)]
+pub struct BpmDrag {
+    pub drag_id: u64,
+    pub start_bpm: f32,
+}
+
+impl Render for BpmDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
 
 #[derive(Clone)]
 pub struct ProjectChromeState {
@@ -45,6 +86,7 @@ pub struct TransportChromeState {
     pub loop_enabled: bool,
     pub metronome_enabled: bool,
     pub position_label: String,
+    pub bpm: f32,
     pub bpm_label: String,
     pub time_signature_label: String,
     pub on_return_to_start: ChromeActionCb,
@@ -52,6 +94,83 @@ pub struct TransportChromeState {
     pub on_stop: ChromeActionCb,
     pub on_loop_toggle: ChromeActionCb,
     pub on_metronome_toggle: ChromeActionCb,
+    pub on_set_bpm: BpmChangeCb,
+    pub on_bpm_drag: BpmDragCb,
+}
+
+fn transport_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_TRANSPORT_DEBUG").is_some())
+}
+
+fn bpm_display(state_bpm: f32, label: String, on_bpm_drag: BpmDragCb) -> impl IntoElement {
+    let on_bpm_drag_move = on_bpm_drag.clone();
+    div()
+        .id("transport-bpm")
+        .w(px(36.0))
+        .h(px(19.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .bg(Colors::surface_input())
+        .text_color(Colors::text_primary())
+        .text_size(px(11.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .cursor(gpui::CursorStyle::ResizeUpDown)
+        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .child(label)
+        .occlude()
+        .on_drag(
+            BpmDrag {
+                drag_id: 0,
+                start_bpm: state_bpm,
+            },
+            move |drag, _offset, _window, cx| {
+                let id = next_bpm_drag_id();
+                let started = BpmDrag {
+                    drag_id: id,
+                    start_bpm: drag.start_bpm,
+                };
+                cx.new(|_| started)
+            },
+        )
+        .on_drag_move::<BpmDrag>(move |event: &DragMoveEvent<BpmDrag>, window, cx| {
+            let drag = event.drag(cx);
+            let mods = event.event.modifiers;
+            let sample = BpmDragSample {
+                drag_id: drag.drag_id,
+                start_bpm: drag.start_bpm,
+                cur_y: event.event.position.y.into(),
+                shift: mods.shift,
+                control: mods.control,
+                platform: mods.platform,
+            };
+            on_bpm_drag_move(&sample, window, cx);
+        })
+}
+
+/// Per-pixel BPM sensitivity for a given modifier combination. These are
+/// chosen low on purpose: the same pixel delta means the same BPM change
+/// whether the window is 600 px or 1800 px tall (maximized). Previously
+/// 0.5 BPM/px felt fine windowed but ran away at full-screen heights;
+/// 0.15 BPM/px gives a consistent feel.
+pub fn bpm_drag_sensitivity(shift: bool, control_or_platform: bool) -> f32 {
+    if shift {
+        0.03
+    } else if control_or_platform {
+        0.5
+    } else {
+        0.15
+    }
+}
+
+/// Minimum per-event delta (in px) accepted by the BPM drag handler.
+/// Below this, the event is treated as cursor jitter and ignored.
+pub const BPM_DRAG_DEADZONE_PX: f32 = 0.5;
+
+pub fn bpm_debug_enabled() -> bool {
+    transport_debug_enabled()
 }
 
 fn menu_area(
@@ -130,6 +249,9 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
     let on_stop = state.on_stop.clone();
     let on_loop = state.on_loop_toggle.clone();
     let on_metronome = state.on_metronome_toggle.clone();
+    let on_bpm_drag = state.on_bpm_drag.clone();
+    let bpm_value = state.bpm;
+    let bpm_label = state.bpm_label.clone();
 
     div()
         .flex()
@@ -241,20 +363,7 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .child("BPM"),
                 )
-                .child(
-                    div()
-                        .w(px(32.0))
-                        .h(px(19.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_md()
-                        .bg(Colors::surface_input())
-                        .text_color(Colors::text_primary())
-                        .text_size(px(11.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(state.bpm_label),
-                ),
+                .child(bpm_display(bpm_value, bpm_label, on_bpm_drag)),
         )
         // Time signature
         .child(

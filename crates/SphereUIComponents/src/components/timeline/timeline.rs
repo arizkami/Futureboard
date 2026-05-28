@@ -769,6 +769,9 @@ impl Render for Timeline {
                     (delta.0, delta.1)
                 };
                 this.state.scroll_by(scroll_x, scroll_y, max_x, max_y);
+                if scroll_x.abs() > 0.5 {
+                    this.state.note_user_scrolled();
+                }
                 window.prevent_default();
                 cx.stop_propagation();
                 cx.notify();

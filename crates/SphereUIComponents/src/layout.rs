@@ -167,6 +167,24 @@ pub struct StudioLayout {
     pending_play_after_sync: bool,
     last_engine_playhead_beat: f32,
     last_engine_sync: Instant,
+    /// Last time we pushed engine meter levels into timeline state. Used to
+    /// throttle meter updates per the active `PowerMode` so low-end GPUs
+    /// don't repaint 60 Hz for sub-perceptual meter wiggles.
+    last_meter_apply: Instant,
+    /// Active BPM drag id (matches `BpmDragSample::drag_id`). Resets when a
+    /// new drag begins. Drives delta-accumulated BPM editing.
+    bpm_drag_active_id: Option<u64>,
+    /// Previous cursor Y from the last BPM drag sample. Each new sample
+    /// applies `cur_y - prev_y`, so dragging is unbounded by window
+    /// height — FL Studio–style behavior.
+    bpm_drag_prev_y: f32,
+    /// Accumulated BPM offset (signed) for the active drag.
+    bpm_drag_accum: f32,
+    /// Last time we sent `engine.set_bpm` during a live BPM drag. Throttles
+    /// audio-engine tempo commits to ~30 Hz; the UI state still updates
+    /// every event, but we don't flood the engine with sub-perceptual
+    /// tempo writes during fast vertical drags.
+    last_engine_bpm_commit: Option<Instant>,
     /// Owns keyboard focus for the studio surface. Without a focused
     /// element GPUI never dispatches key events to `capture_key_down`,
     /// so we focus this handle on first render — that is what makes
@@ -285,6 +303,38 @@ impl StudioLayout {
         cx.set_global(GlobalSettingsModel(settings.clone()));
 
         let schema = settings.read(cx).current.clone();
+
+        // Apply saved Renderer choice — Settings is "* Restart required",
+        // so this only takes effect at process start. The env var
+        // `FUTUREBOARD_WGPU_TIMELINE=1` still wins as a dev override.
+        {
+            use crate::components::timeline::render::{
+                set_preferred_backend, set_preferred_gpu_device_id, TimelineRendererBackend,
+            };
+            let chosen = match schema.performance.render_mode {
+                crate::settings::RenderMode::CpuRender => TimelineRendererBackend::GpuiPaint,
+                #[cfg(feature = "gpu-renderer")]
+                crate::settings::RenderMode::GpuAcceleration => TimelineRendererBackend::Wgpu,
+                #[cfg(not(feature = "gpu-renderer"))]
+                crate::settings::RenderMode::GpuAcceleration => {
+                    TimelineRendererBackend::GpuiPaint
+                }
+            };
+            set_preferred_backend(chosen);
+            // Saved GPU device id (empty string == Auto).
+            let device_id = match &schema.performance.gpu_device {
+                crate::settings::GpuDevicePreference::Auto => "",
+                crate::settings::GpuDevicePreference::DeviceId(id) => id.as_str(),
+            };
+            set_preferred_gpu_device_id(device_id);
+            if std::env::var_os("FUTUREBOARD_GPU_RENDERER_DEBUG").is_some() {
+                eprintln!(
+                    "[gpu-renderer] startup: render_mode={:?} gpu_device={:?}",
+                    schema.performance.render_mode, schema.performance.gpu_device
+                );
+            }
+        }
+
         let backend = match schema.hardware.audio.driver_type.as_str() {
             "WASAPI Exclusive" => DAUx::AudioBackend::WasapiExclusive,
             _ => DAUx::AudioBackend::Auto,
@@ -461,6 +511,11 @@ impl StudioLayout {
             pending_play_after_sync: false,
             last_engine_playhead_beat: 0.0,
             last_engine_sync: Instant::now(),
+            last_meter_apply: Instant::now(),
+            bpm_drag_active_id: None,
+            bpm_drag_prev_y: 0.0,
+            bpm_drag_accum: 0.0,
+            last_engine_bpm_commit: None,
             focus_handle: cx.focus_handle(),
             logged_unsupported_commands: HashSet::new(),
             frame_diag: FrameDiagnostics::new(),
@@ -547,8 +602,19 @@ impl StudioLayout {
                 // No threshold while playing — even sub-pixel beat motion
                 // matters for the bar:beat:tick readout in the chrome.
                 let next = interpolated.max(0.0);
+                let mut dirty = false;
                 if timeline.state.transport.playhead_beats != next {
                     timeline.state.transport.playhead_beats = next;
+                    dirty = true;
+                }
+                // Follow-playhead / auto-scroll. Keeps the playhead visible
+                // during playback; user-scroll temporarily disables it via
+                // `note_user_scrolled`. Cheap — no rebuild, just viewport
+                // scroll_x update.
+                if timeline.state.update_auto_scroll_for_playhead(next) {
+                    dirty = true;
+                }
+                if dirty {
                     cx.notify();
                 }
             });
@@ -590,6 +656,15 @@ impl StudioLayout {
         let Some(engine) = self.audio_engine.as_ref() else {
             return;
         };
+        // Throttle meter polling to `PowerMode::meter_update_hz`. The audio
+        // poll fires at 60 Hz; on low-end GPUs that's too many meter writes
+        // and the resulting notify cascade is what drove FPS drops.
+        let power = crate::perf::power_mode();
+        let min_interval = Duration::from_secs_f32(1.0 / power.meter_update_hz().max(1.0));
+        if self.last_meter_apply.elapsed() < min_interval {
+            return;
+        }
+        self.last_meter_apply = Instant::now();
         let meters = engine.meters();
         let _ = self.timeline.update(cx, |timeline, _cx| {
             for track_meter in meters.tracks {
@@ -862,6 +937,115 @@ impl StudioLayout {
                 eprintln!("[audio] set metronome failed: {error}");
             }
         }
+    }
+
+    /// Apply a delta-based BPM drag sample. Accumulates `cur_y - prev_y`
+    /// against the captured `start_bpm` so the BPM range is bounded by
+    /// modifier sensitivity, not by the window height — i.e. the cursor
+    /// hitting the screen edge no longer caps the value (FL Studio style).
+    fn apply_bpm_drag_sample(&mut self, sample: components::BpmDragSample, cx: &mut Context<Self>) {
+        let new_drag = self.bpm_drag_active_id != Some(sample.drag_id);
+        if new_drag {
+            self.bpm_drag_active_id = Some(sample.drag_id);
+            self.bpm_drag_prev_y = sample.cur_y;
+            self.bpm_drag_accum = 0.0;
+            self.last_engine_bpm_commit = None;
+            if components::bpm_debug_enabled() {
+                let maximized = cx.windows().iter().any(|w| {
+                    w.update(cx, |_, window, _| window.is_maximized())
+                        .unwrap_or(false)
+                });
+                let scale = cx
+                    .windows()
+                    .first()
+                    .and_then(|w| w.update(cx, |_, window, _| window.scale_factor()).ok())
+                    .unwrap_or(1.0);
+                eprintln!(
+                    "[transport-bpm] drag_start id={} start_bpm={:.2} maximized={} scale_factor={:.2}",
+                    sample.drag_id, sample.start_bpm, maximized, scale
+                );
+            }
+            return;
+        }
+        let raw_delta = sample.cur_y - self.bpm_drag_prev_y;
+        // Deadzone: ignore sub-pixel jitter / coalesced events with no real
+        // motion. Without this, OS event noise can wobble the accumulator.
+        if raw_delta.abs() < components::BPM_DRAG_DEADZONE_PX {
+            return;
+        }
+        self.bpm_drag_prev_y = sample.cur_y;
+        let sensitivity =
+            components::bpm_drag_sensitivity(sample.shift, sample.control || sample.platform);
+        // Up = positive BPM change. Screen Y grows downward, so negate.
+        self.bpm_drag_accum -= raw_delta * sensitivity;
+
+        let raw = sample.start_bpm + self.bpm_drag_accum;
+        let clamped = raw.clamp(components::BPM_MIN, components::BPM_MAX);
+        let snapped = if sample.shift {
+            (clamped * 10.0).round() / 10.0
+        } else {
+            clamped.round()
+        };
+        if components::bpm_debug_enabled() {
+            eprintln!(
+                "[transport-bpm] move delta_y={:.2} accum={:.2} sens={:.3} computed={:.2}",
+                raw_delta, self.bpm_drag_accum, sensitivity, snapped
+            );
+        }
+        // While dragging, throttle engine tempo commits to ~30 Hz. UI state
+        // is updated every event for a smooth readout; the audio engine
+        // tempo only changes a few dozen times per second.
+        let now = Instant::now();
+        let engine_due = match self.last_engine_bpm_commit {
+            Some(t) => now.duration_since(t) >= Duration::from_millis(33),
+            None => true,
+        };
+        self.set_native_bpm_inner(snapped, engine_due, cx);
+        if engine_due {
+            self.last_engine_bpm_commit = Some(now);
+        }
+    }
+
+    /// Apply a new BPM from the transport BPM drag. Updates the timeline
+    /// state and sends a lightweight `set_bpm` to the engine — never reloads
+    /// the project. Skips notify when the value would round to the same
+    /// stored value to avoid notify-spam during mouse motion.
+    fn set_native_bpm(&mut self, bpm: f32, cx: &mut Context<Self>) {
+        self.set_native_bpm_inner(bpm, true, cx);
+    }
+
+    fn set_native_bpm_inner(
+        &mut self,
+        bpm: f32,
+        commit_to_engine: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let bpm = bpm.clamp(components::BPM_MIN, components::BPM_MAX);
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            if (timeline.state.bpm - bpm).abs() > 0.005 {
+                timeline.state.bpm = bpm;
+                cx.notify();
+                true
+            } else {
+                false
+            }
+        });
+        if !changed {
+            return;
+        }
+        if commit_to_engine {
+            if let Some(engine) = self.audio_engine.as_ref() {
+                if let Err(error) = engine.set_bpm(bpm as f64) {
+                    if !matches!(error, DAUx::SphereAudioError::EngineNotOpen) {
+                        eprintln!("[audio] set BPM failed: {error}");
+                    }
+                }
+            }
+            if std::env::var_os("FUTUREBOARD_TRANSPORT_DEBUG").is_some() {
+                eprintln!("[transport-bpm] commit bpm={:.2}", bpm);
+            }
+        }
+        cx.notify();
     }
 
     fn stop_native_playback(&mut self, cx: &mut Context<Self>) {
@@ -2595,6 +2779,7 @@ impl StudioLayout {
     fn transport_chrome_state(&self, cx: &mut Context<Self>) -> components::TransportChromeState {
         let (
             position_label,
+            bpm_value,
             bpm_label,
             time_signature_label,
             recording,
@@ -2602,11 +2787,18 @@ impl StudioLayout {
             metronome_enabled,
         ) = {
             let timeline = self.timeline.read(cx);
+            let bpm = timeline.state.bpm;
+            let bpm_label = if (bpm.fract()).abs() < 0.05 {
+                format!("{:.0}", bpm)
+            } else {
+                format!("{:.1}", bpm)
+            };
             (
                 timeline
                     .state
                     .format_bar_beat(timeline.state.transport.playhead_beats),
-                format!("{:.0}", timeline.state.bpm),
+                bpm,
+                bpm_label,
                 format!(
                     "{}/{}",
                     timeline.state.time_signature_num, timeline.state.time_signature_den
@@ -2638,12 +2830,37 @@ impl StudioLayout {
         let on_metronome_toggle = make_command_handler("transport:toggle-metronome");
         let _on_record = make_command_handler("transport:record");
 
+        let on_set_bpm: components::BpmChangeCb = {
+            let this = cx.entity().clone();
+            Arc::new(move |bpm: &f32, _window: &mut Window, cx: &mut gpui::App| {
+                let bpm = bpm.clamp(components::BPM_MIN, components::BPM_MAX);
+                let _ = this.update(cx, |this, cx| {
+                    this.set_native_bpm(bpm, cx);
+                });
+            })
+        };
+
+        let on_bpm_drag: components::BpmDragCb = {
+            let this = cx.entity().clone();
+            Arc::new(
+                move |sample: &components::BpmDragSample,
+                      _window: &mut Window,
+                      cx: &mut gpui::App| {
+                    let sample = *sample;
+                    let _ = this.update(cx, |this, cx| {
+                        this.apply_bpm_drag_sample(sample, cx);
+                    });
+                },
+            )
+        };
+
         components::TransportChromeState {
             playing,
             recording,
             loop_enabled,
             metronome_enabled,
             position_label,
+            bpm: bpm_value,
             bpm_label,
             time_signature_label,
             on_return_to_start,
@@ -2651,6 +2868,8 @@ impl StudioLayout {
             on_stop,
             on_loop_toggle,
             on_metronome_toggle,
+            on_set_bpm,
+            on_bpm_drag,
         }
     }
 

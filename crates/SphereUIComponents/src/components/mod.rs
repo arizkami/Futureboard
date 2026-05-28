@@ -33,7 +33,9 @@ pub use add_track_dialog::{
     AddTrackKind, AddTrackWindow,
 };
 pub use app_chrome::{
-    app_chrome, PanelChromeState, ProjectChromeState, TransportChromeState,
+    app_chrome, bpm_debug_enabled, bpm_drag_sensitivity, BpmChangeCb, BpmDragCb, BpmDragSample,
+    PanelChromeState, ProjectChromeState, TransportChromeState, BPM_DRAG_DEADZONE_PX, BPM_MAX,
+    BPM_MIN,
 };
 pub use bottom_panel::{bottom_panel, BottomPanelResizeDrag, BottomPanelState, BottomTab};
 pub use combo_box::{combo_box_menu, combo_box_trigger, ComboBoxOption};

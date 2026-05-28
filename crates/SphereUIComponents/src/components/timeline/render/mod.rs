@@ -16,8 +16,8 @@ pub mod wgpu_renderer;
 
 pub use gpui_paint::GpuiPaintTimelineRenderer;
 pub use renderer::{
-    create_timeline_renderer, create_timeline_renderer_with_fallback, TimelineRenderOutput,
-    TimelineRenderer, TimelineRendererBackend,
+    create_timeline_renderer, create_timeline_renderer_with_fallback, set_preferred_backend,
+    TimelineRenderOutput, TimelineRenderer, TimelineRendererBackend,
 };
 pub use snapshot::{
     BarShadeSnapshot, GridLineSnapshot, PlayheadSnapshot, RenderClipSnapshot, RenderLaneSnapshot,
@@ -26,4 +26,29 @@ pub use snapshot::{
 };
 pub use viewport::TimelineViewport;
 #[cfg(feature = "gpu-renderer")]
-pub use wgpu_renderer::{WgpuOffscreenFrame, WgpuTimelineRenderer};
+pub use wgpu_renderer::{
+    list_available_gpu_devices, set_preferred_gpu_device_id, GpuDeviceInfo, TimelineGpuPreference,
+    WgpuOffscreenFrame, WgpuTimelineRenderer,
+};
+
+#[cfg(not(feature = "gpu-renderer"))]
+pub fn set_preferred_gpu_device_id(_id: &str) {}
+
+/// Stub used when the `gpu-renderer` cargo feature isn't enabled so the
+/// settings UI can still compile and show a flat "GPU unavailable" state
+/// without conditional code on every call site.
+#[cfg(not(feature = "gpu-renderer"))]
+#[derive(Debug, Clone)]
+pub struct GpuDeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub backend: Option<String>,
+    pub device_type: Option<String>,
+    pub vendor_id: Option<u32>,
+    pub device_id: Option<u32>,
+}
+
+#[cfg(not(feature = "gpu-renderer"))]
+pub fn list_available_gpu_devices() -> Vec<GpuDeviceInfo> {
+    Vec::new()
+}

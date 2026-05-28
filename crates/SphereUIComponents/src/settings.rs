@@ -394,6 +394,58 @@ pub struct PluginsSettings {
     pub scan: ScanPluginSettings,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RenderMode {
+    GpuAcceleration,
+    CpuRender,
+}
+
+impl Default for RenderMode {
+    fn default() -> Self {
+        RenderMode::GpuAcceleration
+    }
+}
+
+impl RenderMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            RenderMode::GpuAcceleration => "GPU Acceleration",
+            RenderMode::CpuRender => "CPU Render",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "value")]
+pub enum GpuDevicePreference {
+    Auto,
+    DeviceId(String),
+}
+
+impl Default for GpuDevicePreference {
+    fn default() -> Self {
+        GpuDevicePreference::Auto
+    }
+}
+
+impl GpuDevicePreference {
+    /// Stable string id for matching against detected GPU adapter ids.
+    pub fn id(&self) -> &str {
+        match self {
+            GpuDevicePreference::Auto => "auto",
+            GpuDevicePreference::DeviceId(id) => id.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct PerformanceSettings {
+    #[serde(default)]
+    pub render_mode: RenderMode,
+    #[serde(default)]
+    pub gpu_device: GpuDevicePreference,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SettingsSchema {
     #[serde(default)]
@@ -408,6 +460,8 @@ pub struct SettingsSchema {
     pub recording: RecordingSettings,
     #[serde(default)]
     pub plugins: PluginsSettings,
+    #[serde(default)]
+    pub performance: PerformanceSettings,
 }
 
 impl SettingsSchema {
