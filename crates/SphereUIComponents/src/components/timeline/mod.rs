@@ -20,4 +20,4 @@ pub mod waveform_canvas;
 pub use render::{
     TimelineRenderSnapshot, TimelineRenderer, TimelineRendererBackend, TimelineViewport,
 };
-pub use timeline::Timeline;
+pub use timeline::{Timeline, TimelineChromeMetrics};

@@ -85,6 +85,7 @@ pub struct TransportChromeState {
     pub recording: bool,
     pub loop_enabled: bool,
     pub metronome_enabled: bool,
+    pub follow_playhead: bool,
     pub position_label: String,
     pub bpm: f32,
     pub bpm_label: String,
@@ -94,6 +95,7 @@ pub struct TransportChromeState {
     pub on_stop: ChromeActionCb,
     pub on_loop_toggle: ChromeActionCb,
     pub on_metronome_toggle: ChromeActionCb,
+    pub on_follow_toggle: ChromeActionCb,
     pub on_set_bpm: BpmChangeCb,
     pub on_bpm_drag: BpmDragCb,
 }
@@ -244,11 +246,17 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
     } else {
         Colors::text_muted()
     };
+    let follow_color = if state.follow_playhead {
+        Colors::accent_primary()
+    } else {
+        Colors::text_muted()
+    };
     let on_return = state.on_return_to_start.clone();
     let on_play = state.on_play_toggle.clone();
     let on_stop = state.on_stop.clone();
     let on_loop = state.on_loop_toggle.clone();
     let on_metronome = state.on_metronome_toggle.clone();
+    let on_follow = state.on_follow_toggle.clone();
     let on_bpm_drag = state.on_bpm_drag.clone();
     let bpm_value = state.bpm;
     let bpm_label = state.bpm_label.clone();
@@ -330,6 +338,21 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
             .cursor(gpui::CursorStyle::PointingHand)
             .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
                 on_metronome(&(), window, cx);
+            })
+            .occlude(),
+        )
+        // Follow playhead / Auto-scroll. Magnet icon reads as "snap to
+        // playhead" — same metaphor most DAWs use for this button.
+        .child(
+            chrome_button(
+                Some(assets::ICON_MAGNET_PATH),
+                "FOLLOW",
+                state.follow_playhead,
+                follow_color,
+            )
+            .cursor(gpui::CursorStyle::PointingHand)
+            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                on_follow(&(), window, cx);
             })
             .occlude(),
         )

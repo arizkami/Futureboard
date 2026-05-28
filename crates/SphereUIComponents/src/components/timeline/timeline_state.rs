@@ -1236,6 +1236,17 @@ impl TimelineState {
         if (new_scroll_x - scroll_x).abs() < 0.5 {
             return false;
         }
+        if std::env::var_os("FUTUREBOARD_AUTOSCROLL_DEBUG").is_some() {
+            eprintln!(
+                "[autoscroll] playhead_x={:.1} viewport=[{:.1}..{:.1}] scroll_x: {:.1} -> {:.1} mode={:?}",
+                playhead_content_x,
+                scroll_x,
+                scroll_x + viewport_width,
+                scroll_x,
+                new_scroll_x,
+                self.auto_scroll_mode
+            );
+        }
         self.viewport.scroll_x = new_scroll_x;
         self.viewport.target_scroll_x = new_scroll_x;
         true

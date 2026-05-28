@@ -18,6 +18,19 @@ use gpui::{
 /// the timeline track area. Mirrors the value used by app_chrome.
 const APP_CHROME_HEIGHT: f32 = 36.0;
 
+/// Sizes of the surrounding chrome panels that the timeline's scroll/grid
+/// math has to subtract from the window to know the actual timeline body
+/// rect. Pushed by `StudioLayout` each render so resizing the bottom
+/// panel, toggling browser/inspector, and maximizing the window all stay
+/// in sync — no hardcoded constants.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TimelineChromeMetrics {
+    pub browser_width: f32,
+    pub inspector_width: f32,
+    pub bottom_panel_height: f32,
+    pub status_bar_height: f32,
+}
+
 fn is_supported_audio_ext(path: &std::path::Path) -> bool {
     matches!(
         path.extension()
@@ -46,6 +59,7 @@ pub struct Timeline {
     clip_drag_target_track_index: Option<usize>,
     pan_last_position: Option<gpui::Point<gpui::Pixels>>,
     on_context_menu: Option<TimelineContextMenuCb>,
+    chrome_metrics: TimelineChromeMetrics,
 }
 
 #[derive(Clone, Debug)]
@@ -102,6 +116,7 @@ impl Timeline {
             clip_drag_target_track_index: None,
             pan_last_position: None,
             on_context_menu: None,
+            chrome_metrics: TimelineChromeMetrics::default(),
         }
     }
 
@@ -120,7 +135,15 @@ impl Timeline {
             clip_drag_target_track_index: None,
             pan_last_position: None,
             on_context_menu: None,
+            chrome_metrics: TimelineChromeMetrics::default(),
         }
+    }
+
+    /// Push the measured chrome panel sizes that surround the timeline so
+    /// `scroll_geometry` can compute the real available body rect. Called
+    /// by `StudioLayout` each render — cheap, no notify.
+    pub fn set_chrome_metrics(&mut self, metrics: TimelineChromeMetrics) {
+        self.chrome_metrics = metrics;
     }
 
     pub fn set_context_menu_callback(&mut self, callback: Option<TimelineContextMenuCb>) {
@@ -185,10 +208,40 @@ impl Timeline {
         let window_size = window.bounds().size;
         let window_w: f32 = window_size.width.into();
         let window_h: f32 = window_size.height.into();
-        let track_view_w = (window_w - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
-        let track_view_h = (window_h - APP_CHROME_HEIGHT - RULER_HEIGHT - 220.0).max(TRACK_HEIGHT);
+        let m = self.chrome_metrics;
+        // Width: window minus browser/sidebar (only when actually shown via
+        // its measured width), inspector (only when shown), and the
+        // timeline's own fixed track-header column.
+        let track_view_w = (window_w - m.browser_width - m.inspector_width - HEADER_WIDTH).max(0.0);
+        // Height: window minus app chrome, ruler, the actual current
+        // bottom panel height (0 when hidden), and status bar. No magic
+        // 220 — the previous constant was stale whenever the bottom
+        // panel was resized or hidden, which left the timeline either
+        // too short (blank bottom area) or too tall (overflowing).
+        let used_v = APP_CHROME_HEIGHT
+            + RULER_HEIGHT
+            + m.bottom_panel_height
+            + m.status_bar_height;
+        let track_view_h = (window_h - used_v).max(TRACK_HEIGHT);
         let content_w = self.timeline_content_width();
         let content_h = self.state.tracks.len() as f32 * TRACK_HEIGHT;
+
+        if std::env::var_os("FUTUREBOARD_TIMELINE_VIEWPORT_DEBUG").is_some() {
+            eprintln!(
+                "[tl-viewport] window={}x{} body={}x{} browser={} inspector={} bottom={} status={} content={}x{}",
+                window_w,
+                window_h,
+                track_view_w,
+                track_view_h,
+                m.browser_width,
+                m.inspector_width,
+                m.bottom_panel_height,
+                m.status_bar_height,
+                content_w,
+                content_h
+            );
+        }
+
         (
             track_view_w,
             track_view_h,

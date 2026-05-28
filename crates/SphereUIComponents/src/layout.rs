@@ -288,6 +288,7 @@ enum TransportCommand {
     ReturnToStart,
     ToggleLoop,
     ToggleMetronome,
+    ToggleFollowPlayhead,
     Record,
 }
 
@@ -2770,6 +2771,17 @@ impl StudioLayout {
                     }
                 }
             }
+            TransportCommand::ToggleFollowPlayhead => {
+                let enabled = self.timeline.update(cx, |timeline, cx| {
+                    timeline.state.follow_playhead = !timeline.state.follow_playhead;
+                    let enabled = timeline.state.follow_playhead;
+                    cx.notify();
+                    enabled
+                });
+                if std::env::var_os("FUTUREBOARD_AUTOSCROLL_DEBUG").is_some() {
+                    eprintln!("[autoscroll] toggled follow_playhead -> {}", enabled);
+                }
+            }
             TransportCommand::Record => {
                 eprintln!("[transport] record is disabled in native Stage 2.1");
             }
@@ -2785,6 +2797,7 @@ impl StudioLayout {
             recording,
             loop_enabled,
             metronome_enabled,
+            follow_playhead,
         ) = {
             let timeline = self.timeline.read(cx);
             let bpm = timeline.state.bpm;
@@ -2806,6 +2819,7 @@ impl StudioLayout {
                 timeline.state.transport.recording,
                 timeline.state.transport.loop_enabled,
                 timeline.state.transport.metronome_enabled,
+                timeline.state.follow_playhead,
             )
         };
         let playing = self
@@ -2828,6 +2842,7 @@ impl StudioLayout {
         let on_stop = make_command_handler("transport:stop");
         let on_loop_toggle = make_command_handler("transport:toggle-loop");
         let on_metronome_toggle = make_command_handler("transport:toggle-metronome");
+        let on_follow_toggle = make_command_handler("transport:toggle-follow-playhead");
         let _on_record = make_command_handler("transport:record");
 
         let on_set_bpm: components::BpmChangeCb = {
@@ -2859,6 +2874,7 @@ impl StudioLayout {
             recording,
             loop_enabled,
             metronome_enabled,
+            follow_playhead,
             position_label,
             bpm: bpm_value,
             bpm_label,
@@ -2868,6 +2884,7 @@ impl StudioLayout {
             on_stop,
             on_loop_toggle,
             on_metronome_toggle,
+            on_follow_toggle,
             on_set_bpm,
             on_bpm_drag,
         }
@@ -3761,6 +3778,31 @@ impl Render for StudioLayout {
         let show_browser = self.panels.browser;
         let show_inspector = self.panels.inspector;
         let show_mixer_docked = self.panels.mixer_docked;
+
+        // Push the real chrome metrics into Timeline so its scroll/grid
+        // math knows the actual available body rect — accounts for the
+        // current bottom panel height (vs. a hardcoded 220), and the
+        // visibility of the browser/inspector side panels. Without this
+        // the timeline grid stays at its old size after resize/maximize
+        // and leaves blank space on the right or bottom.
+        {
+            const SIDEBAR_WIDTH: f32 = 272.0; // matches sidebar::SIDEBAR_WIDTH
+            const INSPECTOR_WIDTH: f32 = 292.0; // matches inspector_shell().w(px(292.0))
+            const STATUS_BAR_HEIGHT: f32 = 22.0; // matches title_bar::STATUSBAR_HEIGHT
+            let metrics = components::timeline::TimelineChromeMetrics {
+                browser_width: if show_browser { SIDEBAR_WIDTH } else { 0.0 },
+                inspector_width: if show_inspector { INSPECTOR_WIDTH } else { 0.0 },
+                bottom_panel_height: if show_mixer_docked {
+                    self.bottom_panel_state.height_px
+                } else {
+                    0.0
+                },
+                status_bar_height: STATUS_BAR_HEIGHT,
+            };
+            let _ = self
+                .timeline
+                .update(cx, |timeline, _cx| timeline.set_chrome_metrics(metrics));
+        }
         let project_chrome = components::ProjectChromeState {
             name: self.project_switcher.current_project.name.clone(),
             is_dirty: self.project_switcher.current_project.is_dirty,
@@ -4073,6 +4115,9 @@ fn transport_command_from_id(command_id: &str) -> Option<TransportCommand> {
         "transport:go-to-start" => Some(TransportCommand::ReturnToStart),
         "transport:toggle-loop" => Some(TransportCommand::ToggleLoop),
         "transport:toggle-metronome" => Some(TransportCommand::ToggleMetronome),
+        "transport:toggle-follow-playhead" | "transport:toggle-autoscroll" => {
+            Some(TransportCommand::ToggleFollowPlayhead)
+        }
         "transport:record" => Some(TransportCommand::Record),
         _ => None,
     }
