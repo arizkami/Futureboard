@@ -28,7 +28,9 @@ use gpui::{div, px, svg, App, InteractiveElement, IntoElement, ParentElement, St
 use crate::assets;
 use crate::components::fader::{db_scale_column, db_value_pill, fader as render_fader};
 use crate::components::knob::knob_bipolar;
-use crate::components::timeline::timeline_state::{volume, MasterBusState, TrackState, TrackType};
+use crate::components::timeline::timeline_state::{
+    volume, InsertLoadStatus, InsertSlotState, MasterBusState, TrackState, TrackType,
+};
 use crate::components::timeline::vu_meter::vu_meter_vertical_full;
 use crate::theme::Colors;
 
@@ -72,6 +74,21 @@ pub struct MixerCallbacks {
     pub on_context_menu: Option<
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
+    /// Append an empty insert slot to the track. The picker overlay is
+    /// deferred — Phase 1 seeds a stub descriptor at insert time so the
+    /// project round-trip can be exercised end-to-end.
+    pub on_add_insert:
+        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
+    /// Remove the named insert slot from the track.
+    pub on_remove_insert:
+        std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>,
+    /// Toggle bypass on the named insert slot.
+    pub on_toggle_insert_bypass:
+        std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>,
+    /// User clicked the slot chip — Phase 4 will open the native plugin
+    /// editor; Phase 1 logs the request.
+    pub on_open_insert_editor:
+        std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>,
 }
 
 /// Inert callbacks for fallback UI when the studio entity is unavailable.
@@ -82,6 +99,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
     let noop_vol = Arc::new(|_: &(String, f32), _: &mut Window, _: &mut App| {});
     let noop_pan = Arc::new(|_: &(String, f32), _: &mut Window, _: &mut App| {});
     let noop_master = Arc::new(|_: &f32, _: &mut Window, _: &mut App| {});
+    let noop_insert_pair = Arc::new(|_: &(String, String), _: &mut Window, _: &mut App| {});
     MixerCallbacks {
         on_select_track: noop_track.clone(),
         on_volume_change: noop_vol,
@@ -89,9 +107,13 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
         on_toggle_mute: noop_track.clone(),
         on_toggle_solo: noop_track.clone(),
         on_toggle_arm: noop_track.clone(),
-        on_toggle_input: noop_track,
+        on_toggle_input: noop_track.clone(),
         on_master_volume_change: noop_master,
         on_context_menu: None,
+        on_add_insert: noop_track,
+        on_remove_insert: noop_insert_pair.clone(),
+        on_toggle_insert_bypass: noop_insert_pair.clone(),
+        on_open_insert_editor: noop_insert_pair,
     }
 }
 
@@ -375,7 +397,134 @@ fn strip_header(track: &TrackState, index: usize) -> impl IntoElement {
         )
 }
 
-fn inserts_section(track: &TrackState, _index: usize) -> impl IntoElement {
+fn insert_chip(
+    track_id: &str,
+    slot: &InsertSlotState,
+    callbacks: &MixerCallbacks,
+) -> impl IntoElement {
+    let track_id_owned = track_id.to_string();
+    let slot_id = slot.id.clone();
+    let display = slot.display_name.clone();
+    let bypassed = slot.bypassed;
+    let on_open = callbacks.on_open_insert_editor.clone();
+    let on_bypass = callbacks.on_toggle_insert_bypass.clone();
+    let on_remove = callbacks.on_remove_insert.clone();
+
+    let (bg, text) = match &slot.load_status {
+        InsertLoadStatus::Ready if !bypassed => (Colors::accent_muted(), Colors::text_primary()),
+        InsertLoadStatus::Ready => (Colors::surface_input(), Colors::text_muted()),
+        InsertLoadStatus::Loading => (Colors::surface_input(), Colors::text_muted()),
+        InsertLoadStatus::Failed(_) => (
+            Colors::with_alpha(Colors::status_error(), 0.16),
+            Colors::status_error(),
+        ),
+        InsertLoadStatus::Disabled => (Colors::surface_input(), Colors::text_faint()),
+        InsertLoadStatus::Empty => (Colors::surface_input(), Colors::slot_empty_text()),
+    };
+
+    let id_owned = slot_id.clone();
+    let bypass_pair = (track_id_owned.clone(), slot_id.clone());
+    let remove_pair = (track_id_owned.clone(), slot_id.clone());
+    let open_pair = (track_id_owned, slot_id);
+
+    div()
+        .id(gpui::SharedString::from(format!("insert-chip-{}", id_owned)))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(3.0))
+        .mx(px(2.0))
+        .px(px(4.0))
+        .h(px(18.0))
+        .rounded_sm()
+        .bg(bg)
+        .text_size(px(9.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(text)
+        .cursor(gpui::CursorStyle::PointingHand)
+        .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
+            on_open(&open_pair, w, cx);
+        })
+        .occlude()
+        .child(div().truncate().child(display))
+        // Bypass dot — small interactive square.
+        .child(
+            div()
+                .id(gpui::SharedString::from(format!(
+                    "insert-bypass-{}",
+                    bypass_pair.1
+                )))
+                .w(px(8.0))
+                .h(px(8.0))
+                .rounded_sm()
+                .bg(if bypassed {
+                    Colors::text_faint()
+                } else {
+                    Colors::status_success()
+                })
+                .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
+                    on_bypass(&bypass_pair, w, cx);
+                })
+                .occlude(),
+        )
+        // Remove ×.
+        .child(
+            div()
+                .id(gpui::SharedString::from(format!(
+                    "insert-remove-{}",
+                    remove_pair.1
+                )))
+                .text_size(px(10.0))
+                .text_color(Colors::text_faint())
+                .px(px(2.0))
+                .child("×")
+                .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
+                    on_remove(&remove_pair, w, cx);
+                })
+                .occlude(),
+        )
+}
+
+fn add_insert_button(track_id: &str, callbacks: &MixerCallbacks) -> impl IntoElement {
+    let track_id_owned = track_id.to_string();
+    let on_add = callbacks.on_add_insert.clone();
+    div()
+        .id(gpui::SharedString::from(format!(
+            "insert-add-{}",
+            track_id_owned
+        )))
+        .flex()
+        .items_center()
+        .justify_center()
+        .mx(px(2.0))
+        .px(px(4.0))
+        .h(px(18.0))
+        .rounded_sm()
+        .border(px(1.0))
+        .border_dashed()
+        .border_color(Colors::slot_border())
+        .text_size(px(10.0))
+        .text_color(Colors::slot_empty_text())
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .child("+")
+        .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
+            on_add(&track_id_owned, w, cx);
+        })
+        .occlude()
+}
+
+fn inserts_section(
+    track: &TrackState,
+    _index: usize,
+    callbacks: &MixerCallbacks,
+) -> impl IntoElement {
+    let mut chips = div().flex().flex_col().gap(px(2.0)).px(px(2.0));
+    for slot in &track.inserts {
+        chips = chips.child(insert_chip(&track.id, slot, callbacks));
+    }
+    chips = chips.child(add_insert_button(&track.id, callbacks));
+
     div()
         .flex()
         .flex_col()
@@ -383,7 +532,7 @@ fn inserts_section(track: &TrackState, _index: usize) -> impl IntoElement {
         .border_b(px(1.0))
         .border_color(Colors::divider())
         .child(section_header("INSERTS", track.color))
-        .child(empty_slot())
+        .child(chips)
 }
 
 fn sends_section(track: &TrackState) -> impl IntoElement {
@@ -594,7 +743,7 @@ fn channel_strip(
         // Top accent line
         .child(div().w_full().h(px(2.0)).bg(track.color))
         .child(strip_header(track, index))
-        .child(inserts_section(track, index))
+        .child(inserts_section(track, index, callbacks))
         .child(sends_section(track))
         .child(pan_section(track, callbacks, is_selected))
         .child(fader_area(track, callbacks, is_selected))

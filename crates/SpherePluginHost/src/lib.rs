@@ -8,6 +8,9 @@
 
 #[cfg(feature = "napi")]
 mod editor_window;
+/// Plain-Rust facade over the editor C ABI — always built so the native
+/// binary can drive the IPlugView lifecycle without N-API.
+pub mod native_editor;
 pub mod preset;
 pub mod registry;
 mod scanner;

@@ -141,6 +141,11 @@ pub struct StudioLayout {
     browser_search_input: TextInputState,
     add_track_window: Option<WindowHandle<AddTrackWindow>>,
     plugin_manager_window: Option<WindowHandle<PluginManagerWindow>>,
+    /// Cached plugin registry scan result. `None` until the first
+    /// `+ Add Insert` click triggers a sync scan (or the Plugin Manager
+    /// dialog populates it). Phase 2a uses the first insert-capable
+    /// entry; Phase 2b adds a real picker overlay.
+    available_plugins: Option<Vec<sphere_plugin_host::RegistryPlugin>>,
     /// External settings window handle; None when closed.
     settings_window: Option<WindowHandle<SettingsWindow>>,
     /// Detached mixer window for multi-monitor layouts.
@@ -492,6 +497,7 @@ impl StudioLayout {
             .with_placeholder("Search..."),
             add_track_window: None,
             plugin_manager_window: None,
+            available_plugins: None,
             settings_window: None,
             mixer_window: None,
             pending_mixer_external_open: None,
@@ -1447,6 +1453,26 @@ impl StudioLayout {
         self.project_switcher.current_project.is_dirty = true;
         self.project_switcher.current_project.subtitle = "Unsaved changes".to_string();
         self.mark_engine_project_dirty();
+    }
+
+    /// Lazily populated cache of registered audio plugins. First call
+    /// runs `PluginRegistry::scan(None)` synchronously — the SQLite
+    /// cache backing the registry makes subsequent scans fast. The UI
+    /// thread blocks here on purpose; the audio thread is untouched.
+    /// `None` return = registry has zero insert-capable plugins.
+    fn pick_default_insert_plugin(&mut self) -> Option<sphere_plugin_host::RegistryPlugin> {
+        if self.available_plugins.is_none() {
+            if std::env::var_os("FUTUREBOARD_PLUGIN_DEBUG").is_some() {
+                eprintln!("[plugin] populating registry cache (first add_insert)");
+            }
+            let result = sphere_plugin_host::PluginRegistry::scan(None);
+            self.available_plugins = Some(result.plugins);
+        }
+        let plugins = self.available_plugins.as_ref()?;
+        plugins
+            .iter()
+            .find(|p| p.supports_insert())
+            .cloned()
     }
 
     fn cmd_save_project(&mut self, cx: &mut Context<Self>) {
@@ -3203,7 +3229,7 @@ impl StudioLayout {
         let on_context_menu: std::sync::Arc<
             dyn Fn(&(String, f32, f32), &mut Window, &mut gpui::App) + 'static,
         > = {
-            let this = owner;
+            let this = owner.clone();
             std::sync::Arc::new(move |(track_id, x, y): &(String, f32, f32), _w, cx| {
                 let track_id = track_id.clone();
                 let x = *x;
@@ -3226,6 +3252,119 @@ impl StudioLayout {
             })
         };
 
+        // ── Plugin insert callbacks (Phase 1) ────────────────────────
+        // Phase 1: add_insert seeds an empty slot followed by a stub
+        // descriptor so the project round-trip exercises end-to-end.
+        // Phase 2 will swap the stub for a real picker + plugin host
+        // instantiation. None of these touch the audio thread; they
+        // mutate UI state and let the next project sync carry the
+        // descriptor down to the engine (which currently no-ops on
+        // unrecognised plugins).
+        let on_add_insert: std::sync::Arc<
+            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = owner.clone();
+            std::sync::Arc::new(move |track_id: &String, _w, cx| {
+                let track_id = track_id.clone();
+                let _ = this.update(cx, |this, cx| {
+                    let new_slot_id = this
+                        .timeline
+                        .update(cx, |timeline, _cx| timeline.state.add_insert(&track_id));
+                    if let Some(slot_id) = new_slot_id {
+                        let picked = this.pick_default_insert_plugin();
+                        let (plugin_id, plugin_path, plugin_format, display_name) = match picked {
+                            Some(reg) => {
+                                use crate::components::timeline::timeline_state::InsertPluginFormat;
+                                use sphere_plugin_host::PluginFormat as RegFmt;
+                                let format = match reg.format {
+                                    RegFmt::Vst3 => InsertPluginFormat::Vst3,
+                                    RegFmt::Clap => InsertPluginFormat::Clap,
+                                    RegFmt::Au => InsertPluginFormat::Au,
+                                    RegFmt::Lv2 => InsertPluginFormat::Lv2,
+                                    _ => InsertPluginFormat::Unknown,
+                                };
+                                let id = reg.class_id.clone().unwrap_or_else(|| reg.id.clone());
+                                (id, Some(reg.path.clone()), format, reg.name.clone())
+                            }
+                            None => {
+                                // Registry not populated yet (no scan run, or
+                                // no insert-capable plugin found). Fall back
+                                // to the documented stub so the round-trip is
+                                // still exercised. Phase 2b adds the picker.
+                                use crate::components::timeline::timeline_state::InsertPluginFormat;
+                                (
+                                    "futureboard.stub.gain".to_string(),
+                                    None,
+                                    InsertPluginFormat::Vst3,
+                                    "Stub Effect".to_string(),
+                                )
+                            }
+                        };
+                        this.timeline.update(cx, |timeline, _cx| {
+                            timeline.state.set_insert_plugin(
+                                &track_id,
+                                &slot_id,
+                                plugin_id,
+                                plugin_path,
+                                plugin_format,
+                                display_name,
+                            );
+                        });
+                    }
+                    this.mark_dirty();
+                    this.engine_project_dirty = true;
+                    cx.notify();
+                });
+            })
+        };
+        let on_remove_insert: std::sync::Arc<
+            dyn Fn(&(String, String), &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = owner.clone();
+            std::sync::Arc::new(move |(track_id, insert_id): &(String, String), _w, cx| {
+                let track_id = track_id.clone();
+                let insert_id = insert_id.clone();
+                let _ = this.update(cx, |this, cx| {
+                    this.timeline.update(cx, |timeline, _cx| {
+                        timeline.state.remove_insert(&track_id, &insert_id);
+                    });
+                    this.mark_dirty();
+                    this.engine_project_dirty = true;
+                    cx.notify();
+                });
+            })
+        };
+        let on_toggle_insert_bypass: std::sync::Arc<
+            dyn Fn(&(String, String), &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = owner.clone();
+            std::sync::Arc::new(move |(track_id, insert_id): &(String, String), _w, cx| {
+                let track_id = track_id.clone();
+                let insert_id = insert_id.clone();
+                let _ = this.update(cx, |this, cx| {
+                    this.timeline.update(cx, |timeline, _cx| {
+                        timeline.state.toggle_insert_bypass(&track_id, &insert_id);
+                    });
+                    this.mark_dirty();
+                    this.engine_project_dirty = true;
+                    cx.notify();
+                });
+            })
+        };
+        let on_open_insert_editor: std::sync::Arc<
+            dyn Fn(&(String, String), &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |(track_id, insert_id), _w, _cx| {
+            // Phase 4 will open the native plugin editor window via the
+            // de-napi'd SpherePluginHost. For Phase 1 we just log the
+            // intent so the wiring is exercised by manual tests.
+            if std::env::var_os("FUTUREBOARD_PLUGIN_DEBUG").is_some() {
+                eprintln!(
+                    "[plugin] open_editor track={} slot={} (TODO Phase 4)",
+                    track_id, insert_id
+                );
+            }
+        });
+
         MixerCallbacks {
             on_select_track,
             on_volume_change,
@@ -3236,6 +3375,10 @@ impl StudioLayout {
             on_toggle_input,
             on_master_volume_change,
             on_context_menu: Some(on_context_menu),
+            on_add_insert,
+            on_remove_insert,
+            on_toggle_insert_bypass,
+            on_open_insert_editor,
         }
     }
 }

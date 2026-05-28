@@ -369,7 +369,36 @@ impl From<&TimelineState> for FutureboardProject {
                         InputMonitorMode::Off
                     },
                     routing: TrackRouting::default(),
-                    inserts: Vec::new(),
+                    inserts: t
+                        .inserts
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, slot)| {
+                            use crate::components::timeline::timeline_state::InsertPluginFormat;
+                            let plugin = slot.plugin_id.as_ref().map(|pid| {
+                                ProjectPluginInstance {
+                                    instance_id: slot.id.clone(),
+                                    format: match slot.plugin_format {
+                                        Some(InsertPluginFormat::Vst3) => PluginFormat::Vst3,
+                                        Some(InsertPluginFormat::Clap) => PluginFormat::Clap,
+                                        Some(InsertPluginFormat::Au) => PluginFormat::Au,
+                                        Some(InsertPluginFormat::Lv2) => PluginFormat::Lv2,
+                                        _ => PluginFormat::Unknown,
+                                    },
+                                    plugin_path: slot.plugin_path.clone(),
+                                    plugin_uid: pid.clone(),
+                                    display_name: slot.display_name.clone(),
+                                    state: PluginStateBlob::default(),
+                                }
+                            });
+                            ProjectInsert {
+                                id: slot.id.clone(),
+                                slot_index: idx as u32,
+                                bypassed: slot.bypassed,
+                                plugin,
+                            }
+                        })
+                        .collect(),
                     automation_lanes,
                     clips,
                 }
@@ -464,6 +493,35 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                         .collect(),
                 })
                 .collect();
+            let inserts = pt
+                .inserts
+                .iter()
+                .map(|pi| {
+                    use crate::components::timeline::timeline_state::{
+                        InsertLoadStatus, InsertPluginFormat, InsertSlotState,
+                    };
+                    match &pi.plugin {
+                        Some(plugin) => InsertSlotState {
+                            id: pi.id.clone(),
+                            plugin_id: Some(plugin.plugin_uid.clone()),
+                            plugin_path: plugin.plugin_path.clone(),
+                            plugin_format: Some(match plugin.format {
+                                PluginFormat::Vst3 => InsertPluginFormat::Vst3,
+                                PluginFormat::Clap => InsertPluginFormat::Clap,
+                                PluginFormat::Au => InsertPluginFormat::Au,
+                                PluginFormat::Lv2 => InsertPluginFormat::Lv2,
+                                PluginFormat::Unknown => InsertPluginFormat::Unknown,
+                            }),
+                            display_name: plugin.display_name.clone(),
+                            enabled: true,
+                            bypassed: pi.bypassed,
+                            load_status: InsertLoadStatus::Ready,
+                            parameters: Vec::new(),
+                        },
+                        None => InsertSlotState::empty(pi.id.clone()),
+                    }
+                })
+                .collect();
             TrackState {
                 id: pt.id.clone(),
                 name: pt.name.clone(),
@@ -479,6 +537,7 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 meter_level_r: 0.0,
                 clips,
                 automation_lanes,
+                inserts,
             }
         })
         .collect();

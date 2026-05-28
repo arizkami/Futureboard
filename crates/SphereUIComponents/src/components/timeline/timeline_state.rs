@@ -1,3 +1,10 @@
+/// `FUTUREBOARD_PLUGIN_DEBUG=1` enables eprintln traces for insert
+/// mutations. Cached on first read.
+fn plugin_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_PLUGIN_DEBUG").is_some())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackType {
     Audio,
@@ -87,6 +94,98 @@ pub struct AutomationLaneState {
     pub points: Vec<AutomationPoint>,
 }
 
+/// Plugin format identifier mirrored from `project::PluginFormat`. Kept
+/// in the UI state so we can render an icon/badge without depending on
+/// the project crate from render code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertPluginFormat {
+    Vst3,
+    Clap,
+    Au,
+    Lv2,
+    Unknown,
+}
+
+impl InsertPluginFormat {
+    pub fn label(self) -> &'static str {
+        match self {
+            InsertPluginFormat::Vst3 => "VST3",
+            InsertPluginFormat::Clap => "CLAP",
+            InsertPluginFormat::Au => "AU",
+            InsertPluginFormat::Lv2 => "LV2",
+            InsertPluginFormat::Unknown => "?",
+        }
+    }
+}
+
+/// Load progress of an insert slot. Drives the chip color / label.
+/// `Loading` is reserved for Phase 2 when actual plugin instantiation
+/// runs on a worker thread. Phase 1 transitions Empty → Ready directly
+/// because the runtime doesn't yet instantiate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InsertLoadStatus {
+    Empty,
+    Loading,
+    Ready,
+    Failed(String),
+    Disabled,
+}
+
+impl Default for InsertLoadStatus {
+    fn default() -> Self {
+        InsertLoadStatus::Empty
+    }
+}
+
+/// Read-only parameter snapshot — populated in Phase 5 by the param
+/// event drain pump. Phase 1 keeps the vec empty.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginParameterState {
+    pub id: u32,
+    pub name: String,
+    pub value_normalized: f32,
+}
+
+/// UI-side mirror of `project::ProjectInsert`. The runtime owns the
+/// actual plugin processor; this struct only stores descriptor +
+/// transient UI state (bypass, load status, last-seen parameters).
+#[derive(Debug, Clone, PartialEq)]
+pub struct InsertSlotState {
+    pub id: String,
+    /// Stable plugin identifier (`plugin_uid` / classId) — primary key
+    /// against the plugin registry. `None` while the slot is empty.
+    pub plugin_id: Option<String>,
+    pub plugin_path: Option<std::path::PathBuf>,
+    pub plugin_format: Option<InsertPluginFormat>,
+    /// Display label shown on the mixer strip. "Empty" when no plugin
+    /// is loaded; the plugin's `display_name` otherwise.
+    pub display_name: String,
+    pub enabled: bool,
+    pub bypassed: bool,
+    pub load_status: InsertLoadStatus,
+    pub parameters: Vec<PluginParameterState>,
+}
+
+impl InsertSlotState {
+    pub fn empty(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            plugin_id: None,
+            plugin_path: None,
+            plugin_format: None,
+            display_name: "Empty".to_string(),
+            enabled: true,
+            bypassed: false,
+            load_status: InsertLoadStatus::Empty,
+            parameters: Vec::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.plugin_id.is_none()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackState {
     pub id: String,
@@ -109,6 +208,11 @@ pub struct TrackState {
     pub meter_level_r: f32,
     pub clips: Vec<ClipState>,
     pub automation_lanes: Vec<AutomationLaneState>,
+    /// Insert (effect) plugin chain — ordered. Audio flows through these
+    /// in order before volume/pan/sends in the runtime. The UI stores
+    /// only descriptor + transient state; the runtime owns the actual
+    /// plugin processor.
+    pub inserts: Vec<InsertSlotState>,
 }
 
 #[derive(Debug, Clone)]
@@ -424,6 +528,7 @@ impl TimelineState {
                     },
                 ],
             }],
+            inserts: Vec::new(),
         };
 
         let track2 = TrackState {
@@ -455,6 +560,7 @@ impl TimelineState {
                 audio_import: AudioImportState::Ready,
             }],
             automation_lanes: vec![],
+            inserts: Vec::new(),
         };
 
         let track3 = TrackState {
@@ -521,6 +627,7 @@ impl TimelineState {
                 audio_import: AudioImportState::default(),
             }],
             automation_lanes: vec![],
+            inserts: Vec::new(),
         };
 
         Self {
@@ -1010,6 +1117,7 @@ impl TimelineState {
             meter_level_r: 0.0,
             clips: Vec::new(),
             automation_lanes: Vec::new(),
+            inserts: Vec::new(),
         });
         id
     }
@@ -1059,6 +1167,79 @@ impl TimelineState {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             t.armed = !t.armed;
         }
+    }
+
+    /// Append an empty insert slot to a track and return the slot id.
+    /// Phase 1 — purely UI state; runtime is updated on the next project
+    /// sync (the engine ignores unknown plugin descriptors gracefully).
+    pub fn add_insert(&mut self, track_id: &str) -> Option<String> {
+        let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
+        let slot_id = format!("insert-{}-{}", track.id, track.inserts.len() + 1);
+        let slot = InsertSlotState::empty(&slot_id);
+        if plugin_debug_enabled() {
+            eprintln!(
+                "[plugin] add_insert track={} slot_id={}",
+                track_id, slot_id
+            );
+        }
+        track.inserts.push(slot);
+        Some(slot_id)
+    }
+
+    /// Assign a plugin to an insert slot. The caller resolves the
+    /// `plugin_id` → display metadata before calling so the UI doesn't
+    /// have to know about the plugin registry directly.
+    pub fn set_insert_plugin(
+        &mut self,
+        track_id: &str,
+        insert_id: &str,
+        plugin_id: String,
+        plugin_path: Option<std::path::PathBuf>,
+        plugin_format: InsertPluginFormat,
+        display_name: String,
+    ) {
+        let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
+            return;
+        };
+        let Some(slot) = track.inserts.iter_mut().find(|i| i.id == insert_id) else {
+            return;
+        };
+        slot.plugin_id = Some(plugin_id);
+        slot.plugin_path = plugin_path;
+        slot.plugin_format = Some(plugin_format);
+        slot.display_name = display_name;
+        slot.load_status = InsertLoadStatus::Ready;
+        slot.bypassed = false;
+        slot.parameters.clear();
+        if plugin_debug_enabled() {
+            eprintln!(
+                "[plugin] set_insert_plugin track={} slot={} -> {}",
+                track_id, insert_id, slot.display_name
+            );
+        }
+    }
+
+    pub fn remove_insert(&mut self, track_id: &str, insert_id: &str) {
+        let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
+            return;
+        };
+        track.inserts.retain(|i| i.id != insert_id);
+        if plugin_debug_enabled() {
+            eprintln!("[plugin] remove_insert track={} slot={}", track_id, insert_id);
+        }
+    }
+
+    pub fn toggle_insert_bypass(&mut self, track_id: &str, insert_id: &str) -> Option<bool> {
+        let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
+        let slot = track.inserts.iter_mut().find(|i| i.id == insert_id)?;
+        slot.bypassed = !slot.bypassed;
+        if plugin_debug_enabled() {
+            eprintln!(
+                "[plugin] toggle_bypass track={} slot={} -> {}",
+                track_id, insert_id, slot.bypassed
+            );
+        }
+        Some(slot.bypassed)
     }
 
     pub fn toggle_track_input_monitor(&mut self, track_id: &str) {
