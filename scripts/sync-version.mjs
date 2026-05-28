@@ -13,8 +13,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
-const repoRoot = path.resolve(process.cwd());
+// Resolve repo root from this script location, not from process.cwd(),
+// so CI steps with different working directories still behave correctly.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, "..");
 const checkOnly = process.argv.includes("--check");
 
 function readJson(p) {
