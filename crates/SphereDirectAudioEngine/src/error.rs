@@ -31,6 +31,7 @@ impl fmt::Display for SphereAudioError {
 impl std::error::Error for SphereAudioError {}
 
 /// Convert to a plain string suitable for crossing the N-API boundary.
+#[cfg(feature = "napi")]
 impl From<SphereAudioError> for napi::Error {
     fn from(e: SphereAudioError) -> napi::Error {
         napi::Error::new(napi::Status::GenericFailure, e.to_string())

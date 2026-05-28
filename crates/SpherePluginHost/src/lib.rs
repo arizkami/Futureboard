@@ -6,6 +6,7 @@
 #![allow(clippy::needless_pass_by_value)]
 #![allow(non_snake_case)]
 
+#[cfg(feature = "napi")]
 mod editor_window;
 pub mod preset;
 pub mod registry;
@@ -21,16 +22,24 @@ pub use registry::{
 };
 pub use scanner::{discover_plugin_bundles, scan_plugin_bundle};
 
+#[cfg(feature = "napi")]
 pub use editor_window::{
     attach_vst3_editor_view, close_plugin_editor_window, drain_plugin_editor_param_events,
     focus_plugin_editor_window, get_plugin_editor_attach_handle, open_plugin_editor_for_path,
     open_plugin_editor_window, resize_plugin_editor_window, PluginEditorParamEvent,
     PluginEditorWindowOptions,
 };
+
+#[cfg(feature = "napi")]
 use napi_derive::napi;
+
+#[cfg(feature = "napi")]
 use scanner::{scan_audio_plugin_paths, scan_clap_paths, scan_vst3_paths};
+
+#[cfg(feature = "napi")]
 use types::{HostStatus, PluginInfo};
 
+#[cfg(feature = "napi")]
 #[napi]
 pub fn init_plugin_host() -> napi::Result<HostStatus> {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -48,26 +57,31 @@ pub fn init_plugin_host() -> napi::Result<HostStatus> {
     })
 }
 
+#[cfg(feature = "napi")]
 #[napi]
 pub fn shutdown_plugin_host() -> napi::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "napi")]
 #[napi]
 pub fn scan_vst3(paths: Vec<String>) -> napi::Result<Vec<PluginInfo>> {
     scan_vst3_paths(&paths).map_err(napi::Error::from_reason)
 }
 
+#[cfg(feature = "napi")]
 #[napi]
 pub fn scan_clap(paths: Vec<String>) -> napi::Result<Vec<PluginInfo>> {
     scan_clap_paths(&paths).map_err(napi::Error::from_reason)
 }
 
+#[cfg(feature = "napi")]
 #[napi]
 pub fn scan_audio_plugins(paths: Vec<String>) -> napi::Result<Vec<PluginInfo>> {
     scan_audio_plugin_paths(&paths).map_err(napi::Error::from_reason)
 }
 
+#[cfg(feature = "napi")]
 #[napi]
 pub fn get_backend_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()

@@ -8,7 +8,7 @@ const electronRoot = path.resolve(__dirname, "..");
 const workspaceRoot = path.resolve(electronRoot, "..", "..");
 const hostRoot = path.join(workspaceRoot, "crates", "SpherePluginHost");
 const debug = process.argv.includes("--debug");
-const cargoArgs = ["build", ...(debug ? [] : ["--release"] )];
+const cargoArgs = ["build", ...(debug ? [] : ["--release"]), "--features", "napi"];
 
 function run(command, args, options = {}) {
   return spawnSync(command, args, {

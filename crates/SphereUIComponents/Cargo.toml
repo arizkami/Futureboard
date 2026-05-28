@@ -28,8 +28,10 @@ gpui = { version = "0.2.2", default-features = false, features = [
 # (SphereDirectAudioEngine) per PART 5 — the UI no longer carries its
 # own hound / symphonia decoder. Same engine, same LOD ladder, same
 # format coverage as the realtime path.
-sphere-direct-audio-engine = { path = "../SphereDirectAudioEngine" }
-sphere-plugin-host = { path = "../SpherePluginHost" }
+# IMPORTANT: UI components are used by the standalone `futureboard_native` app.
+# Disable Node/N-API surfaces so native builds don't try to link against `napi_*`.
+sphere-direct-audio-engine = { path = "../SphereDirectAudioEngine", default-features = false }
+sphere-plugin-host = { path = "../SpherePluginHost", default-features = false }
 # Cross-platform user directories for the file browser default location.
 dirs = "5"
 # Menu manifest is shared with Electron/Web via a generated JSON file.
