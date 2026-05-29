@@ -466,9 +466,132 @@ pub fn native_host_status() -> NativeHostStatus {
 /// Registry service: scan VST3 + CLAP via [`scan_audio_plugin_paths`].
 pub struct PluginRegistry;
 
+/// Outcome of [`PluginRegistry::load_catalog`].
+#[derive(Debug)]
+pub enum CatalogLoad {
+    /// SQLite cache loaded successfully (may still be empty).
+    Loaded {
+        catalog: crate::plugin_db::PluginCatalog,
+        sqlite_ms: u128,
+    },
+    /// `index.dat` does not exist on disk yet.
+    MissingDatabase {
+        path: PathBuf,
+    },
+    /// SQLite open/read failed — caller renders an error panel and offers
+    /// rebuild/retry.
+    Error {
+        path: PathBuf,
+        message: String,
+    },
+}
+
 impl PluginRegistry {
     pub fn host_status() -> NativeHostStatus {
         native_host_status()
+    }
+
+    /// Load the SQLite-backed plug-in catalog. Never scans, never touches
+    /// plug-in binaries, never opens the VST3/CLAP SDK. Safe to call on a
+    /// background executor. Distinct error states are returned so the picker
+    /// can render `MissingDatabase` vs `Error(text)` vs `Loaded { empty }`.
+    pub fn load_catalog() -> CatalogLoad {
+        use crate::plugin_db::{
+            database_exists, database_path, open_database_readonly, read_all, PluginCatalog,
+        };
+        let path = database_path();
+        if !database_exists() {
+            return CatalogLoad::MissingDatabase { path };
+        }
+        let started = std::time::Instant::now();
+        let conn = match open_database_readonly() {
+            Ok(c) => c,
+            Err(e) => {
+                return CatalogLoad::Error {
+                    path,
+                    message: e,
+                }
+            }
+        };
+        let plugins = match read_all(&conn) {
+            Ok(v) => v,
+            Err(e) => {
+                return CatalogLoad::Error {
+                    path,
+                    message: e.to_string(),
+                }
+            }
+        };
+        CatalogLoad::Loaded {
+            catalog: PluginCatalog {
+                plugins,
+                loaded_at: std::time::Instant::now(),
+                source_path: path,
+            },
+            sqlite_ms: started.elapsed().as_millis(),
+        }
+    }
+
+    /// Compatibility shim used by callers that still consume the legacy
+    /// `RegistryPlugin` shape — projects the SQLite catalog (or, if missing,
+    /// the `.pst` files) into a flat `Vec`.
+    pub fn load_cached() -> (Vec<RegistryPlugin>, i64) {
+        use crate::plugin_db::{database_exists, last_scan_ms, open_database_readonly, read_all};
+        if database_exists() {
+            if let Ok(conn) = open_database_readonly() {
+                if let Ok(rows) = read_all(&conn) {
+                    let last = last_scan_ms(&conn).unwrap_or(0);
+                    let plugins: Vec<RegistryPlugin> =
+                        rows.iter().map(|e| e.to_registry_plugin()).collect();
+                    return (plugins, last);
+                }
+            }
+        }
+        // Fallback to legacy `.pst` cache (kept for users upgrading from the
+        // pre-SQLite build; remove once everyone has rescanned).
+        let mut plugins = crate::preset::load_cached_plugins();
+        plugins.sort_by(|a, b| {
+            let kind = match (a.kind, b.kind) {
+                (PluginKind::Instrument, PluginKind::Effect) => std::cmp::Ordering::Less,
+                (PluginKind::Effect, PluginKind::Instrument) => std::cmp::Ordering::Greater,
+                _ => std::cmp::Ordering::Equal,
+            };
+            kind.then_with(|| a.vendor.cmp(&b.vendor))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        let last = plugins.iter().map(|p| p.scanned_at_ms).max().unwrap_or(0);
+        (plugins, last)
+    }
+
+    /// Upsert the given plugins into the SQLite catalog inside one
+    /// transaction. Used by the scanner once a scan completes.
+    pub fn write_catalog(plugins: &[RegistryPlugin]) -> Result<(), String> {
+        use crate::plugin_db::{open_database, upsert_plugins, PluginCatalogEntry};
+        let mut conn = open_database()?;
+        let entries: Vec<PluginCatalogEntry> =
+            plugins.iter().map(PluginCatalogEntry::from).collect();
+        upsert_plugins(&mut conn, &entries).map_err(|e| e.to_string())
+    }
+
+    /// Delete every plug-in row from the SQLite cache and remove all `.pst`
+    /// files. Returns total entries dropped (sum of both sources).
+    pub fn clear_cache() -> Result<u32, String> {
+        use crate::plugin_db::{clear_with_run_record, database_exists, open_database};
+        let mut removed_db = 0u32;
+        if database_exists() {
+            let mut conn = open_database()?;
+            removed_db = clear_with_run_record(&mut conn).map_err(|e| e.to_string())?;
+        }
+        let removed_pst = crate::preset::clear_plugin_cache().unwrap_or(0);
+        Ok(removed_db + removed_pst)
+    }
+
+    /// Count of rows whose backing binary cannot be opened anymore.
+    pub fn cached_failed_count(plugins: &[RegistryPlugin]) -> u32 {
+        plugins
+            .iter()
+            .filter(|p| p.status == PluginStatus::MissingPreset || !p.path.exists())
+            .count() as u32
     }
 
     /// Scan default OS paths, or the provided folders (VST3 + CLAP).
@@ -603,6 +726,22 @@ impl PluginRegistry {
             kind.then_with(|| a.vendor.cmp(&b.vendor))
                 .then_with(|| a.name.cmp(&b.name))
         });
+
+        // Persist the catalog to the SQLite cache so the Plugin Picker can
+        // load it on the next open without re-running the SDK scanner. Errors
+        // are non-fatal — the scan result is still returned to the manager.
+        if let Err(err) = Self::write_catalog(&plugins) {
+            failed.push(PluginScanFailure {
+                path: crate::plugin_db::database_path(),
+                error: format!("sqlite write: {err}"),
+            });
+        } else if std::env::var_os("FUTUREBOARD_PLUGIN_DB_DEBUG").is_some() {
+            eprintln!(
+                "[plugin-db] wrote {} rows to {}",
+                plugins.len(),
+                crate::plugin_db::database_path().display()
+            );
+        }
 
         RegistryScanResult {
             plugins,

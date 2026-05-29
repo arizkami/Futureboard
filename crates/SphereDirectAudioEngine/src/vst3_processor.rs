@@ -216,6 +216,26 @@ impl Vst3RuntimeProcessor {
     }
 
     #[inline]
+    pub fn last_error(&self) -> Option<String> {
+        if self.inner.raw.is_null() {
+            return None;
+        }
+        unsafe {
+            let ptr = sphere_daux_vst3_last_error();
+            if ptr.is_null() {
+                None
+            } else {
+                let s = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
+            }
+        }
+    }
+
+    #[inline]
     pub fn plugin_path(&self) -> Option<&str> {
         if self.inner.plugin_path.is_empty() {
             None

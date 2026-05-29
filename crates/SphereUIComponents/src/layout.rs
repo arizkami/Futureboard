@@ -17,8 +17,10 @@ use crate::components::add_track_dialog::{
 use crate::components::plugin_editor_window::PluginEditorWindow;
 use crate::components::plugin_manager::{open_plugin_manager_window, PluginManagerWindow};
 use crate::components::plugin_picker::{
-    plugin_picker_overlay, PluginPickerCallbacks, PluginPickerState, STUB_PLUGIN_ID,
+    plugin_picker_overlay, CatalogStatus as PluginCatalogStatus, PickerFilter,
+    PluginPickerCallbacks, PluginPickerState, STUB_PLUGIN_ID,
 };
+use sphere_plugin_host::CatalogLoad;
 use crate::components::context_menu::ContextMenuEntry;
 use crate::components::file_browser::{read_directory, FileBrowserState};
 use crate::components::mixer_panel::MixerCallbacks;
@@ -154,6 +156,13 @@ pub struct StudioLayout {
     /// dialog populates it). Phase 2a uses the first insert-capable
     /// entry; Phase 2b adds a real picker overlay.
     available_plugins: Option<Vec<sphere_plugin_host::RegistryPlugin>>,
+    /// `true` if the cached preset directory exists on disk. Drives the
+    /// "No plugin index found" message in the picker.
+    plugin_cache_present: bool,
+    /// Picker catalog state — drives the skeleton / error UI in the overlay.
+    /// `Loading` while the background SQLite read is in flight; `Ready` once
+    /// `available_plugins` has been populated.
+    plugin_catalog_status: PluginCatalogStatus,
     /// Open native plugin editor windows (Phase 4). Keyed by
     /// `(track_id, insert_id)` → the GPUI-hosted editor window handle. GPUI
     /// owns the borderless shell; the C++ backend embeds the VST3 IPlugView in
@@ -563,6 +572,8 @@ impl StudioLayout {
             add_track_window: None,
             plugin_manager_window: None,
             available_plugins: None,
+            plugin_cache_present: false,
+            plugin_catalog_status: PluginCatalogStatus::Loading,
             open_plugin_editors: std::collections::HashMap::new(),
             settings_window: None,
             mixer_window: None,
@@ -1712,24 +1723,117 @@ impl StudioLayout {
     }
 
 
-    fn ensure_plugins_scanned(&mut self) {
-        if self.available_plugins.is_none() {
-            if std::env::var_os("FUTUREBOARD_PLUGIN_DEBUG").is_some() {
-                eprintln!("[plugin] populating registry cache (first add_insert)");
-            }
-            let result = sphere_plugin_host::PluginRegistry::scan(None);
-            self.available_plugins = Some(result.plugins);
+    /// Kick off a background SQLite load of the plug-in catalog. The picker
+    /// opens instantly with a skeleton; this task replaces the skeleton once
+    /// the catalog is read. Re-entrant: a second call while a load is in
+    /// flight is a no-op.
+    ///
+    /// **Never** invokes the VST3/CLAP scanner; **never** touches plug-in
+    /// binaries. The picker's open path must stay UI-only.
+    fn arm_catalog_load(&mut self, cx: &mut Context<Self>) {
+        // Already loaded and not stale → nothing to do.
+        if matches!(self.plugin_catalog_status, PluginCatalogStatus::Ready)
+            && self.available_plugins.is_some()
+        {
+            return;
         }
+        if matches!(self.plugin_catalog_status, PluginCatalogStatus::Loading)
+            && self.available_plugins.is_none()
+        {
+            // Spawn-in-progress (initial boot path also fires this).
+        } else {
+            self.plugin_catalog_status = PluginCatalogStatus::Loading;
+        }
+
+        let debug = std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG").is_some()
+            || std::env::var_os("FUTUREBOARD_PLUGIN_DB_DEBUG").is_some();
+        let shell_started = std::time::Instant::now();
+
+        cx.spawn(async move |this, cx| {
+            let load = cx
+                .background_executor()
+                .spawn(async { sphere_plugin_host::PluginRegistry::load_catalog() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match load {
+                    CatalogLoad::Loaded { catalog, sqlite_ms } => {
+                        let count = catalog.plugins.len();
+                        let plugins: Vec<sphere_plugin_host::RegistryPlugin> = catalog
+                            .plugins
+                            .iter()
+                            .map(|e| e.to_registry_plugin())
+                            .collect();
+                        this.available_plugins = Some(plugins);
+                        this.plugin_cache_present = true;
+                        this.plugin_catalog_status = PluginCatalogStatus::Ready;
+                        if debug {
+                            eprintln!(
+                                "[plugin-db] loaded rows={count} sqlite_ms={sqlite_ms} path={} total_ms={}",
+                                catalog.source_path.display(),
+                                shell_started.elapsed().as_millis(),
+                            );
+                        }
+                    }
+                    CatalogLoad::MissingDatabase { path } => {
+                        this.available_plugins = Some(Vec::new());
+                        this.plugin_cache_present = false;
+                        this.plugin_catalog_status = PluginCatalogStatus::MissingDatabase;
+                        if debug {
+                            eprintln!(
+                                "[plugin-db] path={} exists=false",
+                                path.display()
+                            );
+                        }
+                    }
+                    CatalogLoad::Error { path, message } => {
+                        this.available_plugins = Some(Vec::new());
+                        this.plugin_cache_present = path.exists();
+                        this.plugin_catalog_status =
+                            PluginCatalogStatus::Error(message.clone());
+                        if debug {
+                            eprintln!(
+                                "[plugin-db] error path={} message={}",
+                                path.display(),
+                                message
+                            );
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
-    /// Open the Phase 2b insert picker for `track_id`. Runs the lazy registry
-    /// scan (UI thread) so the overlay has a populated list, then focuses the
-    /// search field. No insert slot is created until the user picks a plugin.
+    /// Open the Phase 2b insert picker for `track_id`. Loads from cached
+    /// `.pst` index only (no VST3/CLAP scan, no plug-in binary read) so the
+    /// overlay opens instantly even with 1000+ plug-ins. No insert slot is
+    /// created until the user picks a plugin.
     fn open_insert_picker(&mut self, track_id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_plugins_scanned();
+        let debug = std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG").is_some();
+        let started = std::time::Instant::now();
         self.plugin_picker = PluginPickerState::open_for(track_id);
         self.plugin_picker_search_input.set_value("");
         self.plugin_picker_search_input.focus_handle.focus(window);
+        // Kick off (or rejoin) the background SQLite load. Picker shell is
+        // visible immediately; skeleton rows fill in until the catalog lands.
+        if self.available_plugins.is_none()
+            || !matches!(self.plugin_catalog_status, PluginCatalogStatus::Ready)
+        {
+            self.arm_catalog_load(cx);
+        }
+        if debug {
+            let state_label = match &self.plugin_catalog_status {
+                PluginCatalogStatus::Loading => "LoadingCatalog",
+                PluginCatalogStatus::Ready => "Ready",
+                PluginCatalogStatus::MissingDatabase => "MissingDatabase",
+                PluginCatalogStatus::Error(_) => "Error",
+            };
+            eprintln!(
+                "[plugin-picker] opened state={state_label} shell_ms={}",
+                started.elapsed().as_millis()
+            );
+        }
         cx.notify();
     }
 
@@ -4323,17 +4427,23 @@ impl Render for StudioLayout {
                         });
                     }
                 }),
-                on_select_category: Arc::new({
+                on_select: Arc::new({
                     let this = cx.entity().clone();
-                    move |cat: &String, _w, cx| {
-                        let cat = cat.clone();
+                    move |plugin_id: &String, _w, cx| {
+                        let plugin_id = plugin_id.clone();
                         let _ = this.update(cx, |this, cx| {
-                            this.plugin_picker.category =
-                                if cat == crate::components::plugin_picker::CATEGORY_ALL {
-                                    None
-                                } else {
-                                    Some(cat)
-                                };
+                            this.plugin_picker.selected_id = Some(plugin_id);
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_select_filter: Arc::new({
+                    let this = cx.entity().clone();
+                    move |filter: &PickerFilter, _w, cx| {
+                        let filter = filter.clone();
+                        let _ = this.update(cx, |this, cx| {
+                            this.plugin_picker.filter = filter;
+                            this.plugin_picker.selected_id = None;
                             cx.notify();
                         });
                     }
@@ -4347,12 +4457,50 @@ impl Render for StudioLayout {
                         });
                     }
                 }),
+                on_retry_load: Arc::new({
+                    let this = cx.entity().clone();
+                    move |_: &(), _w, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            this.available_plugins = None;
+                            this.plugin_catalog_status = PluginCatalogStatus::Loading;
+                            this.arm_catalog_load(cx);
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_open_plugin_manager: Arc::new({
+                    let this = cx.entity().clone();
+                    move |_: &(), window, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            this.plugin_picker = PluginPickerState::closed();
+                            let _ = window;
+                            this.open_plugin_manager_external_window(None, cx);
+                            cx.notify();
+                        });
+                    }
+                }),
+                on_rebuild_database: Arc::new({
+                    let this = cx.entity().clone();
+                    move |_: &(), _w, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            // Drop the SQLite file outright; next picker open
+                            // reports MissingDatabase, prompting Scan Now.
+                            let _ = sphere_plugin_host::plugin_db::delete_database_file();
+                            this.available_plugins = None;
+                            this.plugin_catalog_status = PluginCatalogStatus::Loading;
+                            this.arm_catalog_load(cx);
+                            cx.notify();
+                        });
+                    }
+                }),
             };
             let plugins = self.available_plugins.clone().unwrap_or_default();
+            let catalog_status = self.plugin_catalog_status.clone();
             Some(
                 plugin_picker_overlay(
                     &self.plugin_picker,
                     &plugins,
+                    catalog_status,
                     &self.plugin_picker_search_input,
                     self.plugin_picker_search_input.is_focused(window),
                     search_context_callbacks,

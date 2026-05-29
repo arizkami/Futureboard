@@ -4,7 +4,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::registry::{default_preset_root, RegistryPlugin};
 
@@ -132,6 +132,137 @@ pub fn register_plugin(plugin: &mut RegistryPlugin) -> Result<(), String> {
     write_preset(plugin)?;
     plugin.status = crate::registry::PluginStatus::PresetReady;
     Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PresetMetadataOwned {
+    #[serde(default)]
+    created_at: i64,
+    plugin_metadata: PresetPluginMetadataOwned,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PresetPluginMetadataOwned {
+    id: String,
+    name: String,
+    #[serde(default)]
+    vendor: String,
+    #[serde(default)]
+    format: String,
+    #[serde(default)]
+    category: String,
+    #[serde(default)]
+    raw_category: Option<String>,
+    #[serde(default)]
+    sub_categories: Option<String>,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    class_id: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    sdk_metadata_loaded: bool,
+}
+
+/// Read a single `.pst` and reconstruct its [`RegistryPlugin`] row. No plugin
+/// binary is touched — the binary `status` reflects whether the path on disk
+/// still exists.
+pub fn read_preset_file(preset_path: &Path) -> Result<RegistryPlugin, String> {
+    use crate::registry::{display_category, PluginFormat, PluginKind, PluginStatus};
+
+    let bytes = fs::read(preset_path).map_err(|e| e.to_string())?;
+    if bytes.len() < 24 || &bytes[..5] != PRESET_MAGIC {
+        return Err("Not an FBPST preset".to_string());
+    }
+    let meta_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+    let meta_start = 24usize;
+    let meta_end = meta_start
+        .checked_add(meta_len)
+        .ok_or_else(|| "Preset metadata length overflow".to_string())?;
+    if bytes.len() < meta_end {
+        return Err("Preset metadata truncated".to_string());
+    }
+    let parsed: PresetMetadataOwned = serde_json::from_slice(&bytes[meta_start..meta_end])
+        .map_err(|e| e.to_string())?;
+
+    let pm = parsed.plugin_metadata;
+    let format = PluginFormat::from_str_lossy(&pm.format);
+    let kind = match pm.kind.to_ascii_lowercase().as_str() {
+        "instrument" => PluginKind::Instrument,
+        _ => PluginKind::Effect,
+    };
+    let category = if pm.category.is_empty() {
+        display_category(format, &pm.category, pm.raw_category.as_deref(), pm.sub_categories.as_deref())
+    } else {
+        pm.category.clone()
+    };
+    let binary_path = PathBuf::from(&pm.path);
+    let status = if binary_path.exists() {
+        PluginStatus::PresetReady
+    } else {
+        PluginStatus::MissingPreset
+    };
+
+    Ok(RegistryPlugin {
+        id: pm.id,
+        name: pm.name,
+        vendor: pm.vendor,
+        format,
+        category,
+        raw_category: pm.raw_category,
+        sub_categories: pm.sub_categories,
+        kind,
+        path: binary_path,
+        class_id: pm.class_id,
+        version: pm.version,
+        sdk_metadata_loaded: pm.sdk_metadata_loaded,
+        preset_path: preset_path.to_path_buf(),
+        scanned_at_ms: parsed.created_at,
+        status,
+    })
+}
+
+/// Walk the preset root and load every cached `.pst` row. This does **not**
+/// touch any plug-in binary, scan default OS folders, or invoke the VST3/CLAP
+/// SDK; it is safe to call on the UI thread when the cache is small.
+pub fn load_cached_plugins() -> Vec<RegistryPlugin> {
+    let mut out = Vec::new();
+    let root = default_preset_root();
+    if !root.exists() {
+        return out;
+    }
+    collect_pst_files(&root, &mut |path| {
+        if let Ok(plugin) = read_preset_file(path) {
+            out.push(plugin);
+        }
+    });
+    out
+}
+
+fn collect_pst_files(dir: &Path, visit: &mut dyn FnMut(&Path)) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_pst_files(&path, visit);
+        } else if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pst"))
+        {
+            visit(&path);
+        }
+    }
+}
+
+/// Delete the entire preset cache directory tree. Used by Plugin Manager
+/// "Clear Plugin Cache". Returns the number of `.pst` files removed.
+pub fn clear_plugin_cache() -> Result<u32, String> {
+    clear_all_presets()
 }
 
 fn build_preset_binary(plugin: &RegistryPlugin) -> Vec<u8> {

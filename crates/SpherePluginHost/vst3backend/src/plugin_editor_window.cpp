@@ -24,6 +24,8 @@
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
 #  include <windowsx.h>
+#  include <libloaderapi.h>
+#  include <objbase.h>
 #  include <dwmapi.h>
 #  include <d3d11.h>
 #  include <dxgi.h>
@@ -184,6 +186,134 @@ struct AttachVst3Request {
   int result = 0;
 };
 
+struct EmbedPluginWebViewBasedScope;
+struct Vst3EditorAttachment;
+
+bool vst3_editor_debug() {
+  static const bool enabled = std::getenv("FUTUREBOARD_VST3_EDITOR_DEBUG") != nullptr;
+  return enabled;
+}
+
+inline bool vst3_view_rect_equal(const Steinberg::ViewRect& a, const Steinberg::ViewRect& b) {
+  return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
+}
+
+// IPlugFrame for VST3 editor hosting — mirrors SDK editorhost lifecycle.
+class PluginEditorFrame final : public Steinberg::IPlugFrame {
+ public:
+  void bind(Steinberg::IPlugView* view, HWND host, HWND shell = nullptr) {
+    bound_view_ = view;
+    host_hwnd_ = host;
+    shell_hwnd_ = shell;
+  }
+  void unbind() {
+    bound_view_ = nullptr;
+    host_hwnd_ = nullptr;
+    shell_hwnd_ = nullptr;
+  }
+
+  Steinberg::tresult PLUGIN_API resizeView(Steinberg::IPlugView* view,
+                                           Steinberg::ViewRect* newSize) override {
+    const bool debug = vst3_editor_debug();
+    if (debug) {
+      std::fprintf(stderr, "[vst3-editor] resizeView called view=0x%p\n", static_cast<void*>(view));
+    }
+    if (newSize == nullptr || view == nullptr || view != bound_view_) {
+      if (debug) std::fprintf(stderr, "[vst3-editor] resizeView rejected (invalid args)\n");
+      return Steinberg::kInvalidArgument;
+    }
+    if (resize_recursion_guard_) {
+      if (debug) std::fprintf(stderr, "[vst3-editor] resizeView rejected (recursion guard)\n");
+      return Steinberg::kResultFalse;
+    }
+
+    Steinberg::ViewRect current{};
+    if (view->getSize(&current) != Steinberg::kResultTrue) {
+      if (debug) std::fprintf(stderr, "[vst3-editor] resizeView rejected (getSize failed)\n");
+      return Steinberg::kInternalError;
+    }
+    if (vst3_view_rect_equal(current, *newSize)) {
+      if (debug) {
+        std::fprintf(stderr,
+                     "[vst3-editor] resizeView accepted (no-op) rect=(%d,%d,%d,%d)\n",
+                     newSize->left,
+                     newSize->top,
+                     newSize->right,
+                     newSize->bottom);
+      }
+      return Steinberg::kResultTrue;
+    }
+
+    if (debug) {
+      std::fprintf(stderr,
+                   "[vst3-editor] resizeView requested rect=(%d,%d,%d,%d) size=%dx%d\n",
+                   newSize->left,
+                   newSize->top,
+                   newSize->right,
+                   newSize->bottom,
+                   newSize->right - newSize->left,
+                   newSize->bottom - newSize->top);
+    }
+
+    resize_recursion_guard_ = true;
+    const int w = newSize->right - newSize->left;
+    const int h = newSize->bottom - newSize->top;
+    if (host_hwnd_ && IsWindow(host_hwnd_) && w > 0 && h > 0) {
+      SetWindowPos(host_hwnd_, nullptr, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+      if (shell_hwnd_ && IsWindow(shell_hwnd_)) {
+        RECT wr{0, 0, w, h};
+        AdjustWindowRectEx(&wr,
+                           static_cast<DWORD>(GetWindowLongPtrW(shell_hwnd_, GWL_STYLE)),
+                           FALSE,
+                           static_cast<DWORD>(GetWindowLongPtrW(shell_hwnd_, GWL_EXSTYLE)));
+        SetWindowPos(shell_hwnd_,
+                     nullptr,
+                     0,
+                     0,
+                     wr.right - wr.left,
+                     wr.bottom - wr.top,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+      }
+    }
+    resize_recursion_guard_ = false;
+
+    Steinberg::ViewRect after{};
+    if (view->getSize(&after) != Steinberg::kResultTrue) {
+      if (debug) std::fprintf(stderr, "[vst3-editor] resizeView rejected (getSize after resize failed)\n");
+      return Steinberg::kInternalError;
+    }
+    if (!vst3_view_rect_equal(after, *newSize)) {
+      const auto on_size_res = view->onSize(newSize);
+      if (debug) {
+        std::fprintf(stderr,
+                     "[vst3-editor] resizeView onSize result=0x%x\n",
+                     static_cast<unsigned>(on_size_res));
+      }
+    }
+    if (debug) std::fprintf(stderr, "[vst3-editor] resizeView accepted\n");
+    return Steinberg::kResultOk;
+  }
+
+  Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid, void** obj) override {
+    if (Steinberg::FUnknownPrivate::iidEqual(iid, Steinberg::INLINE_UID_OF(IPlugFrame)) ||
+        Steinberg::FUnknownPrivate::iidEqual(iid, Steinberg::FUnknown::iid)) {
+      *obj = static_cast<Steinberg::IPlugFrame*>(this);
+      addRef();
+      return Steinberg::kResultTrue;
+    }
+    *obj = nullptr;
+    return Steinberg::kNoInterface;
+  }
+  Steinberg::uint32 PLUGIN_API addRef() override { return 1000; }
+  Steinberg::uint32 PLUGIN_API release() override { return 1000; }
+
+ private:
+  Steinberg::IPlugView* bound_view_{nullptr};
+  HWND host_hwnd_{nullptr};
+  HWND shell_hwnd_{nullptr};
+  bool resize_recursion_guard_{false};
+};
+
 struct Vst3EditorAttachment {
   VST3::Hosting::Module::Ptr module;
   Steinberg::Vst::HostApplication host_context;
@@ -197,7 +327,41 @@ struct Vst3EditorAttachment {
   bool attached = false;
   std::string plugin_path;
   std::string class_id;
+  std::unique_ptr<EmbedPluginWebViewBasedScope> plugin_webview_based_scope;
+  std::unique_ptr<PluginEditorFrame> editor_frame;
+
+  ~Vst3EditorAttachment();
 };
+
+void vst3_install_plug_frame(Vst3EditorAttachment& att, HWND host, HWND shell) {
+  if (!att.view) return;
+  if (!att.editor_frame) {
+    att.editor_frame = std::make_unique<PluginEditorFrame>();
+  }
+  att.editor_frame->bind(att.view.get(), host, shell);
+  if (vst3_editor_debug()) {
+    std::fprintf(stderr,
+                 "[vst3-editor] setFrame called view=0x%p frame=0x%p host=0x%p\n",
+                 static_cast<void*>(att.view.get()),
+                 static_cast<void*>(att.editor_frame.get()),
+                 static_cast<void*>(host));
+  }
+  const auto res = att.view->setFrame(att.editor_frame.get());
+  std::fprintf(stderr, "[vst3-editor] setFrame result=0x%x\n", static_cast<unsigned>(res));
+}
+
+void vst3_clear_plug_frame(Vst3EditorAttachment& att) {
+  if (att.view) {
+    if (vst3_editor_debug()) {
+      std::fprintf(stderr,
+                   "[vst3-editor] setFrame null view=0x%p\n",
+                   static_cast<void*>(att.view.get()));
+    }
+    att.view->setFrame(nullptr);
+  }
+  if (att.editor_frame) att.editor_frame->unbind();
+  att.editor_frame.reset();
+}
 
 struct EditorWindowConfig {
   unsigned long long handle = 0;
@@ -519,9 +683,19 @@ void cleanup_vst3_editor(EditorWindowState* state) {
   if (!state || !state->vst3) return;
   auto& vst3 = *state->vst3;
   if (vst3.view && vst3.attached) {
-    std::fprintf(stderr, "[SpherePluginHost] VST3 editor removed handle=%llu\n", state->handle);
-    vst3.view->removed();
+    vst3_clear_plug_frame(vst3);
+    const auto removed_res = vst3.view->removed();
+    std::fprintf(stderr,
+                 "[SpherePluginHost] VST3 editor removed handle=%llu result=0x%x\n",
+                 state->handle,
+                 static_cast<unsigned>(removed_res));
+    if (vst3_editor_debug()) {
+      std::fprintf(stderr, "[vst3-editor] removed result=0x%x\n",
+                   static_cast<unsigned>(removed_res));
+    }
     vst3.attached = false;
+  } else {
+    vst3_clear_plug_frame(vst3);
   }
   if (vst3.controller) {
     vst3.controller->setComponentHandler(nullptr);
@@ -756,8 +930,15 @@ bool attach_vst3_view_on_window_thread(EditorWindowState* state, const char* plu
         preferred.bottom);
   }
 
+  vst3_install_plug_frame(*attachment, state->attach_hwnd, state->hwnd);
+
   const auto attach_result = attachment->view->attached(reinterpret_cast<void*>(state->attach_hwnd), Steinberg::kPlatformTypeHWND);
-  if (attach_result != Steinberg::kResultTrue) {
+  std::fprintf(stderr,
+               "[vst3-editor] attached result=0x%x host=0x%p\n",
+               static_cast<unsigned>(attach_result),
+               static_cast<void*>(state->attach_hwnd));
+  if (attach_result != Steinberg::kResultTrue && attach_result != Steinberg::kResultOk) {
+    vst3_clear_plug_frame(*attachment);
     set_attach_failed(state, "IPlugView::attached(HWND) failed");
     return false;
   }
@@ -1228,6 +1409,233 @@ void run_win32_editor(EditorWindowConfig* config) {
 // attaching it to any window yet. Reuses the same helpers + shared param queue
 // as the legacy path so Phase 5 drain works for either. Returns null + `error`
 // on failure; never throws across the C ABI.
+
+// Generic browser/WebView runtime compatibility layer (mirror of the DAUx
+// detection in SphereDirectAudioEngine). Keyed off bundled marker files, not
+// vendor names. See `daux_detect_editor_runtime` for the canonical reference.
+
+enum class EmbedEditorRuntimeKind {
+  Native = 0,
+  WebView2 = 1,
+  Cef = 2,
+  Chromium = 3,
+  BrowserUnknown = 4,
+};
+
+const char* embed_editor_runtime_kind_name(EmbedEditorRuntimeKind kind) {
+  switch (kind) {
+    case EmbedEditorRuntimeKind::WebView2: return "WebView2";
+    case EmbedEditorRuntimeKind::Cef: return "Cef";
+    case EmbedEditorRuntimeKind::Chromium: return "Chromium";
+    case EmbedEditorRuntimeKind::BrowserUnknown: return "BrowserUnknown";
+    case EmbedEditorRuntimeKind::Native:
+    default: return "Native";
+  }
+}
+
+bool embed_plugin_webview_based_debug() {
+  static const bool enabled =
+      std::getenv("FUTUREBOARD_PLUGIN_WEBVIEW_DEBUG") != nullptr ||
+      std::getenv("FUTUREBOARD_UAD_DEBUG") != nullptr;
+  return enabled;
+}
+
+std::wstring embed_webview_runtime_arch_subdir() {
+#if defined(_M_ARM64)
+  return L"win-arm64";
+#else
+  return L"win-x64";
+#endif
+}
+
+bool embed_path_exists_w(const std::wstring& path) {
+  if (path.empty()) return false;
+  const DWORD attrs = GetFileAttributesW(path.c_str());
+  return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+bool embed_dir_exists_w(const std::wstring& path) {
+  if (path.empty()) return false;
+  const DWORD attrs = GetFileAttributesW(path.c_str());
+  return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+std::wstring embed_join_path_w(std::wstring base, const wchar_t* suffix) {
+  if (base.empty()) return suffix ? suffix : L"";
+  while (!base.empty() && (base.back() == L'\\' || base.back() == L'/')) base.pop_back();
+  if (!suffix || !*suffix) return base;
+  std::wstring out = std::move(base);
+  out.push_back(L'\\');
+  out += suffix;
+  return out;
+}
+
+bool embed_file_in_dir(const std::wstring& dir, const wchar_t* file) {
+  return embed_path_exists_w(embed_join_path_w(dir, file));
+}
+
+void embed_push_dir_unique(std::vector<std::wstring>& dirs, const std::wstring& dir) {
+  if (dir.empty()) return;
+  for (const auto& e : dirs) {
+    if (_wcsicmp(e.c_str(), dir.c_str()) == 0) return;
+  }
+  dirs.push_back(dir);
+}
+
+struct EmbedEditorRuntimeDetection {
+  EmbedEditorRuntimeKind kind = EmbedEditorRuntimeKind::Native;
+  std::vector<std::wstring> dll_dirs;
+  std::wstring webview2_loader;
+};
+
+EmbedEditorRuntimeDetection embed_detect_editor_runtime(const std::string& plugin_path) {
+  EmbedEditorRuntimeDetection out;
+  if (plugin_path.empty()) return out;
+  const std::wstring root = utf8_to_wide(plugin_path.c_str());
+  const std::wstring arch = embed_webview_runtime_arch_subdir();
+
+  static const wchar_t* kBaseRel[] = {
+      L"", L"Contents\\Resources", L"Contents\\x86_64-win",
+      L"Contents\\Resources\\WebView2", L"Contents\\Resources\\CEF",
+      L"Contents\\Resources\\Chromium", L"Contents\\Resources\\Browser",
+      L"Contents\\Resources\\runtimes", L"Contents\\Resources\\bin",
+  };
+
+  bool wv2 = false, cef = false, chromium = false, browser = false;
+  for (const wchar_t* rel : kBaseRel) {
+    const std::wstring base = (*rel) ? embed_join_path_w(root, rel) : root;
+    if (!embed_dir_exists_w(base)) continue;
+
+    const std::wstring runtimes_native = embed_join_path_w(
+        embed_join_path_w(embed_join_path_w(base, L"runtimes"), arch.c_str()), L"native");
+    const std::wstring arch_native =
+        embed_join_path_w(embed_join_path_w(base, arch.c_str()), L"native");
+    const std::wstring wv2_candidates[] = {base, runtimes_native, arch_native};
+    for (const std::wstring& nd : wv2_candidates) {
+      if (nd.empty() || !embed_dir_exists_w(nd)) continue;
+      const std::wstring loader = embed_join_path_w(nd, L"WebViewLoader.dll");
+      if (embed_path_exists_w(loader)) {
+        wv2 = true;
+        embed_push_dir_unique(out.dll_dirs, nd);
+        if (out.webview2_loader.empty()) out.webview2_loader = loader;
+      }
+      if (embed_file_in_dir(nd, L"Microsoft.Web.WebView2.Core.dll")) {
+        wv2 = true;
+        embed_push_dir_unique(out.dll_dirs, nd);
+      }
+    }
+
+    const bool has_libcef = embed_file_in_dir(base, L"libcef.dll");
+    const bool has_chrome_elf = embed_file_in_dir(base, L"chrome_elf.dll");
+    const bool has_cef_pak = embed_file_in_dir(base, L"cef.pak") ||
+                             embed_file_in_dir(base, L"cef_100_percent.pak") ||
+                             embed_file_in_dir(base, L"cef_200_percent.pak");
+    const bool has_icu = embed_file_in_dir(base, L"icudtl.dat");
+    const bool has_v8 = embed_file_in_dir(base, L"snapshot_blob.bin") ||
+                        embed_file_in_dir(base, L"v8_context_snapshot.bin");
+    const bool has_respak = embed_file_in_dir(base, L"resources.pak");
+
+    if (has_libcef) {
+      cef = true;
+      embed_push_dir_unique(out.dll_dirs, base);
+    }
+    if (has_cef_pak) cef = true;
+    if (has_chrome_elf) {
+      embed_push_dir_unique(out.dll_dirs, base);
+      if (!has_libcef && !has_cef_pak) chromium = true;
+    }
+    if (has_icu || has_v8 || has_respak) browser = true;
+  }
+
+  if (wv2) out.kind = EmbedEditorRuntimeKind::WebView2;
+  else if (cef) out.kind = EmbedEditorRuntimeKind::Cef;
+  else if (chromium) out.kind = EmbedEditorRuntimeKind::Chromium;
+  else if (browser) out.kind = EmbedEditorRuntimeKind::BrowserUnknown;
+  else out.kind = EmbedEditorRuntimeKind::Native;
+  return out;
+}
+
+bool embed_plugin_is_browser_based(const std::string& plugin_path) {
+  return embed_detect_editor_runtime(plugin_path).kind != EmbedEditorRuntimeKind::Native;
+}
+
+void embed_webview2_ensure_dll_search_policy() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+                                  LOAD_LIBRARY_SEARCH_USER_DIRS)) {
+      std::fprintf(stderr, "[plugin-webview-based] SetDefaultDllDirectories failed err=%lu\n", GetLastError());
+    } else if (embed_plugin_webview_based_debug()) {
+      std::fprintf(stderr, "[plugin-webview-based] SetDefaultDllDirectories ok\n");
+    }
+  });
+}
+
+struct EmbedPluginWebViewBasedScope {
+  std::vector<DLL_DIRECTORY_COOKIE> dll_cookies;
+  HMODULE loader_module = nullptr;
+
+  ~EmbedPluginWebViewBasedScope() {
+    if (loader_module) FreeLibrary(loader_module);
+    for (DLL_DIRECTORY_COOKIE c : dll_cookies) {
+      if (c) RemoveDllDirectory(c);
+    }
+  }
+
+  static std::unique_ptr<EmbedPluginWebViewBasedScope> try_create(const std::string& plugin_path,
+                                                                  std::string& error) {
+    const EmbedEditorRuntimeDetection det = embed_detect_editor_runtime(plugin_path);
+    if (det.kind == EmbedEditorRuntimeKind::Native) {
+      return nullptr;  // normal native UI plug-in
+    }
+
+    const bool debug =
+        embed_plugin_webview_based_debug() || std::getenv("FUTUREBOARD_PLUGIN_VIEW_DEBUG") != nullptr;
+    if (debug) {
+      std::fprintf(stderr, "[plugin-webview-based] runtime=%s dll_dirs=%zu path=%s\n",
+                   embed_editor_runtime_kind_name(det.kind), det.dll_dirs.size(), plugin_path.c_str());
+    }
+
+    if (det.dll_dirs.empty()) {
+      return nullptr;  // detected via resources only — nothing to add, not fatal
+    }
+
+    embed_webview2_ensure_dll_search_policy();
+    auto scope = std::make_unique<EmbedPluginWebViewBasedScope>();
+    for (const std::wstring& dir : det.dll_dirs) {
+      DLL_DIRECTORY_COOKIE cookie = AddDllDirectory(dir.c_str());
+      if (!cookie) {
+        error = "Failed to configure plugin browser runtime search path (AddDllDirectory err=" +
+                std::to_string(GetLastError()) + ")";
+        return nullptr;  // ~scope rolls back already-added dirs
+      }
+      scope->dll_cookies.push_back(cookie);
+    }
+    if (debug) std::fprintf(stderr, "[plugin-webview-based] AddDllDirectory ok\n");
+
+    if (!det.webview2_loader.empty()) {
+      scope->loader_module = LoadLibraryW(det.webview2_loader.c_str());
+      if (!scope->loader_module) {
+        error = std::string("Failed to load plugin WebView2 runtime (GetLastError=") +
+                std::to_string(GetLastError()) + ")";
+        return nullptr;
+      }
+      if (debug) std::fprintf(stderr, "[plugin-webview-based] LoadLibrary WebViewLoader.dll ok\n");
+    }
+    return scope;
+  }
+};
+
+bool embed_prepare_plugin_webview_based(Vst3EditorAttachment* attachment, std::string& error) {
+  if (!attachment) return false;
+  auto scope = EmbedPluginWebViewBasedScope::try_create(attachment->plugin_path, error);
+  if (!scope) return error.empty(); // not browser-based, or detected-via-resources — ok
+  attachment->plugin_webview_based_scope = std::move(scope);
+  return true;
+}
+
+Vst3EditorAttachment::~Vst3EditorAttachment() = default;
+
 std::unique_ptr<Vst3EditorAttachment> build_vst3_attachment(
     const std::string& plugin_path,
     const std::string& class_id,
@@ -1316,10 +1724,18 @@ std::unique_ptr<Vst3EditorAttachment> build_vst3_attachment(
     attachment->controller_connection->connect(attachment->component_connection);
   }
 
+  if (!embed_prepare_plugin_webview_based(attachment.get(), error)) {
+    return nullptr;
+  }
+
   attachment->view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
       attachment->controller->createView(Steinberg::Vst::ViewType::kEditor));
   if (!attachment->view) {
-    error = "controller did not create editor view";
+    if (embed_plugin_is_browser_based(attachment->plugin_path)) {
+      error = "Browser/WebView-based plugin editor createView failed (controller returned null view)";
+    } else if (error.empty()) {
+      error = "controller did not create editor view";
+    }
     return nullptr;
   }
   if (attachment->view->isPlatformTypeSupported(Steinberg::kPlatformTypeHWND) != Steinberg::kResultTrue) {
@@ -1906,6 +2322,39 @@ void embed_refresh_session(EmbedSession* session, bool audit_log) {
   }
 }
 
+// Initialize COM on the editor (UI) thread before any IPlugView::attached call.
+// Some VST3 editors — notably UAD Native and other WebView/CEF-backed plug-ins —
+// need a live STA on the thread that owns their parent HWND, otherwise the
+// embedded WebView/CEF host never spins up child windows and the editor stays
+// blank. Idempotent and safe to call multiple times: if the thread is already
+// initialized to a different apartment we log the HRESULT and keep going (the
+// host will likely still attach, just without our STA hint).
+//
+// We deliberately do NOT pair this with `CoUninitialize` — the editor lifetime
+// extends past this function and the thread typically lives for the duration
+// of the app. Tearing down COM mid-editor would crash WebView hosts.
+void embed_ensure_com_initialized() {
+  static thread_local HRESULT s_last_hr = S_FALSE;
+  const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  if (hr != s_last_hr) {
+    s_last_hr = hr;
+    const char* tag = "ok";
+    if (hr == S_FALSE) {
+      tag = "already initialized (STA)";
+    } else if (hr == RPC_E_CHANGED_MODE) {
+      tag = "RPC_E_CHANGED_MODE (thread already in MTA)";
+    } else if (FAILED(hr)) {
+      tag = "FAILED";
+    }
+    std::fprintf(
+        stderr,
+        "[vst3-editor] COM init hr=0x%08lx (%s) tid=%lu\n",
+        static_cast<unsigned long>(hr),
+        tag,
+        GetCurrentThreadId());
+  }
+}
+
 bool embed_has_visible_plugin_ui(HWND child, Steinberg::IPlugView* view) {
   if (!child || !IsWindow(child) || !IsWindowVisible(child)) return false;
   RECT cr{};
@@ -1960,11 +2409,15 @@ void embed_destroy_session(std::unique_ptr<EmbedSession> session, unsigned long 
         static_cast<void*>(session->child));
   }
   if (session->vst3 && session->vst3->view && session->vst3->attached) {
+    vst3_clear_plug_frame(*session->vst3);
     const auto removed_result = session->vst3->view->removed();
-    if (embed_debug()) {
-      std::fprintf(stderr, "[vst3-editor] removed result=%d\n", (int)removed_result);
+    if (embed_debug() || vst3_editor_debug()) {
+      std::fprintf(stderr, "[vst3-editor] removed result=0x%x\n",
+                   static_cast<unsigned>(removed_result));
     }
     session->vst3->attached = false;
+  } else if (session->vst3) {
+    vst3_clear_plug_frame(*session->vst3);
   }
   session->vst3.reset();
   if (session->child && IsWindow(session->child)) {
@@ -2174,6 +2627,11 @@ extern "C" unsigned long long sphere_plugin_editor_embed_attach(
     int width,
     int height) {
 #ifdef _WIN32
+  // Phase 4: ensure COM (STA) is live on the editor thread before any
+  // IPlugView call. UAD Native and CEF/WebView plug-ins rely on this; benign
+  // for SDK-only editors (idempotent / no-op when already initialized).
+  embed_ensure_com_initialized();
+
   HWND parent = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(parent_hwnd));
   const std::string path = plugin_path ? plugin_path : "";
   const std::string cid = class_id ? class_id : "";
@@ -2303,6 +2761,8 @@ extern "C" unsigned long long sphere_plugin_editor_embed_attach(
       preferred.right,
       preferred.bottom);
 
+  vst3_install_plug_frame(*attachment, child, parent);
+
   // Attach the IPlugView to the CHILD HWND (never the parent / never a popup).
   const auto attach_result =
       attachment->view->attached(reinterpret_cast<void*>(child), Steinberg::kPlatformTypeHWND);
@@ -2311,7 +2771,12 @@ extern "C" unsigned long long sphere_plugin_editor_embed_attach(
       "[vst3-editor-audit] attached result=%s(%d)\n",
       embed_vst3_result_name(attach_result),
       (int)attach_result);
+  std::fprintf(stderr,
+               "[vst3-editor] attached result=0x%x host=0x%p\n",
+               static_cast<unsigned>(attach_result),
+               static_cast<void*>(child));
   if (attach_result != Steinberg::kResultTrue && attach_result != Steinberg::kResultOk) {
+    vst3_clear_plug_frame(*attachment);
     std::fprintf(stderr, "[vst3-editor] attach failed error=IPlugView::attached(HWND) returned %d\n",
                  (int)attach_result);
     DestroyWindow(child);
@@ -2357,27 +2822,28 @@ extern "C" unsigned long long sphere_plugin_editor_embed_attach(
         "[vst3-editor] attach failed error=child HWND not visible after show (0x%p)\n",
         static_cast<void*>(child));
     if (session->vst3 && session->vst3->view && session->vst3->attached) {
+      vst3_clear_plug_frame(*session->vst3);
       session->vst3->view->removed();
       session->vst3->attached = false;
+    } else if (session->vst3) {
+      vst3_clear_plug_frame(*session->vst3);
     }
     session->vst3.reset();
     DestroyWindow(child);
     return 0;
   }
 
-  // Never report ok if the plugin did not surface any plausible editor UI.
+  // Phase 6: do NOT destroy on a momentarily-blank child here. WebView/CEF
+  // editors (UAD Native, some Slate/iZotope hosts) take 100–3000 ms after
+  // `attached()` before their Chromium child windows materialize, so an
+  // immediate failure would always lose them. We log the state and hand the
+  // session back to Rust; the host's delayed-ready poller (`embed_has_visible_ui`
+  // at 100/500/1000/3000/5000 ms) decides when to surface a failure UI.
   if (!embed_has_visible_plugin_ui(child, session->vst3->view.get())) {
     std::fprintf(
         stderr,
-        "[vst3-editor] attach failed error=no visible plugin UI after attach "
-        "(child visible but empty — check GPUI compositor / plugin view)\n");
-    if (session->vst3 && session->vst3->view && session->vst3->attached) {
-      session->vst3->view->removed();
-      session->vst3->attached = false;
-    }
-    session->vst3.reset();
-    DestroyWindow(child);
-    return 0;
+        "[vst3-editor] attach warn no visible plugin UI yet "
+        "(child visible but empty — deferring to delayed-ready poller)\n");
   }
 
   if (host_kind == EmbedHostKind::OwnedToolWindow) {

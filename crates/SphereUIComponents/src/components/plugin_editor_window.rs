@@ -26,6 +26,7 @@ use gpui::{
 
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
 use crate::theme::{self, Colors};
+use sphere_plugin_host::editor_quirk::{match_quirk, PluginEditorQuirk};
 use sphere_plugin_host::native_editor::PluginEditorPresentationMode;
 
 /// Physical-pixel host region under the GPUI window. (Local mirror of the
@@ -75,11 +76,24 @@ enum PluginEditorStatus {
     WaitingForHostHandle,
     /// Bounds are ready; about to create the native child + attach.
     Attaching,
+    /// IPlugView::attached returned ok but no visible plug-in UI yet. We poll
+    /// `embed_has_visible_ui` at the Phase-6 milestones below; the editor is
+    /// promoted to `Attached` as soon as a visible UI appears. WebView/CEF
+    /// editors (UAD Native) regularly land here for hundreds of ms.
+    ProbingReady {
+        mode: PluginEditorPresentationMode,
+        probe_index: u8,
+    },
     /// Native editor attached and visible, via exactly one presentation mode.
     Attached(PluginEditorPresentationMode),
     /// Attach failed — fallback panel with Retry / Close.
     Failed(String),
 }
+
+/// Phase 6: delays (ms) between visible-UI re-checks after a successful
+/// `IPlugView::attached`. Cap at the last entry — anything still blank past
+/// that turns into a surfaced failure.
+const READY_PROBE_DELAYS_MS: &[u64] = &[100, 500, 1000, 3000, 5000];
 
 pub struct PluginEditorWindow {
     pub track_id: String,
@@ -101,6 +115,9 @@ pub struct PluginEditorWindow {
     /// Logged the "host region mounted" line once bounds first went non-zero.
     host_mounted_logged: bool,
     last_region: Option<(i32, i32, i32, i32)>,
+    /// Editor quirk resolved from the plug-in path + name at construction.
+    /// Drives the delayed-ready ramp and informs failure messaging.
+    quirk: PluginEditorQuirk,
     focus_handle: FocusHandle,
 }
 
@@ -112,6 +129,23 @@ impl PluginEditorWindow {
         processor: DAUx::Vst3RuntimeProcessor,
         cx: &mut Context<Self>,
     ) -> Self {
+        let quirk = processor
+            .plugin_path()
+            .map(|p| match_quirk(std::path::Path::new(p), Some(&display_name), None))
+            .unwrap_or_default();
+        if plugin_view_debug() {
+            eprintln!(
+                "[plugin-view] open requested plugin=\"{}\" track={} insert={} quirk={} delayed_ready={} sta={} extra_pump={} plugin_webview_based={}",
+                display_name,
+                track_id,
+                insert_id,
+                quirk.name,
+                quirk.delayed_ready_check,
+                quirk.requires_sta_com,
+                quirk.extra_message_pump,
+                quirk.plugin_webview_based,
+            );
+        }
         Self {
             track_id,
             insert_id,
@@ -123,6 +157,7 @@ impl PluginEditorWindow {
             tick_scheduled: false,
             host_mounted_logged: false,
             last_region: None,
+            quirk,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -225,6 +260,13 @@ impl PluginEditorWindow {
                 self.perform_attach(window, cx);
                 return;
             }
+            PluginEditorStatus::ProbingReady { .. } => {
+                // The probe scheduler advances the state — keep the host region
+                // in sync (parent moves still translate to the embed) while we
+                // wait for the WebView/CEF children to materialize.
+                self.sync_region(window);
+                return;
+            }
             PluginEditorStatus::Opening | PluginEditorStatus::WaitingForHostHandle => {}
         }
 
@@ -291,42 +333,52 @@ impl PluginEditorWindow {
             .embed_editor(parent, region.x, region.y, region.width, region.height)
         {
             Some(handle) => {
-                if !self.processor.embed_has_visible_ui() {
-                    self.processor.embed_detach();
-                    let msg = "Plugin editor attached but no visible UI was detected \
-                               (blank editor). See stderr [SphereVST3] logs or set \
-                               FUTUREBOARD_PLUGIN_VIEW_DEBUG=1."
-                        .to_string();
-                    if plugin_view_debug() {
-                        eprintln!(
-                            "[plugin-view] attach blank editor_id={} parent=0x{parent:x}",
-                            self.editor_id()
-                        );
-                    }
-                    self.status = PluginEditorStatus::Failed(msg);
-                } else {
-                    self.embed_handle = Some(handle);
-                    self.last_region = Some((region.x, region.y, region.width, region.height));
-                    // Re-apply bounds + z-order after attach (plugins may resize the host).
-                    self.processor
-                        .embed_set_bounds(region.x, region.y, region.width, region.height);
-                    self.processor.embed_refresh();
-                    // Record the single presentation mode the host selected so we
-                    // never drive both a child-HWND embed and a tool-window overlay.
-                    let mode = presentation_mode_from_host_kind(self.processor.embed_host_kind());
+                self.embed_handle = Some(handle);
+                self.last_region = Some((region.x, region.y, region.width, region.height));
+                // Re-apply bounds + z-order after attach (plugins may resize the host).
+                self.processor
+                    .embed_set_bounds(region.x, region.y, region.width, region.height);
+                self.processor.embed_refresh();
+                // Record the single presentation mode the host selected so we
+                // never drive both a child-HWND embed and a tool-window overlay.
+                let mode = presentation_mode_from_host_kind(self.processor.embed_host_kind());
+                let visible = self.processor.embed_has_visible_ui();
+                if visible {
                     self.status = PluginEditorStatus::Attached(mode);
                     if plugin_view_debug() {
                         eprintln!(
-                            "[plugin-view] attach ok editor_id={} handle=0x{handle:x} parent=0x{parent:x} mode={mode:?} (reused runtime instance)",
+                            "[plugin-view] attach ok editor_id={} handle=0x{handle:x} parent=0x{parent:x} mode={mode:?} visible=immediate (reused runtime instance)",
                             self.editor_id()
                         );
                     }
+                } else {
+                    // Phase 6: enter the delayed-ready probe. WebView/CEF
+                    // editors (UAD Native) routinely take 100–3000 ms before
+                    // any visible child window materializes — failing now
+                    // would always lose them.
+                    self.status = PluginEditorStatus::ProbingReady {
+                        mode,
+                        probe_index: 0,
+                    };
+                    if plugin_view_debug() {
+                        eprintln!(
+                            "[plugin-view] attach ok editor_id={} handle=0x{handle:x} parent=0x{parent:x} mode={mode:?} visible=deferred (probing ready)",
+                            self.editor_id()
+                        );
+                    }
+                    self.schedule_ready_probe(0, cx);
                 }
             }
             None => {
-                let err = "failed to attach editor to runtime plugin instance \
-                           (no ready VST3 processor for this insert)"
-                    .to_string();
+                let err = self
+                    .processor
+                    .last_error()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        "failed to attach editor to runtime plugin instance \
+                         (no ready VST3 processor for this insert)"
+                            .to_string()
+                    });
                 if plugin_view_debug() {
                     eprintln!(
                         "[plugin-view] attach failed error={err} editor_id={}",
@@ -356,8 +408,92 @@ impl PluginEditorWindow {
         cx.notify();
     }
 
+    /// Phase 6: schedule a deferred visible-UI re-check. WebView/CEF editors
+    /// (UAD Native, Slate, some iZotope) routinely take 100–3000 ms after
+    /// `IPlugView::attached()` before any visible child window materializes.
+    /// We poll at the Phase-6 milestones (100/500/1000/3000/5000 ms); the
+    /// first probe to see visible UI promotes the editor to `Attached`. The
+    /// final probe surfaces a failure if everything is still blank.
+    fn schedule_ready_probe(&mut self, probe_index: u8, cx: &mut Context<Self>) {
+        let idx = probe_index as usize;
+        let Some(&delay_ms) = READY_PROBE_DELAYS_MS.get(idx) else {
+            // Out of range — caller should have promoted by now.
+            return;
+        };
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            executor.timer(Duration::from_millis(delay_ms)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.on_ready_probe(probe_index, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn on_ready_probe(&mut self, probe_index: u8, cx: &mut Context<Self>) {
+        // Only act if we are still in ProbingReady for *this* probe sequence —
+        // a retry or close may have moved the state under us.
+        let PluginEditorStatus::ProbingReady { mode, probe_index: current } = self.status.clone()
+        else {
+            return;
+        };
+        if current != probe_index {
+            return;
+        }
+        // Extra refresh nudges any pending message queue and re-applies bounds.
+        self.processor.embed_refresh();
+        // Quirked plug-ins (UAD Native and other CEF/WebView editors) benefit
+        // from a second pump on each probe step — Chromium often delivers its
+        // first child window during a later message dispatch.
+        if self.quirk.extra_message_pump {
+            self.processor.embed_refresh();
+        }
+        let visible = self.processor.embed_has_visible_ui();
+        let is_last = probe_index as usize + 1 >= READY_PROBE_DELAYS_MS.len();
+        if plugin_view_debug() {
+            eprintln!(
+                "[plugin-view] ready-probe editor_id={} step={}/{} delay_ms={} visible={}",
+                self.editor_id(),
+                probe_index as usize + 1,
+                READY_PROBE_DELAYS_MS.len(),
+                READY_PROBE_DELAYS_MS[probe_index as usize],
+                visible
+            );
+        }
+        if visible {
+            self.status = PluginEditorStatus::Attached(mode);
+            cx.notify();
+            return;
+        }
+        if is_last {
+            // Cap reached and still blank — detach + show fallback panel.
+            if self.embed_handle.take().is_some() {
+                self.processor.embed_detach();
+            }
+            let msg = format!(
+                "Editor attached but no visible WebView/editor window appeared \
+                 after {} ms. The plug-in may host a Chromium/CEF view that did \
+                 not initialize. Try Retry, switch to the Owned Tool Window \
+                 fallback, or check the plug-in's runtime requirements.",
+                READY_PROBE_DELAYS_MS.last().copied().unwrap_or(5000)
+            );
+            self.status = PluginEditorStatus::Failed(msg);
+            cx.notify();
+            return;
+        }
+        // Schedule the next probe in the ramp.
+        self.status = PluginEditorStatus::ProbingReady {
+            mode,
+            probe_index: probe_index + 1,
+        };
+        self.schedule_ready_probe(probe_index + 1, cx);
+    }
+
     fn sync_region(&mut self, window: &Window) {
-        if !matches!(self.status, PluginEditorStatus::Attached(_)) {
+        if !matches!(
+            self.status,
+            PluginEditorStatus::Attached(_) | PluginEditorStatus::ProbingReady { .. }
+        ) {
             return;
         }
         if self.embed_handle.is_none() || !self.processor.embed_is_valid() {
@@ -521,6 +657,13 @@ impl Render for PluginEditorWindow {
             )),
             PluginEditorStatus::Attaching => {
                 Some(self.render_status_message("Attaching plugin editor…"))
+            }
+            PluginEditorStatus::ProbingReady { probe_index, .. } => {
+                let step = (*probe_index as usize).saturating_add(1);
+                let total = READY_PROBE_DELAYS_MS.len();
+                Some(self.render_status_message(&format!(
+                    "Opening editor… (waiting for plug-in UI, {step}/{total})"
+                )))
             }
             PluginEditorStatus::Failed(err) => {
                 let err = err.clone();

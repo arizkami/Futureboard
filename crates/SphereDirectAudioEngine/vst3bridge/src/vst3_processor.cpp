@@ -10,6 +10,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <vector>
 
 // IPlugView is needed on all platforms for the editor bridge functions.
 #include "pluginterfaces/gui/iplugview.h"
@@ -18,8 +19,11 @@
 #  define WIN32_LEAN_AND_MEAN
 #  define NOMINMAX
 #  include <windows.h>
+#  include <libloaderapi.h>
+#  include <objbase.h>
 #  include <dwmapi.h>
 #  pragma comment(lib, "dwmapi.lib")
+#  pragma comment(lib, "ole32.lib")
 #endif
 
 #include "pluginterfaces/base/ipluginbase.h"
@@ -32,6 +36,14 @@
 #include "public.sdk/source/vst/hosting/module.h"
 #include "public.sdk/source/vst/utility/uid.h"
 #include "sphere_daux_editor_bridge.h"
+
+// IPlugFrame is a GUI-layer interface whose class IID is not emitted by the
+// SDK IID TUs we compile (coreiids.cpp / vstinitiids.cpp). Our IPlugFrame
+// implementation's queryInterface references IPlugFrame::iid, so define the
+// symbol here. The IPlugFrame_iid constant is provided by iplugview.h.
+namespace Steinberg {
+DEF_CLASS_IID(IPlugFrame)
+}  // namespace Steinberg
 
 namespace {
 
@@ -223,6 +235,12 @@ struct SimpleParamChanges final : Steinberg::Vst::IParameterChanges {
 // Forward declaration so ComponentHandlerImpl can hold a back-pointer.
 struct SphereDauxVst3Processor;
 
+#if defined(_WIN32)
+// IPlugFrame implementation — see definition below. Forward-declared so the
+// processor can hold a raw pointer to its editor frame.
+class PluginEditorFrame;
+#endif
+
 /// IComponentHandler that captures performEdit() callbacks from the plugin GUI
 /// and enqueues them for delivery to IAudioProcessor on the next process call.
 struct ComponentHandlerImpl final : Steinberg::Vst::IComponentHandler {
@@ -316,6 +334,11 @@ struct SphereDauxVst3Processor {
 
 #if defined(_WIN32)
   Steinberg::IPtr<Steinberg::IPlugView> editor_view;
+  // IPlugFrame handed to the view via setFrame() before attached(). Owned by
+  // this processor; created on attach, destroyed on detach. Required for
+  // WebView/CEF-backed editors (UAD Native) to bootstrap and to honour
+  // plug-in-driven resizeView() requests.
+  PluginEditorFrame* editor_frame{nullptr};
   HWND editor_hwnd{nullptr};
   HWND editor_attach_hwnd{nullptr};
   HWND editor_fallback_label_hwnd{nullptr};
@@ -341,6 +364,12 @@ struct SphereDauxVst3Processor {
   bool embed_geometry_valid{false};
   RECT embed_last_applied{};      // last applied window rect (screen for tool)
   int  embed_host_x{0}, embed_host_y{0}, embed_host_w{0}, embed_host_h{0};
+  std::string plugin_path;
+  // Bundled browser/WebView runtime — active only while an editor is open.
+  // One DLL-directory cookie per native runtime dir we added to the search path.
+  std::vector<DLL_DIRECTORY_COOKIE> plugin_browser_dll_cookies;
+  HMODULE plugin_browser_loader = nullptr;  // optional verify-load (WebView2 only)
+  int plugin_browser_runtime_kind = 0;      // DauxEditorRuntimeKind
   // Guards window proc access; set to false before destroy so pending messages
   // received after GWLP_USERDATA is zeroed still find a valid flag.
   std::atomic<bool> processor_valid{true};
@@ -544,6 +573,162 @@ struct SphereDauxVst3Processor {
 #endif
 };
 
+#if defined(_WIN32)
+bool daux_vst3_editor_debug() {
+  static const bool enabled = std::getenv("FUTUREBOARD_VST3_EDITOR_DEBUG") != nullptr;
+  return enabled;
+}
+
+inline bool daux_view_rect_equal(const Steinberg::ViewRect& a, const Steinberg::ViewRect& b) {
+  return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
+}
+
+// IPlugFrame for VST3 editor hosting. Mirrors the SDK editorhost sample:
+// plugView->setFrame(this) BEFORE plugView->attached(...). WebView2/CEF editors
+// (UAD Native et al.) require a valid frame to bootstrap and call resizeView().
+class PluginEditorFrame final : public Steinberg::IPlugFrame {
+ public:
+  explicit PluginEditorFrame(SphereDauxVst3Processor* owner) : owner_(owner) {}
+
+  Steinberg::tresult PLUGIN_API resizeView(Steinberg::IPlugView* view,
+                                           Steinberg::ViewRect* newSize) override {
+    const bool debug = daux_vst3_editor_debug();
+    if (debug) {
+      std::fprintf(stderr, "[vst3-editor] resizeView called view=0x%p\n", static_cast<void*>(view));
+    }
+    if (newSize == nullptr || view == nullptr || !owner_) {
+      if (debug) std::fprintf(stderr, "[vst3-editor] resizeView rejected (invalid args)\n");
+      return Steinberg::kInvalidArgument;
+    }
+    if (view != owner_->editor_view.get()) {
+      if (debug) std::fprintf(stderr, "[vst3-editor] resizeView rejected (view mismatch)\n");
+      return Steinberg::kInvalidArgument;
+    }
+    if (resize_recursion_guard_) {
+      if (debug) std::fprintf(stderr, "[vst3-editor] resizeView rejected (recursion guard)\n");
+      return Steinberg::kResultFalse;
+    }
+
+    Steinberg::ViewRect current{};
+    if (view->getSize(&current) != Steinberg::kResultTrue) {
+      if (debug) std::fprintf(stderr, "[vst3-editor] resizeView rejected (getSize failed)\n");
+      return Steinberg::kInternalError;
+    }
+    if (daux_view_rect_equal(current, *newSize)) {
+      if (debug) {
+        std::fprintf(stderr,
+                     "[vst3-editor] resizeView accepted (no-op) rect=(%d,%d,%d,%d)\n",
+                     newSize->left,
+                     newSize->top,
+                     newSize->right,
+                     newSize->bottom);
+      }
+      return Steinberg::kResultTrue;
+    }
+
+    if (debug) {
+      std::fprintf(stderr,
+                   "[vst3-editor] resizeView requested rect=(%d,%d,%d,%d) size=%dx%d\n",
+                   newSize->left,
+                   newSize->top,
+                   newSize->right,
+                   newSize->bottom,
+                   newSize->right - newSize->left,
+                   newSize->bottom - newSize->top);
+    }
+
+    resize_recursion_guard_ = true;
+    const int w = newSize->right - newSize->left;
+    const int h = newSize->bottom - newSize->top;
+    HWND host = owner_->editor_attach_hwnd;
+    if (host && IsWindow(host) && w > 0 && h > 0) {
+      SetWindowPos(host, nullptr, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+      owner_->embed_host_w = w;
+      owner_->embed_host_h = h;
+      // Keep the daux-owned top-level shell (non-embed mode) in sync too.
+      if (owner_->editor_hwnd && IsWindow(owner_->editor_hwnd) && !owner_->embed_mode) {
+        RECT wr{0, 0, w, h};
+        AdjustWindowRectEx(&wr,
+                           static_cast<DWORD>(GetWindowLongPtrW(owner_->editor_hwnd, GWL_STYLE)),
+                           FALSE,
+                           static_cast<DWORD>(GetWindowLongPtrW(owner_->editor_hwnd, GWL_EXSTYLE)));
+        SetWindowPos(owner_->editor_hwnd,
+                     nullptr,
+                     0,
+                     0,
+                     wr.right - wr.left,
+                     wr.bottom - wr.top,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+      }
+    }
+    resize_recursion_guard_ = false;
+
+    Steinberg::ViewRect after{};
+    if (view->getSize(&after) != Steinberg::kResultTrue) {
+      if (debug) std::fprintf(stderr, "[vst3-editor] resizeView rejected (getSize after resize failed)\n");
+      return Steinberg::kInternalError;
+    }
+    if (!daux_view_rect_equal(after, *newSize)) {
+      const auto on_size_res = view->onSize(newSize);
+      if (debug) {
+        std::fprintf(stderr,
+                     "[vst3-editor] resizeView onSize result=0x%x\n",
+                     static_cast<unsigned>(on_size_res));
+      }
+    }
+    if (debug) std::fprintf(stderr, "[vst3-editor] resizeView accepted\n");
+    return Steinberg::kResultOk;
+  }
+
+  Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid, void** obj) override {
+    if (Steinberg::FUnknownPrivate::iidEqual(iid, Steinberg::IPlugFrame::iid) ||
+        Steinberg::FUnknownPrivate::iidEqual(iid, Steinberg::FUnknown::iid)) {
+      *obj = static_cast<Steinberg::IPlugFrame*>(this);
+      addRef();
+      return Steinberg::kResultTrue;
+    }
+    *obj = nullptr;
+    return Steinberg::kNoInterface;
+  }
+  // Lifetime owned by the processor — a plug-in release() must not destroy us.
+  Steinberg::uint32 PLUGIN_API addRef() override { return 1000; }
+  Steinberg::uint32 PLUGIN_API release() override { return 1000; }
+
+ private:
+  SphereDauxVst3Processor* owner_;
+  bool resize_recursion_guard_{false};
+};
+
+// Create (if needed) and install the IPlugFrame on the view before attached().
+void daux_editor_install_frame(SphereDauxVst3Processor* processor) {
+  if (!processor || !processor->editor_view) return;
+  if (!processor->editor_frame) {
+    processor->editor_frame = new PluginEditorFrame(processor);
+  }
+  if (daux_vst3_editor_debug()) {
+    std::fprintf(stderr,
+                 "[vst3-editor] setFrame called view=0x%p frame=0x%p\n",
+                 static_cast<void*>(processor->editor_view.get()),
+                 static_cast<void*>(processor->editor_frame));
+  }
+  const auto res = processor->editor_view->setFrame(processor->editor_frame);
+  std::fprintf(stderr, "[vst3-editor] setFrame result=0x%x\n", static_cast<unsigned>(res));
+}
+
+void daux_editor_clear_frame(SphereDauxVst3Processor* processor) {
+  if (!processor) return;
+  if (processor->editor_view) {
+    if (daux_vst3_editor_debug()) {
+      std::fprintf(stderr, "[vst3-editor] setFrame null view=0x%p\n",
+                   static_cast<void*>(processor->editor_view.get()));
+    }
+    processor->editor_view->setFrame(nullptr);
+  }
+  delete processor->editor_frame;
+  processor->editor_frame = nullptr;
+}
+#endif  // _WIN32
+
 // ── Bridge implementations for platform editor TUs ────────────────────────────
 // These give editor_mac.mm and editor_linux.cpp access to the TU-private
 // globals (g_last_error, g_next_editor_handle) and the IPlugView members
@@ -704,11 +889,24 @@ Steinberg::tresult PLUGIN_API ComponentHandlerImpl::performEdit(
 void detach_editor_view(SphereDauxVst3Processor* processor) {
   if (!processor) return;
   if (processor->editor_view && processor->editor_attached) {
+    // Mirror editorhost teardown: clear frame, then removed().
+    if (daux_vst3_editor_debug()) {
+      std::fprintf(stderr, "[vst3-editor] setFrame null view=0x%p\n",
+                   static_cast<void*>(processor->editor_view.get()));
+    }
+    processor->editor_view->setFrame(nullptr);
     const auto removed_res = processor->editor_view->removed();
     std::fprintf(stderr,
-                 "[SphereVST3] IPlugView::removed() result=%d handle=%llu\n",
-                 (int)removed_res, processor->editor_handle);
+                 "[SphereVST3] IPlugView::removed() result=0x%x handle=%llu\n",
+                 static_cast<unsigned>(removed_res),
+                 processor->editor_handle);
+    if (daux_vst3_editor_debug()) {
+      std::fprintf(stderr, "[vst3-editor] removed result=0x%x\n",
+                   static_cast<unsigned>(removed_res));
+    }
   }
+  delete processor->editor_frame;
+  processor->editor_frame = nullptr;
   processor->editor_view = nullptr;
   processor->editor_attached = false;
 }
@@ -927,6 +1125,8 @@ void register_editor_parent_class() {
   });
 }
 
+void daux_plugin_browser_runtime_release(SphereDauxVst3Processor* processor);
+
 void SphereDauxVst3Processor::close_editor_window() {
   HWND hwnd = editor_hwnd;
   HWND child = editor_attach_hwnd;
@@ -947,6 +1147,7 @@ void SphereDauxVst3Processor::close_editor_window() {
   editor_title.clear();
   editor_requested_width = 0;
   editor_requested_height = 0;
+  daux_plugin_browser_runtime_release(this);
   if (hwnd && IsWindow(hwnd)) {
     // Use PostMessage so the destroy is executed on the HWND's owning thread
     // (Electron main thread) rather than potentially a foreign thread.
@@ -1003,6 +1204,340 @@ int daux_embed_resolve_host_kind() {
 
 const char* daux_embed_host_kind_name(int kind) {
   return kind == 1 ? "OwnedToolWindowFallback" : "ChildHwndEmbed";
+}
+
+// Initialize COM as STA on the editor (GPUI UI) thread before any IPlugView::
+// attached call. UAD Native, Slate, and other CEF/WebView-backed VST3s rely on
+// this — without an STA on the thread that owns their parent HWND, the
+// embedded Chromium host never finishes initializing and the editor stays
+// blank. Idempotent and safe to re-enter: if the thread is already initialized
+// to a different apartment we log the HRESULT and keep going (the host will
+// still typically attach, just without our hint).
+//
+// Deliberately NOT paired with `CoUninitialize` — the editor thread keeps STA
+// for the editor lifetime. Tearing down COM mid-editor will crash WebView
+// hosts.
+void daux_embed_ensure_com_initialized() {
+  static thread_local HRESULT s_last_hr = static_cast<HRESULT>(0x7FFFFFFF);
+  const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  if (hr != s_last_hr) {
+    s_last_hr = hr;
+    const char* tag = "ok";
+    if (hr == S_FALSE) {
+      tag = "already initialized (STA)";
+    } else if (hr == RPC_E_CHANGED_MODE) {
+      tag = "RPC_E_CHANGED_MODE (thread already in MTA)";
+    } else if (FAILED(hr)) {
+      tag = "FAILED";
+    }
+    std::fprintf(
+        stderr,
+        "[vst3-editor] COM init hr=0x%08lx (%s) tid=%lu\n",
+        static_cast<unsigned long>(hr),
+        tag,
+        GetCurrentThreadId());
+  }
+}
+
+// ── Generic browser/WebView runtime compatibility layer ──────────────────────
+// Many modern VST3 plug-ins render their editor with an embedded browser engine
+// (WebView2, CEF/Chromium, JUCE WebBrowserComponent, vendor browser runtimes)
+// and ship the runtime DLLs/resources *inside* the .vst3 bundle. The loader DLLs
+// resolve dependents from their own directory, so before createView/attached we
+// detect the bundled runtime and add ONLY its native dir(s) to the DLL search
+// path for the lifetime of the editor — never globally, never permanently.
+//
+// Detection is keyed off marker files, not vendor names, so this is not UAD-only
+// and never touches plug-ins that ship no browser runtime (e.g. FabFilter).
+
+// Mirror of the Rust `PluginEditorRuntimeKind`.
+enum class DauxEditorRuntimeKind {
+  Native = 0,
+  WebView2 = 1,
+  Cef = 2,
+  Chromium = 3,
+  BrowserUnknown = 4,
+};
+
+const char* daux_editor_runtime_kind_name(DauxEditorRuntimeKind kind) {
+  switch (kind) {
+    case DauxEditorRuntimeKind::WebView2: return "WebView2";
+    case DauxEditorRuntimeKind::Cef: return "Cef";
+    case DauxEditorRuntimeKind::Chromium: return "Chromium";
+    case DauxEditorRuntimeKind::BrowserUnknown: return "BrowserUnknown";
+    case DauxEditorRuntimeKind::Native:
+    default: return "Native";
+  }
+}
+
+bool daux_plugin_webview_based_debug() {
+  static const bool enabled =
+      std::getenv("FUTUREBOARD_PLUGIN_WEBVIEW_DEBUG") != nullptr ||
+      std::getenv("FUTUREBOARD_UAD_DEBUG") != nullptr;
+  return enabled;
+}
+
+std::wstring daux_webview_runtime_arch_subdir() {
+#if defined(_M_ARM64)
+  return L"win-arm64";
+#else
+  return L"win-x64";
+#endif
+}
+
+bool daux_path_exists_w(const std::wstring& path) {
+  if (path.empty()) return false;
+  const DWORD attrs = GetFileAttributesW(path.c_str());
+  return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+bool daux_dir_exists_w(const std::wstring& path) {
+  if (path.empty()) return false;
+  const DWORD attrs = GetFileAttributesW(path.c_str());
+  return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+std::wstring daux_join_path_w(std::wstring base, const wchar_t* suffix) {
+  if (base.empty()) return suffix ? suffix : L"";
+  while (!base.empty() && (base.back() == L'\\' || base.back() == L'/')) {
+    base.pop_back();
+  }
+  if (!suffix || !*suffix) return base;
+  std::wstring out = std::move(base);
+  out.push_back(L'\\');
+  out += suffix;
+  return out;
+}
+
+bool daux_file_in_dir(const std::wstring& dir, const wchar_t* file) {
+  return daux_path_exists_w(daux_join_path_w(dir, file));
+}
+
+std::string daux_wide_to_utf8(const std::wstring& value) {
+  if (value.empty()) return {};
+  const int len =
+      WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
+  if (len <= 1) return {};
+  std::string out(static_cast<std::size_t>(len - 1), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, out.data(), len, nullptr, nullptr);
+  return out;
+}
+
+void daux_push_dir_unique(std::vector<std::wstring>& dirs, const std::wstring& dir) {
+  if (dir.empty()) return;
+  for (const auto& existing : dirs) {
+    if (_wcsicmp(existing.c_str(), dir.c_str()) == 0) return;
+  }
+  dirs.push_back(dir);
+}
+
+// Result of scanning a .vst3 bundle for a bundled browser/WebView runtime.
+struct DauxEditorRuntimeDetection {
+  DauxEditorRuntimeKind kind = DauxEditorRuntimeKind::Native;
+  std::vector<std::wstring> dll_dirs;  // native dirs to add to the DLL search path
+  std::wstring webview2_loader;        // WebViewLoader.dll to verify-load (safe)
+  std::wstring marker;                 // diagnostic: first marker file found
+};
+
+// Scan the bundle directory for known browser/WebView runtime marker files.
+// Bounded: probes a fixed list of candidate sub-directories, no recursion.
+DauxEditorRuntimeDetection daux_detect_editor_runtime(const std::string& plugin_path) {
+  DauxEditorRuntimeDetection out;
+  if (plugin_path.empty()) return out;
+  const std::wstring root = widen_utf8(plugin_path.c_str());
+  const std::wstring arch = daux_webview_runtime_arch_subdir();
+
+  static const wchar_t* kBaseRel[] = {
+      L"",  // bundle root
+      L"Contents\\Resources",
+      L"Contents\\x86_64-win",
+      L"Contents\\Resources\\WebView2",
+      L"Contents\\Resources\\CEF",
+      L"Contents\\Resources\\Chromium",
+      L"Contents\\Resources\\Browser",
+      L"Contents\\Resources\\runtimes",
+      L"Contents\\Resources\\bin",
+  };
+
+  bool found_webview2 = false;
+  bool found_cef = false;
+  bool found_chromium = false;
+  bool found_browser = false;
+
+  for (const wchar_t* rel : kBaseRel) {
+    const std::wstring base = (*rel) ? daux_join_path_w(root, rel) : root;
+    if (!daux_dir_exists_w(base)) continue;
+
+    // WebView2 fixed-version runtime: WebViewLoader.dll may sit directly in the
+    // base dir or under runtimes\win-{arch}\native (and the bare win-{arch}\native).
+    const std::wstring runtimes_native = daux_join_path_w(
+        daux_join_path_w(daux_join_path_w(base, L"runtimes"), arch.c_str()), L"native");
+    const std::wstring arch_native =
+        daux_join_path_w(daux_join_path_w(base, arch.c_str()), L"native");
+    const std::wstring wv2_candidates[] = {base, runtimes_native, arch_native};
+    for (const std::wstring& nd : wv2_candidates) {
+      if (nd.empty() || !daux_dir_exists_w(nd)) continue;
+      const std::wstring loader = daux_join_path_w(nd, L"WebViewLoader.dll");
+      if (daux_path_exists_w(loader)) {
+        found_webview2 = true;
+        daux_push_dir_unique(out.dll_dirs, nd);
+        if (out.webview2_loader.empty()) out.webview2_loader = loader;
+        if (out.marker.empty()) out.marker = loader;
+      }
+      if (daux_file_in_dir(nd, L"Microsoft.Web.WebView2.Core.dll")) {
+        found_webview2 = true;
+        daux_push_dir_unique(out.dll_dirs, nd);
+        if (out.marker.empty()) out.marker = daux_join_path_w(nd, L"Microsoft.Web.WebView2.Core.dll");
+      }
+    }
+
+    // CEF / Chromium markers in the base dir.
+    const bool has_libcef = daux_file_in_dir(base, L"libcef.dll");
+    const bool has_chrome_elf = daux_file_in_dir(base, L"chrome_elf.dll");
+    const bool has_cef_pak = daux_file_in_dir(base, L"cef.pak") ||
+                             daux_file_in_dir(base, L"cef_100_percent.pak") ||
+                             daux_file_in_dir(base, L"cef_200_percent.pak");
+    const bool has_icu = daux_file_in_dir(base, L"icudtl.dat");
+    const bool has_v8 = daux_file_in_dir(base, L"snapshot_blob.bin") ||
+                        daux_file_in_dir(base, L"v8_context_snapshot.bin");
+    const bool has_respak = daux_file_in_dir(base, L"resources.pak");
+
+    if (has_libcef) {
+      found_cef = true;
+      daux_push_dir_unique(out.dll_dirs, base);
+      if (out.marker.empty()) out.marker = daux_join_path_w(base, L"libcef.dll");
+    }
+    if (has_cef_pak) found_cef = true;
+    if (has_chrome_elf) {
+      daux_push_dir_unique(out.dll_dirs, base);
+      if (!has_libcef && !has_cef_pak) found_chromium = true;
+      if (out.marker.empty()) out.marker = daux_join_path_w(base, L"chrome_elf.dll");
+    }
+    if (has_icu || has_v8 || has_respak) found_browser = true;
+  }
+
+  if (found_webview2) out.kind = DauxEditorRuntimeKind::WebView2;
+  else if (found_cef) out.kind = DauxEditorRuntimeKind::Cef;
+  else if (found_chromium) out.kind = DauxEditorRuntimeKind::Chromium;
+  else if (found_browser) out.kind = DauxEditorRuntimeKind::BrowserUnknown;
+  else out.kind = DauxEditorRuntimeKind::Native;
+  return out;
+}
+
+bool daux_plugin_is_browser_based(const std::string& plugin_path) {
+  return daux_detect_editor_runtime(plugin_path).kind != DauxEditorRuntimeKind::Native;
+}
+
+void daux_webview2_ensure_dll_search_policy() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+                                  LOAD_LIBRARY_SEARCH_USER_DIRS)) {
+      std::fprintf(
+          stderr,
+          "[plugin-webview-based] SetDefaultDllDirectories failed err=%lu\n",
+          GetLastError());
+    } else if (daux_plugin_webview_based_debug()) {
+      std::fprintf(stderr, "[plugin-webview-based] SetDefaultDllDirectories ok\n");
+    }
+  });
+}
+
+// Add every detected native runtime dir to the per-process DLL search path and
+// (for WebView2 only) verify-load the thin WebViewLoader.dll. CEF/Chromium
+// loaders are NOT force-loaded — that would spin up Chromium on the wrong thread;
+// the plug-in loads its own once the directory is discoverable.
+bool daux_plugin_browser_runtime_prepare(SphereDauxVst3Processor* processor) {
+  if (!processor) return false;
+  if (!processor->plugin_browser_dll_cookies.empty() || processor->plugin_browser_loader) {
+    return true;  // already prepared
+  }
+
+  const DauxEditorRuntimeDetection det = daux_detect_editor_runtime(processor->plugin_path);
+  processor->plugin_browser_runtime_kind = static_cast<int>(det.kind);
+  const bool debug = daux_plugin_webview_based_debug() || daux_embed_debug();
+
+  if (det.kind == DauxEditorRuntimeKind::Native) {
+    if (debug) {
+      std::fprintf(stderr,
+                   "[plugin-webview-based] runtime=Native (no bundled browser runtime) path=%s\n",
+                   processor->plugin_path.c_str());
+    }
+    return true;  // normal native UI plug-in — nothing to do
+  }
+
+  if (debug) {
+    std::fprintf(stderr,
+                 "[plugin-webview-based] runtime=%s marker=%s dll_dirs=%zu path=%s\n",
+                 daux_editor_runtime_kind_name(det.kind),
+                 daux_wide_to_utf8(det.marker).c_str(),
+                 det.dll_dirs.size(),
+                 processor->plugin_path.c_str());
+  }
+
+  if (det.dll_dirs.empty()) {
+    // Browser engine detected by resource files (e.g. *.pak) but no native dir
+    // to add — nothing actionable, but not a failure. Editor open continues.
+    if (debug) {
+      std::fprintf(stderr,
+                   "[plugin-webview-based] runtime=%s detected via resources only; no DLL dir to add\n",
+                   daux_editor_runtime_kind_name(det.kind));
+    }
+    return true;
+  }
+
+  daux_webview2_ensure_dll_search_policy();
+
+  std::vector<DLL_DIRECTORY_COOKIE> cookies;
+  for (const std::wstring& dir : det.dll_dirs) {
+    DLL_DIRECTORY_COOKIE cookie = AddDllDirectory(dir.c_str());
+    if (!cookie) {
+      const DWORD err = GetLastError();
+      std::fprintf(stderr, "[plugin-webview-based] AddDllDirectory failed err=%lu\n", err);
+      for (DLL_DIRECTORY_COOKIE c : cookies) RemoveDllDirectory(c);
+      set_last_error("Failed to configure plugin browser runtime search path (AddDllDirectory err=" +
+                     std::to_string(err) + ")");
+      return false;
+    }
+    cookies.push_back(cookie);
+    if (debug) {
+      std::fprintf(stderr, "[plugin-webview-based] AddDllDirectory ok dir=%s\n",
+                   daux_wide_to_utf8(dir).c_str());
+    }
+  }
+
+  HMODULE loader = nullptr;
+  if (!det.webview2_loader.empty()) {
+    loader = LoadLibraryW(det.webview2_loader.c_str());
+    if (!loader) {
+      const DWORD err = GetLastError();
+      std::fprintf(stderr, "[plugin-webview-based] LoadLibrary WebViewLoader.dll failed err=%lu\n", err);
+      for (DLL_DIRECTORY_COOKIE c : cookies) RemoveDllDirectory(c);
+      set_last_error(std::string("Failed to load plugin WebView2 runtime from ") +
+                     daux_wide_to_utf8(det.webview2_loader) +
+                     " (GetLastError=" + std::to_string(err) + ")");
+      return false;
+    }
+    if (debug) {
+      std::fprintf(stderr, "[plugin-webview-based] LoadLibrary WebViewLoader.dll ok\n");
+    }
+  }
+
+  processor->plugin_browser_dll_cookies = std::move(cookies);
+  processor->plugin_browser_loader = loader;
+  return true;
+}
+
+void daux_plugin_browser_runtime_release(SphereDauxVst3Processor* processor) {
+  if (!processor) return;
+  if (processor->plugin_browser_loader) {
+    FreeLibrary(processor->plugin_browser_loader);
+    processor->plugin_browser_loader = nullptr;
+  }
+  for (DLL_DIRECTORY_COOKIE cookie : processor->plugin_browser_dll_cookies) {
+    if (cookie) RemoveDllDirectory(cookie);
+  }
+  processor->plugin_browser_dll_cookies.clear();
 }
 
 bool daux_embed_content_screen_rect(HWND parent, int x, int y, int w, int h, RECT* out) {
@@ -1145,6 +1680,7 @@ void SphereDauxVst3Processor::close_embed_editor(const char* reason) {
   embed_mode = false;
   embed_geometry_valid = false;
   editor_handle = 0;
+  daux_plugin_browser_runtime_release(this);
   std::fprintf(stderr,
                "[SphereVST3] close_embed_editor reason=%s (processor kept alive)\n",
                reason ? reason : "unknown");
@@ -1302,6 +1838,7 @@ extern "C" SphereDauxVst3Processor* sphere_daux_vst3_create(
     return nullptr;
   }
 
+  instance->plugin_path = plugin_path;
   set_last_error("");
   std::fprintf(stderr, "[DAUx VST3] processor ready: %s handle=0x%p\n",
                plugin_path, static_cast<void*>(instance.get()));
@@ -1588,6 +2125,9 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
       return 0;
     }
 
+    // Set the frame BEFORE attached() — required by WebView/CEF editors.
+    daux_editor_install_frame(processor);
+
     // Attach to fresh child HWND.
     const auto attach_res = processor->editor_view->attached(
         reinterpret_cast<void*>(child), Steinberg::kPlatformTypeHWND);
@@ -1595,6 +2135,7 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
                  "[SphereVST3] editor reopen: IPlugView::attached() result=%d handle=%llu\n",
                  (int)attach_res, processor->editor_handle);
     if (attach_res != Steinberg::kResultTrue && attach_res != Steinberg::kResultOk) {
+      daux_editor_clear_frame(processor);
       processor->editor_view = nullptr;
       DestroyWindow(child);
       processor->editor_attach_hwnd = nullptr;
@@ -1644,6 +2185,10 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
                static_cast<void*>(processor->controller.get()),
                processor->controller ? 1 : 0);
 
+  if (!daux_plugin_browser_runtime_prepare(processor)) {
+    return 0;
+  }
+
   processor->editor_view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
       processor->controller->createView(Steinberg::Vst::ViewType::kEditor));
   std::fprintf(stderr,
@@ -1652,7 +2197,12 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
                static_cast<void*>(processor->editor_view.get()),
                processor->editor_view ? 1 : 0);
   if (!processor->editor_view) {
-    set_last_error("controller did not create editor view");
+    daux_plugin_browser_runtime_release(processor);
+    if (daux_plugin_is_browser_based(processor->plugin_path)) {
+      set_last_error("Browser/WebView-based plugin editor createView failed (controller returned null view)");
+    } else {
+      set_last_error("controller did not create editor view");
+    }
     return 0;
   }
   if (processor->editor_view->isPlatformTypeSupported(Steinberg::kPlatformTypeHWND) !=
@@ -1736,6 +2286,9 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
                static_cast<void*>(hwnd),
                static_cast<void*>(child));
 
+  // Set the frame BEFORE attached() — required by WebView/CEF editors.
+  daux_editor_install_frame(processor);
+
   const auto attach_result =
       processor->editor_view->attached(reinterpret_cast<void*>(child), Steinberg::kPlatformTypeHWND);
   std::fprintf(stderr,
@@ -1817,15 +2370,31 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
     unsigned long long       parent_hwnd,
     int x, int y, int width, int height) {
 #ifdef _WIN32
+  // Phase 4: ensure COM (STA) is live on the editor thread before any
+  // IPlugView call. Some VST3 editors — notably UAD Native / Chromium-backed
+  // hosts — never finish initializing their WebView without an STA on the
+  // thread that owns the parent HWND. Idempotent / no-op when already
+  // initialized.
+  daux_embed_ensure_com_initialized();
+
   if (!processor || !processor->controller) {
+    std::fprintf(stderr, "[vst3-editor] attach failed error=processor/controller missing\n");
     set_last_error("embed editor: processor/controller missing");
     return 0;
   }
   HWND parent = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(parent_hwnd));
   if (!parent || !IsWindow(parent) || width <= 0 || height <= 0) {
+    std::fprintf(
+        stderr,
+        "[vst3-editor] attach failed error=invalid parent HWND or region parent=0x%p w=%d h=%d\n",
+        static_cast<void*>(parent), width, height);
     set_last_error("embed editor: invalid parent HWND or region");
     return 0;
   }
+  std::fprintf(
+      stderr,
+      "[vst3-editor] attach begin parent=0x%p platform=HWND region=(%d,%d,%d,%d) tid=%lu\n",
+      static_cast<void*>(parent), x, y, width, height, GetCurrentThreadId());
 
   // Reuse: if this instance already has an embedded editor attached, just
   // re-sync geometry and return the existing handle — never re-create.
@@ -1847,27 +2416,66 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
     return 0;
   }
 
+  if (!daux_plugin_browser_runtime_prepare(processor)) {
+    DestroyWindow(host);
+    return 0;
+  }
+
   processor->editor_view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
       processor->controller->createView(Steinberg::Vst::ViewType::kEditor));
+  std::fprintf(
+      stderr,
+      "[vst3-editor] createView result=%s ptr=0x%p\n",
+      processor->editor_view ? "ok" : "null",
+      static_cast<void*>(processor->editor_view.get()));
   if (!processor->editor_view) {
+    daux_plugin_browser_runtime_release(processor);
     DestroyWindow(host);
-    set_last_error("embed editor: controller did not create view");
+    if (daux_plugin_is_browser_based(processor->plugin_path)) {
+      set_last_error("Browser/WebView-based plugin editor createView failed (controller returned null view)");
+    } else {
+      set_last_error("embed editor: controller did not create view");
+    }
     return 0;
   }
   if (processor->editor_view->isPlatformTypeSupported(Steinberg::kPlatformTypeHWND) !=
       Steinberg::kResultTrue) {
     processor->editor_view = nullptr;
+    daux_plugin_browser_runtime_release(processor);
     DestroyWindow(host);
+    std::fprintf(stderr, "[vst3-editor] attach failed error=view does not support HWND\n");
     set_last_error("embed editor: view does not support HWND");
     return 0;
   }
 
+  // Publish the host HWND and set the frame BEFORE attached() so the editor's
+  // synchronous resizeView() calls (common for WebView/CEF editors) land on a
+  // valid window. Cleared on the failure path below.
+  processor->editor_attach_hwnd = host;
+  daux_editor_install_frame(processor);
+
   const auto attach_res =
       processor->editor_view->attached(reinterpret_cast<void*>(host), Steinberg::kPlatformTypeHWND);
+  std::fprintf(
+      stderr,
+      "[vst3-editor] attached result=0x%x host=0x%p\n",
+      static_cast<unsigned>(attach_res),
+      static_cast<void*>(host));
   if (attach_res != Steinberg::kResultTrue && attach_res != Steinberg::kResultOk) {
+    daux_editor_clear_frame(processor);
     processor->editor_view = nullptr;
+    processor->editor_attach_hwnd = nullptr;
+    daux_plugin_browser_runtime_release(processor);
     DestroyWindow(host);
-    set_last_error("embed editor: IPlugView::attached(HWND) failed");
+    if (daux_plugin_is_browser_based(processor->plugin_path)) {
+      char msg[160];
+      std::snprintf(msg, sizeof(msg),
+                    "Browser/WebView-based plugin editor createView failed (IPlugView::attached returned 0x%x)",
+                    static_cast<unsigned>(attach_res));
+      set_last_error(msg);
+    } else {
+      set_last_error("embed editor: IPlugView::attached(HWND) failed");
+    }
     return 0;
   }
 
@@ -1884,11 +2492,67 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   resize_editor_view(processor);
   if (kind == 1) daux_embed_apply_tool_styles(host, parent);
 
+  // Phase 2: enumerate plug-in-created child windows. For Chromium/CEF/WebView
+  // editors (UAD Native, Slate, some iZotope) the host HWND will commonly have
+  // ZERO children at this point because the WebView is still booting on an
+  // internal helper thread. The delayed-ready poller in Rust re-checks at
+  // 100/500/1000/3000/5000 ms.
+  {
+    int child_count = 0;
+    EnumChildWindows(
+        host,
+        [](HWND hwnd, LPARAM lp) -> BOOL {
+          char cls[64] = {0};
+          GetClassNameA(hwnd, cls, sizeof(cls));
+          RECT r{};
+          GetWindowRect(hwnd, &r);
+          DWORD tid = 0;
+          GetWindowThreadProcessId(hwnd, &tid);
+          const LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
+          std::fprintf(
+              stderr,
+              "[vst3-editor]   child hwnd=0x%p class='%s' visible=%d rect=(%ld,%ld %ldx%ld) "
+              "style=0x%08lx tid=%lu\n",
+              static_cast<void*>(hwnd),
+              cls,
+              IsWindowVisible(hwnd) ? 1 : 0,
+              r.left, r.top, r.right - r.left, r.bottom - r.top,
+              static_cast<unsigned long>(style),
+              tid);
+          (*reinterpret_cast<int*>(lp))++;
+          return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&child_count));
+    std::fprintf(
+        stderr,
+        "[vst3-editor] EnumChildWindows count=%d host=0x%p\n",
+        child_count,
+        static_cast<void*>(host));
+  }
+
+  // Phase 5: post-attach paint hygiene — repaint the host + any plug-in
+  // children. WebView plug-ins sometimes need an explicit invalidate before
+  // their first frame goes on screen.
+  ShowWindow(host, SW_SHOW);
+  InvalidateRect(host, nullptr, TRUE);
+  UpdateWindow(host);
+  EnumChildWindows(
+      host,
+      [](HWND hwnd, LPARAM) -> BOOL {
+        if (!IsWindow(hwnd)) return TRUE;
+        InvalidateRect(hwnd, nullptr, TRUE);
+        UpdateWindow(hwnd);
+        return TRUE;
+      },
+      0);
+
   if (!IsWindowVisible(host) || !daux_embed_has_visible_ui(processor)) {
     std::fprintf(stderr,
-                 "[SphereVST3] embed editor attached but no visible UI handle=%llu mode=%s\n",
+                 "[SphereVST3] embed editor attached but no visible UI yet handle=%llu mode=%s "
+                 "(deferring to delayed-ready poller)\n",
                  processor->editor_handle, daux_embed_host_kind_name(kind));
-    // Leave it attached — the caller decides whether to surface a fallback.
+    // Leave it attached — Rust will poll embed_has_visible_ui at 100/500/1000/
+    // 3000/5000 ms (Phase 6) before declaring the editor blank.
   }
 
   std::fprintf(stderr,

@@ -91,13 +91,17 @@ pub struct PluginManagerDialogState {
     pub sort_dir: SortDir,
     pub selected_id: Option<String>,
     pub host: NativeHostStatus,
+    /// `created_at_ms` of the most recent `.pst` in the cache. `0` = no cache.
+    pub last_scan_at_ms: i64,
+    /// True once the cached index has been loaded (or determined to be empty).
+    pub cache_loaded: bool,
 }
 
 impl PluginManagerDialogState {
     pub fn new_empty() -> Self {
         let host = PluginRegistry::host_status();
         let status_text = if host.available {
-            "Ready to scan VST3 and CLAP plug-ins.".to_string()
+            "Loading cached plug-in index…".to_string()
         } else {
             host.message.clone()
         };
@@ -116,7 +120,25 @@ impl PluginManagerDialogState {
             sort_dir: SortDir::Asc,
             selected_id: None,
             host,
+            last_scan_at_ms: 0,
+            cache_loaded: false,
         }
+    }
+
+    /// Apply a cached `.pst` load to the dialog. Does not touch any plug-in
+    /// binary or trigger an SDK scan.
+    pub fn apply_cache_load(&mut self, plugins: Vec<RegistryPlugin>, last_scan_at_ms: i64) {
+        self.failed_count = PluginRegistry::cached_failed_count(&plugins);
+        self.last_scan_at_ms = last_scan_at_ms;
+        let count = plugins.len();
+        self.plugins = plugins;
+        self.cache_loaded = true;
+        self.scanning = false;
+        self.status_text = if count == 0 {
+            "No plugin index found. Click Scan Now to scan plugins.".to_string()
+        } else {
+            format!("{count} plug-in(s) cached.")
+        };
     }
 
     pub fn apply_scan_result(&mut self, result: RegistryScanResult) {
@@ -126,6 +148,8 @@ impl PluginManagerDialogState {
         self.failed_count = result.failed.len() as u32;
         self.generated_presets = result.generated_presets;
         self.scanning = false;
+        self.cache_loaded = true;
+        self.last_scan_at_ms = self.plugins.iter().map(|p| p.scanned_at_ms).max().unwrap_or(0);
         self.scan_progress_current = 0;
         self.scan_progress_total = 0;
         self.scan_progress_label.clear();
@@ -322,6 +346,8 @@ pub struct PluginManagerCallbacks {
     pub on_reveal_preset: StrCb,
     pub on_register_plugin: StrCb,
     pub on_rescan_all: VoidCb,
+    pub on_clear_cache: VoidCb,
+    pub on_open_db_folder: VoidCb,
 }
 
 fn icon(path: &'static str, size: f32, color: gpui::Rgba) -> impl IntoElement {
@@ -454,6 +480,29 @@ fn format_badge(format: PluginFormat) -> impl IntoElement {
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(fg)
         .child(format.label())
+}
+
+fn format_relative_time(ms: i64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(ms);
+    let delta = (now_ms - ms).max(0);
+    let secs = delta / 1000;
+    if secs < 60 {
+        return "just now".to_string();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins} min ago");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    let days = hours / 24;
+    format!("{days}d ago")
 }
 
 fn rgba_success_soft() -> gpui::Rgba {
@@ -715,6 +764,10 @@ fn detail_row(label: &'static str, value: &str) -> impl IntoElement {
         )
 }
 
+fn reveal_in_os(path: &Path) {
+    reveal_preset_in_os(path);
+}
+
 fn reveal_preset_in_os(path: &Path) {
     #[cfg(target_os = "windows")]
     {
@@ -757,6 +810,8 @@ pub fn plugin_manager_panel(
 ) -> impl IntoElement {
     let rescan = callbacks.on_rescan.clone();
     let rescan_all = callbacks.on_rescan_all.clone();
+    let clear_cache = callbacks.on_clear_cache.clone();
+    let open_db_folder = callbacks.on_open_db_folder.clone();
     let counts = state.counts();
     let visible = state.visible_plugins(&search_input.value);
     let visible_len = visible.len();
@@ -782,8 +837,10 @@ pub fn plugin_manager_panel(
                 .text_color(Colors::text_faint())
                 .child(if state.scanning {
                     "Scanning… plug-ins will appear here one by one."
+                } else if state.plugins.is_empty() && state.cache_loaded {
+                    "No plugin index found. Click Scan Now to scan plugins."
                 } else if state.plugins.is_empty() {
-                    "No cached plug-ins yet. Run Rescan to build the registry."
+                    "Loading cached plug-in index…"
                 } else {
                     "No plug-ins match the current filter."
                 })
@@ -930,22 +987,36 @@ pub fn plugin_manager_panel(
                                 )),
                         )
                         .child(fb_button(
-                            "plugin-manager-rescan",
+                            "plugin-manager-scan-now",
                             if state.scanning {
                                 "Scanning…"
                             } else {
-                                "Rescan"
+                                "Scan Now"
                             },
                             FbButtonKind::Primary,
                             !state.scanning,
                             move |_, window, cx| rescan(&(), window, cx),
                         ))
                         .child(fb_button(
-                            "plugin-manager-rescan-all",
-                            "Rescan All",
+                            "plugin-manager-full-rescan",
+                            "Full Rescan",
                             FbButtonKind::Default,
                             !state.scanning,
                             move |_, window, cx| rescan_all(&(), window, cx),
+                        ))
+                        .child(fb_button(
+                            "plugin-manager-clear-cache",
+                            "Clear Database",
+                            FbButtonKind::Default,
+                            !state.scanning && !state.plugins.is_empty(),
+                            move |_, window, cx| clear_cache(&(), window, cx),
+                        ))
+                        .child(fb_button(
+                            "plugin-manager-open-db-folder",
+                            "Open DB Folder",
+                            FbButtonKind::Default,
+                            !state.scanning,
+                            move |_, window, cx| open_db_folder(&(), window, cx),
                         )),
                 )
                 .when(state.scanning, |panel| panel.child(scan_progress_bar(state)))
@@ -1253,9 +1324,34 @@ pub fn plugin_manager_panel(
                         )
                         .child(
                             div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(10.0))
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_faint())
-                                .child(format!("{} cached", state.plugins.len())),
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .max_w(px(360.0))
+                                        .child(sphere_plugin_host::database_path()
+                                            .display()
+                                            .to_string()),
+                                )
+                                .when(state.last_scan_at_ms > 0, |el| {
+                                    el.child(div().child(format!(
+                                        "Last scan: {}",
+                                        format_relative_time(state.last_scan_at_ms)
+                                    )))
+                                })
+                                .child(div().child(format!("{} cached", state.plugins.len())))
+                                .when(state.failed_count > 0, |el| {
+                                    el.child(
+                                        div()
+                                            .text_color(Colors::status_warning())
+                                            .child(format!("{} missing", state.failed_count)),
+                                    )
+                                }),
                         ),
                 )
 }
@@ -1264,7 +1360,7 @@ pub struct PluginManagerWindow {
     pub state: PluginManagerDialogState,
     search_input: TextInputState,
     focus_handle: FocusHandle,
-    initial_scan_scheduled: bool,
+    initial_cache_loaded: bool,
 }
 
 impl PluginManagerWindow {
@@ -1274,8 +1370,33 @@ impl PluginManagerWindow {
             search_input: TextInputState::new("plugin-manager-search", cx.focus_handle())
                 .with_placeholder("Search plug-ins..."),
             focus_handle: cx.focus_handle(),
-            initial_scan_scheduled: false,
+            initial_cache_loaded: false,
         }
+    }
+
+    /// Read the `.pst` cache on a background thread and apply it to the
+    /// dialog. No plug-in binary is touched and no SDK scan is performed.
+    fn arm_cache_load(cx: &mut Context<Self>) {
+        let debug = std::env::var_os("FUTUREBOARD_PLUGIN_MANAGER_DEBUG").is_some();
+        let started = std::time::Instant::now();
+        cx.spawn(async move |this, cx| {
+            let (plugins, last_ms) = cx
+                .background_executor()
+                .spawn(async { PluginRegistry::load_cached() })
+                .await;
+            let count = plugins.len();
+            let _ = this.update(cx, |win, cx| {
+                win.state.apply_cache_load(plugins, last_ms);
+                cx.notify();
+            });
+            if debug {
+                eprintln!(
+                    "[plugin-manager] cache_loaded plugins={count} load_ms={}",
+                    started.elapsed().as_millis()
+                );
+            }
+        })
+        .detach();
     }
 
     /// Discover, validate, and register plug-ins on a worker thread; stream progress to the UI.
@@ -1352,12 +1473,11 @@ impl PluginManagerWindow {
 
 impl Render for PluginManagerWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.initial_scan_scheduled {
-            self.initial_scan_scheduled = true;
-            if !self.state.scanning {
-                self.state.begin_scan(PluginScanMode::Rescan);
-                Self::arm_background_scan(cx, PluginScanMode::Rescan);
-            }
+        if !self.initial_cache_loaded {
+            self.initial_cache_loaded = true;
+            // Load cached `.pst` index only. Never auto-scan VST3/CLAP binaries
+            // — the user must press Scan Now / Full Rescan explicitly.
+            Self::arm_cache_load(cx);
         }
 
         let target = cx.entity().clone();
@@ -1462,6 +1582,40 @@ impl Render for PluginManagerWindow {
                         if let Some(plugin) = this.state.plugins.iter().find(|p| p.id == *id) {
                             reveal_preset_in_os(reveal_path_for_plugin(plugin));
                         }
+                    });
+                }
+            }),
+            on_open_db_folder: Arc::new({
+                move |_: &(), _w, _cx| {
+                    let dir = sphere_plugin_host::database_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    reveal_in_os(&dir);
+                }
+            }),
+            on_clear_cache: Arc::new({
+                let target = target.clone();
+                move |_: &(), _w, cx| {
+                    let _ = target.update(cx, |this, cx| {
+                        if this.state.scanning {
+                            return;
+                        }
+                        match PluginRegistry::clear_cache() {
+                            Ok(removed) => {
+                                this.state.plugins.clear();
+                                this.state.selected_id = None;
+                                this.state.failed_count = 0;
+                                this.state.last_scan_at_ms = 0;
+                                this.state.cache_loaded = true;
+                                this.state.status_text = format!(
+                                    "Cleared {removed} cached preset(s). Click Scan Now to rebuild."
+                                );
+                            }
+                            Err(error) => {
+                                this.state.status_text =
+                                    format!("Clear cache failed: {error}");
+                            }
+                        }
+                        cx.notify();
                     });
                 }
             }),
