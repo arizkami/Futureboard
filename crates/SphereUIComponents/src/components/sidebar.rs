@@ -198,7 +198,7 @@ pub fn sidebar(
             })
             .collect::<Vec<_>>()
     })
-    .track_scroll(scroll)
+    .track_scroll(&scroll)
     .size_full()
     .px(px(2.0))
     .py(px(3.0));

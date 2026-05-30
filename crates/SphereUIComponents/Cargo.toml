@@ -19,10 +19,8 @@ gpu-renderer = ["dep:pollster", "dep:raw-window-handle", "dep:wgpu"]
 # "duplicate resource" / LNK1123 at link time on Windows due to Cargo feature
 # unification. Other default features (font-kit, wayland, x11) are re-enabled
 # so non-Windows targets keep working unchanged.
-gpui = { version = "0.2.2", default-features = false, features = [
-    "font-kit",
-    "wayland",
-    "x11",
+gpui-ce = { path = "../../crates/WGPUI",version = "*", default-features = false, features = [
+    "font-kit"
 ] }
 # Audio decoding + multi-LOD peak generation moved into DAUx
 # (SphereDirectAudioEngine) per PART 5 — the UI no longer carries its

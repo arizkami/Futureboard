@@ -19,3 +19,6 @@
 [submodule "external/ARA_SDK"]
 	path = external/ARA_SDK
 	url = https://github.com/Celemony/ARA_SDK
+[submodule "crates/WGPUI"]
+	path = crates/WGPUI
+	url = https://github.com/futureboard/WGPUI
