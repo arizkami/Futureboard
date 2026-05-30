@@ -57,6 +57,8 @@ pub struct Timeline {
     last_drag_position: Option<gpui::Point<gpui::Pixels>>,
     clip_drag_origin: Option<gpui::Point<gpui::Pixels>>,
     clip_drag_target_track_index: Option<usize>,
+    /// Pen-tool click-drag: `(track_id, start_beat)` until mouse-up creates the clip.
+    pen_clip_draw: Option<(String, f32)>,
     pan_last_position: Option<gpui::Point<gpui::Pixels>>,
     on_context_menu: Option<TimelineContextMenuCb>,
     /// Invoked when the user double-clicks a MIDI clip — `StudioLayout` uses it
@@ -120,6 +122,7 @@ impl Timeline {
             last_drag_position: None,
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
+            pen_clip_draw: None,
             pan_last_position: None,
             on_context_menu: None,
             on_open_editor: None,
@@ -140,6 +143,7 @@ impl Timeline {
             last_drag_position: None,
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
+            pen_clip_draw: None,
             pan_last_position: None,
             on_context_menu: None,
             on_open_editor: None,
@@ -184,6 +188,41 @@ impl Timeline {
         if let Some(callback) = self.on_media_changed.as_ref() {
             callback(cx);
         }
+    }
+
+    fn finish_pen_midi_clip(&mut self, end_beat: f32, cx: &mut gpui::Context<Self>) {
+        use crate::components::timeline::timeline_state::{
+            DEFAULT_MIDI_CLIP_BEATS, MIN_MIDI_CLIP_BEATS, TrackType,
+        };
+        let Some((track_id, start_beat)) = self.pen_clip_draw.take() else {
+            return;
+        };
+        let track_type = self
+            .state
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .map(|t| t.track_type);
+        if !matches!(track_type, Some(TrackType::Midi | TrackType::Instrument)) {
+            return;
+        }
+        let mut length = (end_beat - start_beat).max(DEFAULT_MIDI_CLIP_BEATS);
+        if self.state.snap_to_grid {
+            let step = self.state.midi_snap_step_beats();
+            length = ((length / step).ceil() * step).max(MIN_MIDI_CLIP_BEATS);
+        } else {
+            length = length.max(MIN_MIDI_CLIP_BEATS);
+        }
+        if let Some(clip_id) = self.state.create_midi_clip(&track_id, start_beat, length) {
+            if crate::components::timeline::timeline_state::midi_debug_enabled() {
+                eprintln!(
+                    "[midi] clip created track={} clip={} start={:.3} len={:.3}",
+                    track_id, clip_id, start_beat, length
+                );
+            }
+            self.mark_project_changed(cx);
+        }
+        cx.notify();
     }
 
     fn timeline_content_width(&self) -> f32 {
@@ -450,7 +489,7 @@ impl Render for Timeline {
                 .iter()
                 .find(|t| t.id == *track_id)
                 .map(|t| t.track_type);
-            let duration = 4.0;
+            let duration = crate::components::timeline::timeline_state::DEFAULT_MIDI_CLIP_BEATS;
             match track_type {
                 Some(TrackType::Audio) => {
                     if let Some(t) = this.state.tracks.iter_mut().find(|t| t.id == *track_id) {
@@ -473,37 +512,39 @@ impl Render for Timeline {
                         this.mark_project_changed(cx);
                     }
                 }
-                Some(_) => {
-                    // MIDI / Instrument: create an EMPTY clip (user draws notes).
-                    // Demo notes are dev-only, behind FUTUREBOARD_DEMO_MIDI=1.
-                    if let Some(clip_id) =
-                        this.state.create_midi_clip(track_id, *beat, duration)
-                    {
-                        let demo = std::env::var_os("FUTUREBOARD_DEMO_MIDI").is_some();
-                        if demo {
-                            this.state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100);
-                            this.state.add_midi_note(&clip_id, 64, 1.0, 1.0, 100);
-                            this.state.add_midi_note(&clip_id, 67, 2.0, 2.0, 100);
-                        }
-                        if std::env::var_os("FUTUREBOARD_MIDI_DEBUG").is_some() {
-                            let notes = this
-                                .state
-                                .midi_clip_notes(&clip_id)
-                                .map(|n| n.len())
-                                .unwrap_or(0);
-                            eprintln!(
-                                "[Native MIDI] create_midi_clip reason={} clip_id={} notes={}",
-                                if demo { "demo_env" } else { "user_pen_tool" },
-                                clip_id,
-                                notes
-                            );
-                        }
-                        this.mark_project_changed(cx);
-                    }
+                Some(TrackType::Midi | TrackType::Instrument) => {
+                    // Pen down starts a drag; clip is created on mouse-up (see
+                    // `finish_pen_midi_clip`).
+                    this.pen_clip_draw = Some((track_id.clone(), *beat));
                 }
-                None => {}
+                Some(TrackType::Bus | TrackType::Return | TrackType::Master) | None => {}
             }
             cx.notify();
+        });
+
+        let on_pen_mouse_up = cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
+            if this.state.active_tool != TimelineTool::Pen || this.pen_clip_draw.is_none() {
+                return;
+            }
+            let x: f32 = event.position.x.into();
+            let click_x = x - crate::components::sidebar::SIDEBAR_WIDTH
+                - crate::components::timeline::timeline_state::HEADER_WIDTH;
+            let beat = this.state.x_to_beats(click_x);
+            let snapped_sec = this.state.snap_time(beat * this.state.seconds_per_beat());
+            let snapped_beat = snapped_sec / this.state.seconds_per_beat();
+            this.finish_pen_midi_clip(snapped_beat, cx);
+        });
+        let on_pen_mouse_up_out = cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
+            if this.state.active_tool != TimelineTool::Pen || this.pen_clip_draw.is_none() {
+                return;
+            }
+            let x: f32 = event.position.x.into();
+            let click_x = x - crate::components::sidebar::SIDEBAR_WIDTH
+                - crate::components::timeline::timeline_state::HEADER_WIDTH;
+            let beat = this.state.x_to_beats(click_x);
+            let snapped_sec = this.state.snap_time(beat * this.state.seconds_per_beat());
+            let snapped_beat = snapped_sec / this.state.seconds_per_beat();
+            this.finish_pen_midi_clip(snapped_beat, cx);
         });
 
         let on_add_track = cx.listener(|this, _: &(), window, cx| {
@@ -901,6 +942,8 @@ impl Render for Timeline {
             .on_mouse_move(on_middle_pan_move)
             .on_mouse_up(gpui::MouseButton::Middle, on_middle_pan_end)
             .on_mouse_up_out(gpui::MouseButton::Middle, on_middle_pan_end_out)
+            .on_mouse_up(gpui::MouseButton::Left, on_pen_mouse_up)
+            .on_mouse_up_out(gpui::MouseButton::Left, on_pen_mouse_up_out)
             .on_scroll_wheel(on_ctrl_wheel_zoom)
             // 1. Timeline Ruler
             .child(timeline_ruler(

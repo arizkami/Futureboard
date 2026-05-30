@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-05-23T15:43:40.955Z",
+  "generatedAt": "2026-05-30T07:33:49.861Z",
   "menus": [
     {
       "id": "file",
@@ -928,6 +928,27 @@
       "label": "MIDI",
       "items": [
         {
+          "id": "midi.open_editor",
+          "kind": "normal",
+          "label": "Open MIDI Editor",
+          "icon": "keyboard-music",
+          "shortcut": "Ctrl+E",
+          "command": "midi:open-editor",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": "Open the floating MIDI editor window for the selected clip",
+          "children": []
+        },
+        {
+          "id": "midi.sep.editor",
+          "kind": "separator",
+          "enabled": true,
+          "visible": true
+        },
+        {
           "id": "midi.select_all",
           "kind": "normal",
           "label": "Select All Notes",
@@ -991,6 +1012,21 @@
           "checked": false,
           "danger": false,
           "description": "Snap selected (or all) notes to the grid",
+          "children": []
+        },
+        {
+          "id": "midi.fit_notes",
+          "kind": "normal",
+          "label": "Fit Notes",
+          "icon": "maximize-2",
+          "shortcut": null,
+          "command": "midi:fit-notes",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": "Fit the piano roll view to the notes in the clip",
           "children": []
         },
         {

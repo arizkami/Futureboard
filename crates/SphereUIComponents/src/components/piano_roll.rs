@@ -27,7 +27,9 @@ use gpui::{
 };
 
 use crate::components::timeline::timeline::Timeline;
-use crate::components::timeline::timeline_state::{MidiNoteState, MIN_NOTE_BEATS};
+use crate::components::timeline::timeline_state::{
+    midi_debug_enabled, MidiNoteState, MIN_NOTE_BEATS,
+};
 use crate::theme::Colors;
 
 // ── Layout constants (CSS px) ───────────────────────────────────────────────
@@ -149,6 +151,10 @@ enum PianoDrag {
 
 pub struct PianoRoll {
     timeline: Entity<Timeline>,
+    /// When `true`, commit logs use `[MIDI Editor]` (floating window instance).
+    pub midi_editor_sink: bool,
+    /// Docked editor only: opens the floating MIDI editor window.
+    on_pop_out: Option<std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + Send + Sync>>,
     tool: PianoTool,
     ppb: f32,
     snap_on: bool,
@@ -157,9 +163,8 @@ pub struct PianoRoll {
     scroll_x: f32,
     scroll_y: f32,
     drag: PianoDrag,
-    /// Whether `scroll_y` has been centred on C4 yet (done once after the grid
-    /// height is known).
-    centered: bool,
+    /// Last clip id we ran [`Self::fit_piano_roll_to_notes`] for.
+    fitted_clip_id: Option<String>,
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Last clip the editor rendered — used to emit the `open_editor` debug log
     /// exactly once when the edited clip changes (not every frame).
@@ -171,6 +176,8 @@ impl PianoRoll {
     pub fn new(timeline: Entity<Timeline>, cx: &mut Context<Self>) -> Self {
         Self {
             timeline,
+            midi_editor_sink: false,
+            on_pop_out: None,
             tool: PianoTool::Draw,
             ppb: 80.0,
             snap_on: true,
@@ -179,10 +186,54 @@ impl PianoRoll {
             scroll_x: 0.0,
             scroll_y: 0.0,
             drag: PianoDrag::None,
-            centered: false,
+            fitted_clip_id: None,
             grid_bounds: Rc::new(Cell::new(None)),
             last_editing_clip: None,
             focus: cx.focus_handle(),
+        }
+    }
+
+    pub fn set_pop_out_handler(
+        &mut self,
+        handler: Option<std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + Send + Sync>>,
+    ) {
+        self.on_pop_out = handler;
+    }
+
+    pub fn selected_note_count(&self) -> usize {
+        self.selection.len()
+    }
+
+    pub fn grid_label(&self) -> &'static str {
+        self.grid_res.label()
+    }
+
+    /// Menu / command-bar actions for the MIDI editor (shared menu IDs).
+    pub fn run_menu_command(&mut self, command_id: &str, cx: &mut Context<Self>) {
+        match command_id {
+            "midi:select-all" => {
+                let Some(clip_id) = self.editing_clip_id(cx) else {
+                    return;
+                };
+                let all: Vec<u64> = self
+                    .timeline
+                    .read(cx)
+                    .state
+                    .midi_clip_notes(&clip_id)
+                    .map(|notes| notes.iter().map(|n| n.id).collect())
+                    .unwrap_or_default();
+                self.selection = all.into_iter().collect();
+                cx.notify();
+            }
+            "midi:delete-selected" => self.delete_selection(cx),
+            "midi:quantize" => self.quantize_selection(cx),
+            "midi:fit-notes" => {
+                if let Some(cid) = self.editing_clip_id(cx) {
+                    self.fit_piano_roll_to_notes(cx, &cid);
+                    cx.notify();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -248,15 +299,95 @@ impl PianoRoll {
         (TOTAL_H - h).max(0.0)
     }
 
+    fn clip_meta(&self, cx: &Context<Self>, clip_id: &str) -> (f32, f32) {
+        let tl = self.timeline.read(cx);
+        for track in &tl.state.tracks {
+            for clip in &track.clips {
+                if clip.id == clip_id {
+                    return (clip.start_beat, clip.duration_beats);
+                }
+            }
+        }
+        (0.0, 4.0)
+    }
+
+    /// Scroll/zoom the grid so selected notes (or all notes) are visible.
+    fn fit_piano_roll_to_notes(&mut self, cx: &Context<Self>, clip_id: &str) {
+        let (_, view_h) = self.grid_view_size();
+        if view_h <= 1.0 {
+            return;
+        }
+
+        let (notes, selected): (Vec<MidiNoteState>, HashSet<u64>) = {
+            let tl = self.timeline.read(cx);
+            let notes = tl
+                .state
+                .midi_clip_notes(clip_id)
+                .cloned()
+                .unwrap_or_default();
+            (notes, self.selection.clone())
+        };
+
+        let target_notes: Vec<&MidiNoteState> = if !selected.is_empty() {
+            notes.iter().filter(|n| selected.contains(&n.id)).collect()
+        } else {
+            notes.iter().collect()
+        };
+
+        let (min_p, max_p) = if target_notes.is_empty() {
+            (60u8, 60u8)
+        } else {
+            let lo = target_notes.iter().map(|n| n.pitch).min().unwrap_or(60);
+            let hi = target_notes.iter().map(|n| n.pitch).max().unwrap_or(60);
+            (lo.saturating_sub(6), hi.saturating_add(6))
+        };
+
+        let mid = (min_p as f32 + max_p as f32) * 0.5;
+        let target_scroll =
+            ((PITCH_CNT - 1) as f32 - mid) * ROW_H - view_h * 0.5 + ROW_H * 0.5;
+        self.scroll_y = target_scroll.clamp(0.0, self.max_scroll_y());
+
+        if !target_notes.is_empty() {
+            let min_start = target_notes
+                .iter()
+                .map(|n| n.start)
+                .fold(f32::INFINITY, f32::min);
+            self.scroll_x = (min_start * self.ppb - 24.0).max(0.0);
+        } else {
+            self.scroll_x = 0.0;
+        }
+
+        if midi_debug_enabled() {
+            eprintln!(
+                "[midi] piano_roll fit clip={} pitch={}..{} notes={}",
+                clip_id,
+                min_p,
+                max_p,
+                target_notes.len()
+            );
+        }
+    }
+
     // ── Mutations through the timeline ────────────────────────────────────
     fn with_timeline<R>(
         &mut self,
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut Timeline, &mut Context<Timeline>) -> R,
     ) -> R {
+        let clip_id = self.editing_clip_id(cx);
+        let log_commit = self.midi_editor_sink;
         self.timeline.update(cx, |tl, tcx| {
             let r = f(tl, tcx);
             tl.mark_project_changed(tcx);
+            if log_commit {
+                let notes = clip_id
+                    .as_ref()
+                    .and_then(|cid| tl.state.midi_clip_notes(cid).map(|n| n.len()))
+                    .unwrap_or(0);
+                crate::components::midi_editor_window::midi_editor_debug(&format!(
+                    "edit commit notes={notes} engine_dirty=true"
+                ));
+            }
             tcx.notify();
             r
         })
@@ -278,6 +409,21 @@ impl PianoRoll {
     }
 
     fn mark_project_dirty(&mut self, cx: &mut Context<Self>) {
+        if self.midi_editor_sink {
+            let notes = self
+                .editing_clip_id(cx)
+                .and_then(|cid| {
+                    self.timeline
+                        .read(cx)
+                        .state
+                        .midi_clip_notes(&cid)
+                        .map(|n| n.len())
+                })
+                .unwrap_or(0);
+            crate::components::midi_editor_window::midi_editor_debug(&format!(
+                "edit commit notes={notes} engine_dirty=true"
+            ));
+        }
         self.timeline.update(cx, |tl, tcx| tl.mark_project_changed(tcx));
     }
 
@@ -575,6 +721,11 @@ impl PianoRoll {
                 self.selection.clear();
                 cx.notify();
             }
+            "f" if !ctrl => {
+                cx.stop_propagation();
+                self.fit_piano_roll_to_notes(cx, &clip_id);
+                cx.notify();
+            }
             _ => {}
         }
     }
@@ -670,9 +821,8 @@ impl Render for PianoRoll {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let clip_id = self.editing_clip_id(cx);
 
-        // Emit the open_editor log once when the edited clip changes (PART C).
         if clip_id != self.last_editing_clip {
-            if std::env::var_os("FUTUREBOARD_MIDI_DEBUG").is_some() {
+            if midi_debug_enabled() {
                 if let Some(cid) = clip_id.as_deref() {
                     let tl = self.timeline.read(cx);
                     let track_id = tl
@@ -684,12 +834,20 @@ impl Render for PianoRoll {
                         .unwrap_or("<none>");
                     let notes = tl.state.midi_clip_notes(cid).map(|n| n.len()).unwrap_or(0);
                     eprintln!(
-                        "[Native MIDI] open_editor clip_id={} track_id={} notes={}",
+                        "[midi] open_editor clip_id={} track_id={} notes={}",
                         cid, track_id, notes
                     );
                 }
             }
             self.last_editing_clip = clip_id.clone();
+            self.fitted_clip_id = None;
+        }
+
+        if let Some(cid) = clip_id.as_deref() {
+            if self.fitted_clip_id.as_deref() != Some(cid) {
+                self.fit_piano_roll_to_notes(cx, cid);
+                self.fitted_clip_id = Some(cid.to_string());
+            }
         }
 
         // Toolbar is always shown; the body shows a hint when no MIDI clip is
@@ -796,7 +954,34 @@ impl PianoRoll {
                 false,
                 cx.listener(|this, _, _w, cx| this.delete_selection(cx)),
             ))
+            .child(divider())
+            .child(tool_btn(
+                "pr-fit",
+                "Fit",
+                false,
+                cx.listener(|this, _, _w, cx| {
+                    if let Some(cid) = this.editing_clip_id(cx) {
+                        this.fit_piano_roll_to_notes(cx, &cid);
+                        cx.notify();
+                    }
+                }),
+            ))
             .child(div().flex_1())
+            .when_some(self.on_pop_out.clone(), |row, pop_out| {
+                row.child(
+                    div()
+                        .id("pr-pop-out")
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .rounded_md()
+                        .text_size(px(9.0))
+                        .text_color(Colors::text_secondary())
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .hover(|s| s.bg(Colors::surface_hover()))
+                        .on_click(move |_, window, cx| pop_out(window, cx))
+                        .child("Pop out"),
+                )
+            })
             .child(
                 div()
                     .text_size(px(9.0))
@@ -806,20 +991,18 @@ impl PianoRoll {
     }
 
     fn render_body(&mut self, cx: &mut Context<Self>, clip_id: &str) -> impl IntoElement {
-        // Centre on C4 once the real grid height is known (i.e. after the first
-        // paint has captured the grid bounds via the canvas callback).
-        if !self.centered && self.grid_bounds.get().is_some() {
-            let (_, h) = self.grid_view_size();
-            if h > 1.0 {
-                let target = (self.pitch_to_y(60) + self.scroll_y) - h / 2.0;
-                self.scroll_y = target.clamp(0.0, self.max_scroll_y());
-                self.centered = true;
-            }
-        }
-
         let (view_w, view_h) = self.grid_view_size();
         let track_color = self.track_color_for_clip(cx, clip_id);
-        let bpb = self.timeline.read(cx).state.beats_per_bar().max(1.0);
+        let (bpb, _clip_start, clip_len, show_playhead, playhead_rel) = {
+            let tl = self.timeline.read(cx);
+            let bpb = tl.state.beats_per_bar().max(1.0);
+            let (clip_start, clip_len) = self.clip_meta(cx, clip_id);
+            let playhead_rel = tl.state.transport.playhead_beats - clip_start;
+            let show_playhead = tl.state.transport.playing
+                && playhead_rel >= 0.0
+                && playhead_rel <= clip_len;
+            (bpb, clip_start, clip_len, show_playhead, playhead_rel)
+        };
 
         // Visible ranges (only build geometry for what's on screen).
         let first_pitch = (self.y_to_pitch(view_h) as i32 - 1).max(0);
@@ -861,9 +1044,22 @@ impl PianoRoll {
             })
             .collect();
 
-        // Note + grid rendering.
-        let grid_lines =
-            self.build_grid_lines(start_beat, end_beat, view_w, view_h, first_pitch, last_pitch, bpb);
+        let grid_lines = self.build_grid_lines(
+            start_beat,
+            end_beat,
+            view_w,
+            view_h,
+            first_pitch,
+            last_pitch,
+            bpb,
+            clip_len,
+        );
+        let clip_bounds = self.build_clip_bounds_overlay(clip_len, view_w, view_h);
+        let playhead_line = if show_playhead {
+            Some(self.build_playhead_line(playhead_rel))
+        } else {
+            None
+        };
         let ruler = self.build_ruler(start_beat, end_beat, bpb);
         let vel_grid = self.build_velocity_grid(start_beat, end_beat, bpb);
         let notes_geo = self.build_note_elements(cx, clip_id, track_color);
@@ -965,6 +1161,8 @@ impl PianoRoll {
                             .cursor(grid_cursor)
                             .child(grid_canvas)
                             .children(grid_lines)
+                            .children(clip_bounds)
+                            .when_some(playhead_line, |el, line| el.child(line))
                             .children(notes_geo)
                             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_grid_down)),
                     )
@@ -1052,6 +1250,63 @@ impl PianoRoll {
         out
     }
 
+    fn build_clip_bounds_overlay(
+        &self,
+        clip_len: f32,
+        view_w: f32,
+        view_h: f32,
+    ) -> Vec<gpui::AnyElement> {
+        let mut out = Vec::new();
+        let end_x = self.beat_to_x(clip_len);
+        if end_x < view_w {
+            out.push(
+                div()
+                    .absolute()
+                    .left(px(end_x))
+                    .top_0()
+                    .w(px((view_w - end_x).max(0.0)))
+                    .h(px(view_h))
+                    .bg(Colors::with_alpha(Colors::surface_base(), 0.55))
+                    .into_any_element(),
+            );
+        }
+        out.push(
+            div()
+                .absolute()
+                .left(px(0.0))
+                .top_0()
+                .w(px(1.0))
+                .h(px(view_h))
+                .bg(Colors::with_alpha(Colors::accent_primary(), 0.35))
+                .into_any_element(),
+        );
+        if end_x > 0.0 && end_x <= view_w + 2.0 {
+            out.push(
+                div()
+                    .absolute()
+                    .left(px(end_x))
+                    .top_0()
+                    .w(px(1.0))
+                    .h(px(view_h))
+                    .bg(Colors::with_alpha(Colors::accent_primary(), 0.55))
+                    .into_any_element(),
+            );
+        }
+        out
+    }
+
+    fn build_playhead_line(&self, rel_beat: f32) -> gpui::AnyElement {
+        let x = self.beat_to_x(rel_beat);
+        div()
+            .absolute()
+            .left(px(x))
+            .top_0()
+            .w(px(1.0))
+            .h_full()
+            .bg(Colors::with_alpha(Colors::status_warning(), 0.9))
+            .into_any_element()
+    }
+
     fn build_grid_lines(
         &self,
         start_beat: f32,
@@ -1061,6 +1316,7 @@ impl PianoRoll {
         first_pitch: i32,
         last_pitch: i32,
         bpb: f32,
+        clip_len: f32,
     ) -> Vec<gpui::AnyElement> {
         let mut out: Vec<gpui::AnyElement> = Vec::new();
 
@@ -1093,8 +1349,23 @@ impl PianoRoll {
             }
         }
 
+        // Clip end marker inside the visible beat range.
+        let end_x = self.beat_to_x(clip_len);
+        if end_x >= 0.0 && end_x <= view_w {
+            out.push(
+                div()
+                    .absolute()
+                    .left(px((end_x - 0.5).max(0.0)))
+                    .top_0()
+                    .w(px(1.0))
+                    .h_full()
+                    .bg(Colors::with_alpha(Colors::accent_primary(), 0.4))
+                    .into_any_element(),
+            );
+        }
+
         // ── Vertical timing gridlines (zoom-aware hierarchy) ──
-        for (x, kind) in self.visible_grid_lines(start_beat, end_beat, bpb) {
+        for (x, kind) in self.visible_grid_lines(start_beat, end_beat.min(clip_len + bpb), bpb) {
             let (alpha, w) = match kind {
                 GridLineKind::Bar => (0.26, 1.0),
                 GridLineKind::Beat => (0.13, 1.0),

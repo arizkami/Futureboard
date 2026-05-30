@@ -13,7 +13,7 @@ use serde_json::Value;
 use sphere_audio_plugins::{canonical_plugin_id, should_rebuild_state, AudioPluginDspState};
 
 use crate::types::{EngineClipSnapshot, EngineMidiClipSnapshot, EngineProjectSnapshot};
-use crate::vst3_processor::Vst3RuntimeProcessor;
+use crate::vst3_processor::{vst3_midi_debug_enabled, Vst3MidiEvent, Vst3RuntimeProcessor};
 
 /// `FUTUREBOARD_MIDI_ENGINE_DEBUG=1` enables eprintln traces for MIDI runtime
 /// build + per-block scheduling. Cached on first read so the audio callback
@@ -50,6 +50,11 @@ pub struct RuntimeTrack {
     /// allocates. Zeroed at the top of each render block.
     pub recv_l: Vec<f32>,
     pub recv_r: Vec<f32>,
+    /// Per-block MIDI events for the instrument VST3 insert (Phase 2B).
+    /// Cleared at the start of `schedule_midi_block`; no steady-path allocation.
+    pub midi_block_events: Vec<Vst3MidiEvent>,
+    /// Index into `inserts` of the first instrument-capable native VST3 insert.
+    pub midi_instrument_insert_ix: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,6 +407,9 @@ impl RuntimeProject {
                 });
             }
 
+            let midi_instrument_insert_ix =
+                find_midi_instrument_insert_ix(&inserts, &t.track_type);
+
             tracks.push(RuntimeTrack {
                 id: t.id.clone(),
                 track_type: t.track_type.clone(),
@@ -434,6 +442,8 @@ impl RuntimeProject {
                 block_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
                 recv_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
                 recv_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+                midi_block_events: Vec::with_capacity(256),
+                midi_instrument_insert_ix,
             });
         }
         let has_solo = tracks.iter().any(|t| t.solo);
@@ -589,20 +599,24 @@ impl RuntimeProject {
     /// active set. Called on stop/seek to prevent stuck notes.
     pub fn all_notes_off(&mut self, reason: &str) {
         let debug = midi_engine_debug_enabled();
-        for mt in &mut self.midi_tracks {
-            if mt.active.is_empty() {
-                continue;
-            }
+        let flush: Vec<(String, Vec<(u8, u8)>)> = self
+            .midi_tracks
+            .iter()
+            .filter(|mt| !mt.active.is_empty())
+            .map(|mt| (mt.track_id.clone(), mt.active.clone()))
+            .collect();
+        for (track_id, active) in flush {
             if debug {
                 eprintln!(
                     "[DAUx MIDI] all notes off track={} active={} reason={}",
-                    mt.track_id,
-                    mt.active.len(),
+                    track_id,
+                    active.len(),
                     reason
                 );
             }
-            // TODO (Phase 2B): forward note-off to the track's instrument insert
-            // (VST3 event input) before clearing.
+            push_all_notes_off_for_track(self, &track_id, &active);
+        }
+        for mt in &mut self.midi_tracks {
             mt.active.clear();
         }
     }
@@ -617,6 +631,7 @@ impl RuntimeProject {
         }
         let block_end = base_sample.saturating_add(frames);
         let debug = midi_engine_debug_enabled();
+        let vst3_debug = vst3_midi_debug_enabled();
         let spb = self.samples_per_beat.max(1.0);
         for mt in &mut self.midi_tracks {
             let mut scheduled = 0u32;
@@ -624,15 +639,30 @@ impl RuntimeProject {
                 let ev = mt.events[mt.cursor].clone();
                 mt.cursor += 1;
                 if ev.sample < base_sample {
-                    // Stale (e.g. just after a seek landing mid-block) — still
-                    // apply active-note bookkeeping so state stays consistent.
                     apply_active(&mut mt.active, &ev);
                     continue;
                 }
-                let offset = (ev.sample - base_sample) as usize;
+                let offset = (ev.sample - base_sample) as u32;
                 apply_active(&mut mt.active, &ev);
-                // TODO (Phase 2B): route `ev` to the track's instrument insert
-                // (VST3 IEventList) at `offset` samples into the block.
+                if let Some(ti) = self.tracks.iter().position(|t| t.id == mt.track_id) {
+                    if self.tracks[ti].midi_instrument_insert_ix.is_some() {
+                        let vel = ev.velocity as f32 / 127.0;
+                        let midi_ev = match ev.kind {
+                            RuntimeMidiEventKind::NoteOn => {
+                                Vst3MidiEvent::note_on(offset, ev.channel, ev.pitch, vel)
+                            }
+                            RuntimeMidiEventKind::NoteOff => {
+                                Vst3MidiEvent::note_off(offset, ev.channel, ev.pitch, 0.0)
+                            }
+                        };
+                        self.tracks[ti].midi_block_events.push(midi_ev);
+                    } else if vst3_debug {
+                        eprintln!(
+                            "[VST3 MIDI] skip track={} reason=no_instrument_insert",
+                            mt.track_id
+                        );
+                    }
+                }
                 if debug {
                     match ev.kind {
                         RuntimeMidiEventKind::NoteOn => eprintln!(
@@ -655,6 +685,24 @@ impl RuntimeProject {
                     bs, be, mt.track_id, scheduled, mt.active.len()
                 );
             }
+            if debug && scheduled > 0 {
+                eprintln!(
+                    "[DAUx MIDI] block events={} track={}",
+                    scheduled, mt.track_id
+                );
+            }
+            if vst3_debug {
+                if let Some(ti) = self.tracks.iter().position(|t| t.id == mt.track_id) {
+                    if let Some(ix) = self.tracks[ti].midi_instrument_insert_ix {
+                        eprintln!(
+                            "[VST3 MIDI] instrument insert track={} insert_ix={} block_events={}",
+                            mt.track_id,
+                            ix,
+                            self.tracks[ti].midi_block_events.len()
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -667,6 +715,53 @@ impl RuntimeProject {
                     && project_sample < clip.start_sample.saturating_add(clip.duration_samples)
             })
             .count()
+    }
+
+    /// Deliver pending `midi_block_events` to instrument VST3 inserts when the
+    /// transport is stopped but stop/seek queued note-offs must still reach the
+    /// plugin (prevents stuck notes).
+    pub fn flush_vst3_midi_inserts(&mut self, frames: usize) {
+        if frames == 0 {
+            return;
+        }
+        for track in &mut self.tracks {
+            if track.midi_block_events.is_empty() {
+                continue;
+            }
+            let insert_ix = match track.midi_instrument_insert_ix {
+                Some(ix) => ix,
+                None => {
+                    track.midi_block_events.clear();
+                    continue;
+                }
+            };
+            let events = std::mem::take(&mut track.midi_block_events);
+            if track.block_l.len() < frames || track.block_r.len() < frames {
+                continue;
+            }
+            track.block_l[..frames].fill(0.0);
+            track.block_r[..frames].fill(0.0);
+            let insert = &mut track.inserts[insert_ix];
+            let Some(vst3) = insert.vst3.as_mut() else {
+                continue;
+            };
+            if !vst3.is_processor_valid() {
+                continue;
+            }
+            if insert.scratch_l.len() < frames {
+                insert.scratch_l.resize(frames, 0.0);
+                insert.scratch_r.resize(frames, 0.0);
+            }
+            insert.scratch_l[..frames].fill(0.0);
+            insert.scratch_r[..frames].fill(0.0);
+            let _ = vst3.process_stereo_block_with_midi(
+                &insert.scratch_l[..frames],
+                &insert.scratch_r[..frames],
+                &mut track.block_l[..frames],
+                &mut track.block_r[..frames],
+                &events,
+            );
+        }
     }
 
     #[inline]
@@ -795,6 +890,67 @@ impl RuntimeProject {
                 .dsp
                 .rebuild(plugin_id, &insert.params, self.sample_rate);
         }
+    }
+}
+
+/// First native VST3 insert that should receive scheduled MIDI for this track.
+fn find_midi_instrument_insert_ix(
+    inserts: &[RuntimeInsert],
+    track_type: &str,
+) -> Option<usize> {
+    inserts
+        .iter()
+        .enumerate()
+        .find_map(|(ix, insert)| {
+            if insert_accepts_midi_events(insert, track_type) {
+                Some(ix)
+            } else {
+                None
+            }
+        })
+}
+
+#[inline]
+fn insert_accepts_midi_events(insert: &RuntimeInsert, track_type: &str) -> bool {
+    if insert.vst3.is_none() || !insert.enabled {
+        return false;
+    }
+    let ty = track_type.to_ascii_lowercase();
+    if ty == "instrument" || ty == "midi" {
+        return true;
+    }
+    let cat = insert
+        .params
+        .get("category")
+        .or_else(|| insert.params.get("pluginCategory"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let cat_lc = cat.to_ascii_lowercase();
+    if cat_lc.contains("instrument") || cat_lc.contains("synth") {
+        return true;
+    }
+    insert
+        .params
+        .get("acceptsMidi")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn push_all_notes_off_for_track(
+    project: &mut RuntimeProject,
+    track_id: &str,
+    active: &[(u8, u8)],
+) {
+    let Some(ti) = project.tracks.iter().position(|t| t.id == track_id) else {
+        return;
+    };
+    if project.tracks[ti].midi_instrument_insert_ix.is_none() {
+        return;
+    }
+    for &(channel, pitch) in active {
+        project.tracks[ti]
+            .midi_block_events
+            .push(Vst3MidiEvent::note_off(0, channel, pitch, 0.0));
     }
 }
 

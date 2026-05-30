@@ -1,0 +1,299 @@
+//! Floating MIDI editor window — edits the shared [`Timeline`] via a second
+//! [`PianoRoll`] entity (no duplicated clip/note state).
+
+use std::sync::Arc;
+
+use gpui::{
+    div, px, size, App, AppContext, Bounds, Context, Entity, FocusHandle, InteractiveElement,
+    IntoElement, KeyDownEvent, ParentElement, Point, Render, StatefulInteractiveElement, Styled,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+};
+
+use crate::components::piano_roll::PianoRoll;
+use crate::components::timeline::timeline::Timeline;
+use crate::components::timeline::timeline_state::ClipType;
+use crate::components::title_bar::external_window_titlebar;
+use crate::theme::Colors;
+
+pub const MIDI_EDITOR_WINDOW_WIDTH: f32 = 960.0;
+pub const MIDI_EDITOR_WINDOW_HEIGHT: f32 = 560.0;
+pub const MIDI_EDITOR_WINDOW_MIN_WIDTH: f32 = 900.0;
+pub const MIDI_EDITOR_WINDOW_MIN_HEIGHT: f32 = 500.0;
+
+/// Which MIDI clip the floating editor is bound to (mirrors timeline selection).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MidiEditorTarget {
+    pub track_id: String,
+    pub clip_id: String,
+}
+
+pub(crate) fn midi_editor_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("FUTUREBOARD_MIDI_EDITOR_DEBUG")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+pub(crate) fn midi_editor_debug(message: &str) {
+    if midi_editor_debug_enabled() {
+        eprintln!("[MIDI Editor] {message}");
+    }
+}
+
+pub struct MidiEditorWindow {
+    timeline: Entity<Timeline>,
+    piano_roll: Entity<PianoRoll>,
+    /// Last clip we successfully rendered — used for the "clip deleted" empty state.
+    last_clip_id: Option<String>,
+    on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
+    dispatch_command: Arc<dyn Fn(&'static str, &mut App) + Send + Sync>,
+    focus_handle: FocusHandle,
+}
+
+impl MidiEditorWindow {
+    pub fn new(
+        timeline: Entity<Timeline>,
+        piano_roll: Entity<PianoRoll>,
+        on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
+        dispatch_command: Arc<dyn Fn(&'static str, &mut App) + Send + Sync>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            timeline,
+            piano_roll,
+            last_clip_id: None,
+            on_close,
+            dispatch_command,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+
+    fn title_for_clip(&self, cx: &Context<Self>) -> String {
+        let tl = self.timeline.read(cx);
+        let clip_id = tl
+            .state
+            .selection
+            .selected_clip_ids
+            .first()
+            .cloned();
+        let Some(clip_id) = clip_id else {
+            return "MIDI Editor".to_string();
+        };
+        let name = tl
+            .state
+            .find_clip(&clip_id)
+            .map(|(_, c)| c.name.as_str())
+            .unwrap_or("MIDI clip");
+        format!("MIDI Editor — {name}")
+    }
+
+    fn current_midi_clip(&self, cx: &Context<Self>) -> Option<(String, String)> {
+        let tl = self.timeline.read(cx);
+        let clip_id = tl.state.selection.selected_clip_ids.first()?.clone();
+        let (track, clip) = tl.state.find_clip(&clip_id)?;
+        if !matches!(clip.clip_type, ClipType::Midi { .. }) {
+            return None;
+        }
+        Some((track.id.clone(), clip_id))
+    }
+
+    fn clip_still_exists(&self, cx: &Context<Self>, clip_id: &str) -> bool {
+        self.timeline
+            .read(cx)
+            .state
+            .find_clip(clip_id)
+            .is_some_and(|(_, c)| matches!(c.clip_type, ClipType::Midi { .. }))
+    }
+
+    fn status_line(&self, cx: &Context<Self>) -> String {
+        let tl = self.timeline.read(cx);
+        let Some(clip_id) = tl.state.selection.selected_clip_ids.first() else {
+            return "No clip · grid —".to_string();
+        };
+        let notes = tl.state.midi_clip_notes(clip_id).map(|n| n.len()).unwrap_or(0);
+        let sel = self.piano_roll.read(cx).selected_note_count();
+        let grid = self.piano_roll.read(cx).grid_label();
+        format!("{notes} notes · {sel} selected · grid {grid}")
+    }
+
+    fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if event.is_held {
+            return;
+        }
+        let key = event.keystroke.key.as_str();
+        let mods = event.keystroke.modifiers;
+        if key == "space" && !mods.control && !mods.alt && !mods.platform && !mods.function {
+            cx.stop_propagation();
+            midi_editor_debug("command dispatch transport:play-pause");
+            (self.dispatch_command)("transport:play-pause", cx);
+            return;
+        }
+        if (mods.control || mods.platform) && !mods.alt && !mods.function {
+            match key {
+                "e" | "E" => {
+                    cx.stop_propagation();
+                    // Already in floating editor — no-op refocus handled by layout.
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl Render for MidiEditorWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let title = self.title_for_clip(cx);
+        let status = self.status_line(cx);
+
+        let body: gpui::AnyElement = match self.current_midi_clip(cx) {
+            Some((_track_id, clip_id)) => {
+                self.last_clip_id = Some(clip_id);
+                self.piano_roll.clone().into_any_element()
+            }
+            None if self
+                .last_clip_id
+                .as_ref()
+                .is_some_and(|id| !self.clip_still_exists(cx, id)) =>
+            {
+                midi_editor_debug("target clip missing");
+                empty_state(
+                    "MIDI clip no longer exists",
+                    "Close this window or select another MIDI clip in the arrangement.",
+                )
+            }
+            None => {
+                empty_state(
+                    "No MIDI clip selected",
+                    "Select or create a MIDI clip to edit.",
+                )
+            }
+        };
+
+        let on_close = self.on_close.clone();
+        let dispatch_command = self.dispatch_command.clone();
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .font_family(crate::theme::FONT_FAMILY)
+            .bg(Colors::surface_window())
+            .overflow_hidden()
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(Self::on_key))
+            .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
+            .child(external_window_titlebar(
+                title.as_str(),
+                "midi-editor-window-close",
+                move |window, cx| {
+                    midi_editor_debug("close window");
+                    on_close(window, cx);
+                    window.remove_window();
+                },
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .bg(Colors::surface_base())
+                    .child(body),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .h(px(22.0))
+                    .px(px(10.0))
+                    .border_t(px(1.0))
+                    .border_color(Colors::panel_border())
+                    .bg(Colors::surface_panel())
+                    .text_size(px(10.0))
+                    .text_color(Colors::text_muted())
+                    .child(status)
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("midi-editor-pop-in")
+                            .px(px(8.0))
+                            .py(px(2.0))
+                            .rounded_md()
+                            .text_size(px(10.0))
+                            .text_color(Colors::text_secondary())
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .hover(|s| s.bg(Colors::surface_hover()))
+                            .on_click(move |_, _window, cx| {
+                                (dispatch_command)("editor:open-bottom", cx);
+                            })
+                            .child("Open in bottom panel"),
+                    ),
+            )
+    }
+}
+
+fn empty_state(title: &str, hint: &str) -> gpui::AnyElement {
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::text_primary())
+                .child(title.to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(Colors::text_muted())
+                .child(hint.to_string()),
+        )
+        .into_any_element()
+}
+
+pub fn open_midi_editor_window(
+    owner_bounds: Bounds<gpui::Pixels>,
+    timeline: Entity<Timeline>,
+    piano_roll: Entity<PianoRoll>,
+    on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
+    dispatch_command: Arc<dyn Fn(&'static str, &mut App) + Send + Sync>,
+    cx: &mut App,
+) -> Result<WindowHandle<MidiEditorWindow>, String> {
+    let parent_x: f32 = owner_bounds.origin.x.into();
+    let parent_y: f32 = owner_bounds.origin.y.into();
+    let parent_w: f32 = owner_bounds.size.width.into();
+    let parent_h: f32 = owner_bounds.size.height.into();
+    let origin = Point {
+        x: px((parent_x + (parent_w - MIDI_EDITOR_WINDOW_WIDTH) * 0.5).max(24.0)),
+        y: px((parent_y + (parent_h - MIDI_EDITOR_WINDOW_HEIGHT) * 0.5).max(24.0)),
+    };
+
+    let mut options = crate::platform_chrome::external_dialog_window_options_partial();
+    options.window_bounds = Some(WindowBounds::Windowed(Bounds {
+        origin,
+        size: size(px(MIDI_EDITOR_WINDOW_WIDTH), px(MIDI_EDITOR_WINDOW_HEIGHT)),
+    }));
+    options.kind = WindowKind::Floating;
+    options.is_resizable = true;
+    options.is_minimizable = true;
+    options.window_background = WindowBackgroundAppearance::Opaque;
+    options.window_min_size = Some(size(
+        px(MIDI_EDITOR_WINDOW_MIN_WIDTH),
+        px(MIDI_EDITOR_WINDOW_MIN_HEIGHT),
+    ));
+
+    cx.open_window(options, move |_window, cx| {
+        cx.new(|cx| {
+            MidiEditorWindow::new(timeline, piano_roll, on_close, dispatch_command, cx)
+        })
+    })
+    .map_err(|e| e.to_string())
+}

@@ -45,6 +45,20 @@ pub fn midi_debug_enabled() -> bool {
 /// `MIN_DUR` guard so a note can never collapse to zero width.
 pub const MIN_NOTE_BEATS: f32 = 1.0 / 32.0;
 
+/// Default length for a newly created MIDI clip (one 4/4 bar at any BPM).
+pub const DEFAULT_MIDI_CLIP_BEATS: f32 = 4.0;
+
+/// Minimum visible MIDI clip length after edits (one bar).
+pub const MIN_MIDI_CLIP_BEATS: f32 = 4.0;
+
+#[inline]
+fn snap_up_beats(value: f32, step: f32) -> f32 {
+    if step <= 0.0 {
+        return value;
+    }
+    ((value / step).ceil() * step).max(step)
+}
+
 /// Monotonic source of transient note identities. Note ids are NOT persisted —
 /// they exist only so the piano-roll editor can track selection / drag targets
 /// across edits. Fresh ids are minted on create and on project load.
@@ -1166,6 +1180,74 @@ impl TimelineState {
     // clip start (matches the WebUI model). Every mutation clamps to valid
     // ranges so a bad gesture can never produce an out-of-range note.
 
+    /// Grid step in beats for snapping clip bounds (matches arrangement snap).
+    pub fn midi_snap_step_beats(&self) -> f32 {
+        let bpb = self.beats_per_bar();
+        if !self.snap_to_grid || self.grid_division == SnapDivision::Off {
+            return 0.25;
+        }
+        match self.grid_division {
+            SnapDivision::Auto => self.get_grid_sub_beats(self.viewport.pixels_per_second * self.seconds_per_beat()),
+            SnapDivision::Bar1 => bpb,
+            other => other.step_beats(bpb),
+        }
+        .max(1.0 / 32.0)
+    }
+
+    fn next_midi_clip_display_name(&self) -> String {
+        let mut count = 0u32;
+        for track in &self.tracks {
+            for clip in &track.clips {
+                if matches!(clip.clip_type, ClipType::Midi { .. }) {
+                    count += 1;
+                }
+            }
+        }
+        format!("MIDI {}", count + 1)
+    }
+
+    /// Expand `clip.duration_beats` so every note fits inside the clip, with
+    /// optional grid padding. Does not shrink. Returns `true` if length changed.
+    pub fn ensure_midi_clip_contains_notes(clip: &mut ClipState, snap_beats: f32) -> bool {
+        let ClipType::Midi { notes } = &clip.clip_type else {
+            return false;
+        };
+        let max_note_end = notes
+            .iter()
+            .map(|n| n.start.max(0.0) + n.duration.max(MIN_NOTE_BEATS))
+            .fold(0.0f32, f32::max);
+        let min_len = DEFAULT_MIDI_CLIP_BEATS.max(MIN_MIDI_CLIP_BEATS);
+        let needed = snap_up_beats(max_note_end.max(min_len), snap_beats.max(1.0 / 32.0))
+            .max(min_len);
+        if needed > clip.duration_beats + 1.0e-4 {
+            let old = clip.duration_beats;
+            clip.duration_beats = needed;
+            if midi_debug_enabled() {
+                eprintln!(
+                    "[midi] clip auto-expanded clip={} old_len={:.3} new_len={:.3} notes={}",
+                    clip.id,
+                    old,
+                    needed,
+                    notes.len()
+                );
+            }
+            return true;
+        }
+        false
+    }
+
+    fn apply_midi_clip_bounds(&mut self, clip_id: &str) {
+        let step = self.midi_snap_step_beats();
+        for track in &mut self.tracks {
+            for clip in &mut track.clips {
+                if clip.id == clip_id {
+                    Self::ensure_midi_clip_contains_notes(clip, step);
+                    return;
+                }
+            }
+        }
+    }
+
     /// Create an empty MIDI clip on `track_id` at `start_beat` (snapped by the
     /// caller if desired). Returns the new clip id, or `None` if the track is
     /// missing. The clip is selected so the editor can pick it up immediately.
@@ -1174,12 +1256,13 @@ impl TimelineState {
             return None;
         }
         let clip_id = self.next_clip_id();
-        let name = format!("MIDI {}", clip_id.strip_prefix("clip-").unwrap_or(&clip_id));
+        let name = self.next_midi_clip_display_name();
+        let len = length_beats.max(MIN_MIDI_CLIP_BEATS);
         let new_clip = ClipState {
             id: clip_id.clone(),
             name,
             start_beat: start_beat.max(0.0),
-            duration_beats: length_beats.max(1.0),
+            duration_beats: len,
             source_duration_seconds: None,
             offset_beats: 0.0,
             gain: 1.0,
@@ -1241,6 +1324,7 @@ impl TimelineState {
         let id = note.id;
         let notes = self.midi_clip_notes_mut(clip_id)?;
         notes.push(note);
+        self.apply_midi_clip_bounds(clip_id);
         if midi_debug_enabled() {
             eprintln!(
                 "[midi] add_note clip={} id={} pitch={} start={:.3} dur={:.3} vel={}",
@@ -1262,6 +1346,7 @@ impl TimelineState {
                 note.pitch = (*new_pitch).min(127);
             }
         }
+        self.apply_midi_clip_bounds(clip_id);
         if midi_debug_enabled() {
             eprintln!("[midi] move_notes clip={} count={}", clip_id, updates.len());
         }
@@ -1281,6 +1366,7 @@ impl TimelineState {
                 );
             }
         }
+        self.apply_midi_clip_bounds(clip_id);
     }
 
     /// Delete the given note ids from a MIDI clip. Returns how many were removed.

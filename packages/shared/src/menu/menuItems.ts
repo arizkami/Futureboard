@@ -456,6 +456,18 @@ export const APP_MENUS: AppMenuGroup[] = [
     label: "MIDI",
     children: [
       {
+        id: "midi.open_editor",
+        label: "Open MIDI Editor",
+        accelerator: "Ctrl+E",
+        icon: "keyboard-music",
+        action: "midi:open-editor",
+        description: "Open the floating MIDI editor window for the selected clip",
+      },
+      {
+        type: "separator",
+        id: "midi.sep.editor",
+      },
+      {
         id: "midi.select_all",
         label: "Select All Notes",
         accelerator: "Ctrl+A",
@@ -491,6 +503,13 @@ export const APP_MENUS: AppMenuGroup[] = [
         icon: "align-start-vertical",
         action: "midi:quantize",
         description: "Snap selected (or all) notes to the grid",
+      },
+      {
+        id: "midi.fit_notes",
+        label: "Fit Notes",
+        icon: "maximize-2",
+        action: "midi:fit-notes",
+        description: "Fit the piano roll view to the notes in the clip",
       },
       {
         type: "separator",

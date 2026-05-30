@@ -28,6 +28,9 @@ use crate::components::project_switcher::ProjectSwitcherState;
 use crate::components::project_wizard::{
     open_project_wizard_window, ProjectCreateCallback, ProjectWizardResult, ProjectWizardWindow,
 };
+use crate::components::midi_editor_window::{
+    midi_editor_debug, open_midi_editor_window, MidiEditorWindow,
+};
 use crate::components::{external_mixer_debug, open_mixer_window, MixerSnapshot, MixerWindow};
 use crate::components::settings_dialog::{
     OnSettingUpdate, SettingsWindow, open_settings_window,
@@ -141,6 +144,11 @@ pub struct StudioLayout {
     /// Piano-roll editor shown in the bottom panel's Editor tab. Holds a handle
     /// to the timeline so note edits mutate the single project source of truth.
     piano_roll: Entity<components::piano_roll::PianoRoll>,
+    /// Second piano-roll instance for the floating MIDI editor (same timeline).
+    piano_roll_floating: Entity<components::piano_roll::PianoRoll>,
+    /// Global floating MIDI editor window (one instance; switches clip on open).
+    midi_editor_window: Option<WindowHandle<MidiEditorWindow>>,
+    pending_midi_editor_open: Option<Bounds<gpui::Pixels>>,
     file_browser: FileBrowserState,
     /// Stable scroll handle for the browser tree. Lives on the layout
     /// (not in `FileBrowserState`) so the state stays free of gpui types
@@ -475,6 +483,14 @@ impl StudioLayout {
             let timeline = timeline.clone();
             cx.new(|cx| components::piano_roll::PianoRoll::new(timeline, cx))
         };
+        let piano_roll_floating = {
+            let timeline = timeline.clone();
+            cx.new(|cx| {
+                let mut pr = components::piano_roll::PianoRoll::new(timeline, cx);
+                pr.midi_editor_sink = true;
+                pr
+            })
+        };
         if let Some(engine) = audio_engine.clone() {
             let seek_engine = engine.clone();
             let param_engine = engine.clone();
@@ -557,6 +573,16 @@ impl StudioLayout {
         Self::spawn_audio_poll(cx);
 
         let studio_entity = cx.entity();
+        {
+            let pop_owner = studio_entity.clone();
+            let _ = piano_roll.update(cx, |pr, _cx| {
+                pr.set_pop_out_handler(Some(Arc::new(move |_window, cx| {
+                    let _ = pop_owner.update(cx, |layout, cx| {
+                        layout.open_midi_editor_external_window(None, cx);
+                    });
+                })));
+            });
+        }
         crate::platform_chrome::register_studio_menu_dispatcher(studio_entity, cx);
 
         // Close native plugin editors before GPUI/thread-local teardown on exit.
@@ -572,6 +598,9 @@ impl StudioLayout {
             bottom_panel_state: BottomPanelState::default(),
             timeline,
             piano_roll,
+            piano_roll_floating,
+            midi_editor_window: None,
+            pending_midi_editor_open: None,
             file_browser: FileBrowserState::default(),
             browser_scroll: UniformListScrollHandle::new(),
             menu_bar: MenuBarUiState::default(),
@@ -1442,6 +1471,15 @@ impl StudioLayout {
             "edit:delete" | "clip:delete" => self.delete_selected_clip_or_track(cx),
             "edit:duplicate" | "clip:duplicate" => self.duplicate_selected_clip(cx),
 
+            "editor:open-bottom" => self.open_midi_editor_bottom_panel(cx),
+            "midi:open-editor" | "editor:open-midi-window" => {
+                self.open_midi_editor_external_window(owner_bounds, cx)
+            }
+            "midi:select-all"
+            | "midi:delete-selected"
+            | "midi:quantize"
+            | "midi:fit-notes" => self.dispatch_midi_editor_menu_command(command_id, cx),
+
             // ── Transport extras (shared menu IDs) ───────────────────────
             "transport:go-to-end" => {
                 let end = self.project_end_beat(cx);
@@ -2234,9 +2272,10 @@ impl StudioLayout {
                 let _ = layout.update(cx, |this, cx| {
                     this.mark_dirty();
                     let _ = this.timeline.update(cx, |timeline, cx| {
-                        let count = dialog.count.clamp(1, 32) as usize;
+                        let count = dialog.count.clamp(1, 128) as usize;
                         let base_name = cleaned_track_name(&dialog.track_name, dialog.selected_kind);
                         let mut selected_track_id = None;
+                        let mut created_ids = Vec::new();
                         for i in 0..count {
                             let name = if count == 1 {
                                 base_name.clone()
@@ -2247,23 +2286,33 @@ impl StudioLayout {
                                     dialog.next_number + i
                                 )
                             };
+                            let color_ix = if dialog.auto_color {
+                                dialog.base_track_count + i
+                            } else {
+                                dialog.color_index + i
+                            };
                             let id = timeline.state.create_track(CreateTrackOptions {
                                 track_type,
                                 name,
-                                color: timeline
-                                    .state
-                                    .track_color_for_index(dialog.color_index.saturating_add(i)),
+                                color: timeline.state.track_color_for_index(color_ix),
                                 volume: timeline_state::volume::db_to_norm(0.0),
                                 pan: 0.0,
                                 armed: dialog.selected_kind == AddTrackKind::Audio && dialog.arm_track,
                                 input_monitor: dialog.selected_kind == AddTrackKind::Audio
                                     && dialog.monitor_mode != "off",
                             });
+                            created_ids.push(id.clone());
                             selected_track_id = Some(id);
                         }
                         if let Some(id) = selected_track_id {
                             timeline.state.select_track(&id);
                         }
+                        crate::components::add_track_dialog::add_track_debug(&format!(
+                            "created tracks kind={} count={} ids={:?}",
+                            dialog.selected_kind.tab_label(),
+                            count,
+                            created_ids
+                        ));
                         cx.notify();
                     });
                     cx.notify();
@@ -2595,6 +2644,171 @@ impl StudioLayout {
         if let Some(handle) = self.mixer_window.take() {
             let _ = handle.update(cx, |_mixer, window, _cx| window.remove_window());
         }
+        cx.notify();
+    }
+
+    fn prune_midi_editor_window(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = self.midi_editor_window.clone() else {
+            return;
+        };
+        if handle.update(cx, |_w, _window, _cx| ()).is_err() {
+            self.midi_editor_window = None;
+        }
+    }
+
+    fn selected_midi_clip_id(&self, cx: &Context<Self>) -> Option<String> {
+        let tl = self.timeline.read(cx);
+        let clip_id = tl.state.selection.selected_clip_ids.first()?.clone();
+        tl.state
+            .find_clip(&clip_id)
+            .filter(|(_, c)| matches!(c.clip_type, ClipType::Midi { .. }))
+            .map(|_| clip_id)
+    }
+
+    fn select_midi_clip(&mut self, clip_id: &str, cx: &mut Context<Self>) {
+        let _ = self.timeline.update(cx, |tl, cx| {
+            tl.state.select_clip(clip_id);
+            cx.notify();
+        });
+    }
+
+    pub(crate) fn open_midi_editor_bottom_panel(&mut self, cx: &mut Context<Self>) {
+        self.active_bottom_tab = components::BottomTab::Editor;
+        self.panels.mixer_docked = true;
+        cx.notify();
+    }
+
+    pub(crate) fn open_midi_editor_external_window(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_midi_editor_open = Some(owner_bounds.unwrap_or_else(|| Bounds {
+            origin: gpui::Point::default(),
+            size: gpui::size(px(1400.0), px(900.0)),
+        }));
+        self.schedule_pending_midi_editor_open(cx);
+        cx.notify();
+    }
+
+    fn schedule_pending_midi_editor_open(&mut self, cx: &mut Context<Self>) {
+        if self.pending_midi_editor_open.is_none() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(0))
+                .await;
+            let _ = this.update(cx, |layout, cx| layout.flush_pending_midi_editor_open(cx));
+        })
+        .detach();
+    }
+
+    fn flush_pending_midi_editor_open(&mut self, cx: &mut Context<Self>) {
+        let Some(owner_bounds) = self.pending_midi_editor_open.take() else {
+            return;
+        };
+
+        if let Some(OpenPopover::Context {
+            target: ContextTarget::Clip(clip_id),
+            ..
+        }) = self.open_popover.as_ref()
+        {
+            let clip_id = clip_id.clone();
+            if self
+                .timeline
+                .read(cx)
+                .state
+                .find_clip(&clip_id)
+                .is_some_and(|(_, c)| matches!(c.clip_type, ClipType::Midi { .. }))
+            {
+                self.select_midi_clip(&clip_id, cx);
+            }
+        }
+
+        self.prune_midi_editor_window(cx);
+        if let Some(handle) = self.midi_editor_window.clone() {
+            if handle
+                .update(cx, |_w, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                midi_editor_debug("focus existing window");
+                if let Some(clip_id) = self.selected_midi_clip_id(cx) {
+                    if let Some((track, clip)) = self.timeline.read(cx).state.find_clip(&clip_id) {
+                        midi_editor_debug(&format!(
+                            "switch target clip clip={} track={}",
+                            clip.name, track.name
+                        ));
+                    }
+                }
+                cx.notify();
+                return;
+            }
+            self.midi_editor_window = None;
+        }
+
+        let clip_label = self
+            .selected_midi_clip_id(cx)
+            .and_then(|id| self.timeline.read(cx).state.find_clip(&id))
+            .map(|(t, c)| (c.name.clone(), t.name.clone()));
+        if let Some((clip_name, track_name)) = clip_label.as_ref() {
+            midi_editor_debug(&format!(
+                "open window clip={clip_name} track={track_name}"
+            ));
+        } else {
+            midi_editor_debug("open window (no MIDI clip selected)");
+        }
+
+        self.menu_bar.open_menu_id = None;
+        self.menu_bar.submenu_path.clear();
+
+        let timeline = self.timeline.clone();
+        let piano_roll = self.piano_roll_floating.clone();
+        let owner = cx.entity().clone();
+        let on_close: Arc<dyn Fn(&mut Window, &mut gpui::App) + Send + Sync> =
+            Arc::new(move |_window, cx| {
+                let _ = owner.update(cx, |layout, cx| layout.close_midi_editor_window(cx));
+            });
+        let dispatch_owner = cx.entity().clone();
+        let dispatch_command: Arc<dyn Fn(&'static str, &mut gpui::App) + Send + Sync> =
+            Arc::new(move |command_id, cx| {
+                let _ = dispatch_owner.update(cx, |layout, cx| {
+                    layout.dispatch_command_id(command_id, cx);
+                    cx.notify();
+                });
+            });
+
+        match open_midi_editor_window(
+            owner_bounds,
+            timeline,
+            piano_roll,
+            on_close,
+            dispatch_command,
+            cx,
+        ) {
+            Ok(handle) => {
+                self.midi_editor_window = Some(handle);
+                cx.notify();
+            }
+            Err(err) => eprintln!("[midi-editor] failed to open window: {err}"),
+        }
+    }
+
+    pub(crate) fn close_midi_editor_window(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.midi_editor_window.take() {
+            let _ = handle.update(cx, |_w, window, _cx| window.remove_window());
+        }
+        cx.notify();
+    }
+
+    fn dispatch_midi_editor_menu_command(&mut self, command_id: &str, cx: &mut Context<Self>) {
+        let roll = if self.midi_editor_window.is_some() {
+            self.piano_roll_floating.clone()
+        } else {
+            self.piano_roll.clone()
+        };
+        let cmd = command_id.to_string();
+        let _ = roll.update(cx, |pr, cx| pr.run_menu_command(&cmd, cx));
         cx.notify();
     }
 
@@ -3138,22 +3352,39 @@ impl StudioLayout {
                 ContextMenuEntry::item("Zoom Out", "view:zoom-out"),
             ],
             ContextTarget::Clip(clip_id) => {
-                let exists = self.timeline.read(cx).state.find_clip(clip_id).is_some();
-                vec![
-                    ContextMenuEntry::disabled_item("Rename", "clip:rename"),
-                    ContextMenuEntry::item("Duplicate", "clip:duplicate").with_shortcut("Ctrl+D"),
-                    ContextMenuEntry::danger_item("Delete", "clip:delete"),
-                    ContextMenuEntry::Separator,
-                    ContextMenuEntry::item("Split at Playhead", "clip:split-at-playhead"),
-                    ContextMenuEntry::disabled_item(
-                        if exists {
-                            "Reveal in Browser"
-                        } else {
-                            "Clip unavailable"
-                        },
-                        "browser:reveal",
-                    ),
-                ]
+                let clip_info = self.timeline.read(cx).state.find_clip(clip_id);
+                let exists = clip_info.is_some();
+                let is_midi = clip_info
+                    .is_some_and(|(_, c)| matches!(c.clip_type, ClipType::Midi { .. }));
+                let mut entries = Vec::new();
+                if is_midi {
+                    entries.push(ContextMenuEntry::item(
+                        "Open in Bottom Editor",
+                        "editor:open-bottom",
+                    ));
+                    entries.push(ContextMenuEntry::item(
+                        "Open in New MIDI Editor Window",
+                        "midi:open-editor",
+                    ));
+                    entries.push(ContextMenuEntry::Separator);
+                }
+                entries.push(ContextMenuEntry::disabled_item("Rename", "clip:rename"));
+                entries.push(ContextMenuEntry::item("Duplicate", "clip:duplicate").with_shortcut("Ctrl+D"));
+                entries.push(ContextMenuEntry::danger_item("Delete", "clip:delete"));
+                entries.push(ContextMenuEntry::Separator);
+                entries.push(ContextMenuEntry::item(
+                    "Split at Playhead",
+                    "clip:split-at-playhead",
+                ));
+                entries.push(ContextMenuEntry::disabled_item(
+                    if exists {
+                        "Reveal in Browser"
+                    } else {
+                        "Clip unavailable"
+                    },
+                    "browser:reveal",
+                ));
+                entries
             }
             ContextTarget::Track(track_id) => {
                 let track = self.timeline.read(cx).state.find_track(track_id).cloned();
@@ -3482,6 +3713,7 @@ impl StudioLayout {
                 "s" | "S" => Some("project:save"),
                 "o" | "O" => Some("project:open"),
                 "n" | "N" => Some("project:new"),
+                "e" | "E" => Some("midi:open-editor"),
                 _ => None,
             };
         }
@@ -4536,6 +4768,7 @@ impl Render for StudioLayout {
         };
 
         self.prune_mixer_window(cx);
+        self.prune_midi_editor_window(cx);
 
         let transport_chrome = self.transport_chrome_state(cx);
         let panel_chrome = self.panel_chrome_state(cx);

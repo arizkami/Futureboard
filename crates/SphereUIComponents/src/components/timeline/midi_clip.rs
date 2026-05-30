@@ -1,5 +1,5 @@
 use crate::components::timeline::timeline_state::{
-    ClipDragItem, ClipState, ClipType, TimelineState, TRACK_HEIGHT,
+    midi_debug_enabled, ClipDragItem, ClipState, ClipType, TimelineState, TRACK_HEIGHT,
 };
 use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
@@ -35,27 +35,35 @@ pub fn midi_clip(
     let clip_h = TRACK_HEIGHT - pad * 2.0;
     let note_h = clip_h - 14.0; // height for notes preview
 
-    // Draw notes inside notes preview area
+    // Draw notes inside notes preview area (clip-relative beats, clip bounds).
     let mut note_elements = Vec::new();
+    let clip_len = clip.duration_beats;
     if let ClipType::Midi { notes } = &clip.clip_type {
-        // Find pitch range
-        let mut top_pitch = 72;
-        let mut bottom_pitch = 48;
-        if !notes.is_empty() {
-            let lo = notes.iter().map(|n| n.pitch).min().unwrap_or(48);
-            let hi = notes.iter().map(|n| n.pitch).max().unwrap_or(72);
-            top_pitch = hi + 2;
-            bottom_pitch = lo - 2;
+        let in_bounds: Vec<_> = notes
+            .iter()
+            .filter(|n| n.start < clip_len && n.start + n.duration > 0.0)
+            .collect();
+        let mut top_pitch = 72u8;
+        let mut bottom_pitch = 48u8;
+        if !in_bounds.is_empty() {
+            let lo = in_bounds.iter().map(|n| n.pitch).min().unwrap_or(48);
+            let hi = in_bounds.iter().map(|n| n.pitch).max().unwrap_or(72);
+            top_pitch = hi.saturating_add(2).min(127);
+            bottom_pitch = lo.saturating_sub(2);
         }
-        let pitch_range = (top_pitch - bottom_pitch).max(12) as f32;
-        let ppb = pixels_per_second * seconds_per_beat; // pixels per beat
+        let pitch_range = (top_pitch as i32 - bottom_pitch as i32).max(12) as f32;
+        let ppb = pixels_per_second * seconds_per_beat;
 
-        for note in notes {
-            let note_left = note.start * ppb;
-            let note_width = (note.duration * ppb).max(2.0);
-
-            // Normalize pitch to 0..1, then map to top coordinate
-            let norm_pitch = (note.pitch - bottom_pitch) as f32 / pitch_range;
+        let preview_count = in_bounds.len();
+        for note in &in_bounds {
+            let visible_end = (note.start + note.duration).min(clip_len);
+            let visible_start = note.start.max(0.0);
+            if visible_end <= visible_start {
+                continue;
+            }
+            let note_left = visible_start * ppb;
+            let note_width = ((visible_end - visible_start) * ppb).max(2.0);
+            let norm_pitch = (note.pitch as i32 - bottom_pitch as i32) as f32 / pitch_range;
             let note_top = (1.0 - norm_pitch) * (note_h - 4.0) + 1.0;
 
             note_elements.push(
@@ -64,12 +72,22 @@ pub fn midi_clip(
                     .left(px(note_left))
                     .top(px(note_top))
                     .w(px(note_width))
-                    .h(px(2.0)) // thin note line
+                    .h(px(2.0))
                     .bg({
                         let mut c = track_color;
                         c.a = 0.8;
                         c
                     }),
+            );
+        }
+
+        if midi_debug_enabled() {
+            eprintln!(
+                "[midi] preview clip={} notes={}/{} len={:.2}",
+                clip.id,
+                preview_count,
+                notes.len(),
+                clip_len
             );
         }
     }

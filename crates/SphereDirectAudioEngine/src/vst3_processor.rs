@@ -4,6 +4,53 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+/// `FUTUREBOARD_VST3_MIDI_DEBUG=1` enables VST3 MIDI bridge traces.
+pub fn vst3_midi_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_VST3_MIDI_DEBUG").is_some())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vst3MidiEventKind {
+    NoteOff = 0,
+    NoteOn = 1,
+}
+
+/// C-compatible MIDI event for `sphere_daux_vst3_process_stereo_block_with_midi`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Vst3MidiEvent {
+    pub sample_offset: u32,
+    pub kind: u8,
+    pub channel: u8,
+    pub pitch: u8,
+    pub velocity: f32,
+}
+
+impl Vst3MidiEvent {
+    #[inline]
+    pub fn note_on(sample_offset: u32, channel: u8, pitch: u8, velocity: f32) -> Self {
+        Self {
+            sample_offset,
+            kind: Vst3MidiEventKind::NoteOn as u8,
+            channel,
+            pitch,
+            velocity,
+        }
+    }
+
+    #[inline]
+    pub fn note_off(sample_offset: u32, channel: u8, pitch: u8, velocity: f32) -> Self {
+        Self {
+            sample_offset,
+            kind: Vst3MidiEventKind::NoteOff as u8,
+            channel,
+            pitch,
+            velocity,
+        }
+    }
+}
+
 #[repr(C)]
 struct SphereDauxVst3Processor {
     _private: [u8; 0],
@@ -33,6 +80,17 @@ extern "C" {
         out_r: *mut c_float,
         frames: i32,
     ) -> i32;
+    fn sphere_daux_vst3_process_stereo_block_with_midi(
+        processor: *mut SphereDauxVst3Processor,
+        in_l: *const c_float,
+        in_r: *const c_float,
+        out_l: *mut c_float,
+        out_r: *mut c_float,
+        frames: i32,
+        events: *const Vst3MidiEvent,
+        event_count: i32,
+    ) -> i32;
+    fn sphere_daux_vst3_event_input_bus_count(processor: *mut SphereDauxVst3Processor) -> i32;
     fn sphere_daux_vst3_process_count(processor: *mut SphereDauxVst3Processor) -> u64;
     fn sphere_daux_vst3_last_input_peak(processor: *mut SphereDauxVst3Processor) -> c_double;
     fn sphere_daux_vst3_last_output_peak(processor: *mut SphereDauxVst3Processor) -> c_double;
@@ -89,6 +147,7 @@ struct Vst3RuntimeProcessorInner {
     plugin_path: String,
     class_id: String,
     sample_rate: u32,
+    event_input_bus_count: i32,
     destroy_reason: std::sync::Mutex<Option<String>>,
 }
 
@@ -153,9 +212,10 @@ impl Vst3RuntimeProcessor {
             );
             return None;
         }
+        let event_input_bus_count = unsafe { sphere_daux_vst3_event_input_bus_count(raw) };
         eprintln!(
-            "[SphereVST3] create ok path='{}' classId='{}' handle=0x{:x}",
-            plugin_path, class_id, raw as usize
+            "[SphereVST3] create ok path='{}' classId='{}' handle=0x{:x} eventInputBuses={}",
+            plugin_path, class_id, raw as usize, event_input_bus_count
         );
         Some(Self {
             inner: Arc::new(Vst3RuntimeProcessorInner {
@@ -163,6 +223,7 @@ impl Vst3RuntimeProcessor {
                 plugin_path: plugin_path.to_string(),
                 class_id: class_id.to_string(),
                 sample_rate: sample_rate.max(1),
+                event_input_bus_count,
                 destroy_reason: std::sync::Mutex::new(None),
             }),
         })
@@ -193,18 +254,42 @@ impl Vst3RuntimeProcessor {
         out_l: &mut [f32],
         out_r: &mut [f32],
     ) -> bool {
+        self.process_stereo_block_with_midi(in_l, in_r, out_l, out_r, &[])
+    }
+
+    #[inline]
+    pub fn event_input_bus_count(&self) -> i32 {
+        self.inner.event_input_bus_count
+    }
+
+    #[inline]
+    pub fn process_stereo_block_with_midi(
+        &mut self,
+        in_l: &[f32],
+        in_r: &[f32],
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+        midi_events: &[Vst3MidiEvent],
+    ) -> bool {
         let frames = in_l.len().min(in_r.len()).min(out_l.len()).min(out_r.len());
         if self.inner.raw.is_null() || frames == 0 {
             return false;
         }
+        let (events_ptr, event_count) = if midi_events.is_empty() {
+            (std::ptr::null(), 0)
+        } else {
+            (midi_events.as_ptr(), midi_events.len() as i32)
+        };
         let ok = unsafe {
-            sphere_daux_vst3_process_stereo_block(
+            sphere_daux_vst3_process_stereo_block_with_midi(
                 self.inner.raw,
                 in_l.as_ptr(),
                 in_r.as_ptr(),
                 out_l.as_mut_ptr(),
                 out_r.as_mut_ptr(),
                 frames as i32,
+                events_ptr,
+                event_count,
             )
         };
         ok != 0

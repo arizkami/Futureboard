@@ -1734,11 +1734,17 @@ pub fn apply_track_chain_block(track: &mut RuntimeTrack, frames: usize) {
             frames
         );
     }
-    for insert in &mut track.inserts {
+    let instrument_ix = track.midi_instrument_insert_ix;
+    let midi_events = &track.midi_block_events;
+    for (ix, insert) in track.inserts.iter_mut().enumerate() {
+        let midi = instrument_ix
+            .filter(|&i| i == ix)
+            .map(|_| midi_events.as_slice());
         apply_insert_block(
             &mut track.block_l[..frames],
             &mut track.block_r[..frames],
             insert,
+            midi,
         );
     }
 }
@@ -1827,7 +1833,12 @@ pub fn apply_insert(l: f32, r: f32, insert: &mut RuntimeInsert) -> (f32, f32) {
     )
 }
 
-pub fn apply_insert_block(block_l: &mut [f32], block_r: &mut [f32], insert: &mut RuntimeInsert) {
+pub fn apply_insert_block(
+    block_l: &mut [f32],
+    block_r: &mut [f32],
+    insert: &mut RuntimeInsert,
+    midi_events: Option<&[crate::vst3_processor::Vst3MidiEvent]>,
+) {
     if block_l.is_empty() || block_r.is_empty() {
         return;
     }
@@ -1908,12 +1919,22 @@ pub fn apply_insert_block(block_l: &mut [f32], block_r: &mut [f32], insert: &mut
     insert.scratch_r[..frames].fill(0.0);
 
     let handle = vst3.handle_value();
-    let process_ok = vst3.process_stereo_block(
-        &block_l[..frames],
-        &block_r[..frames],
-        &mut insert.scratch_l[..frames],
-        &mut insert.scratch_r[..frames],
-    );
+    let process_ok = if let Some(events) = midi_events.filter(|e| !e.is_empty()) {
+        vst3.process_stereo_block_with_midi(
+            &block_l[..frames],
+            &block_r[..frames],
+            &mut insert.scratch_l[..frames],
+            &mut insert.scratch_r[..frames],
+            events,
+        )
+    } else {
+        vst3.process_stereo_block(
+            &block_l[..frames],
+            &block_r[..frames],
+            &mut insert.scratch_l[..frames],
+            &mut insert.scratch_r[..frames],
+        )
+    };
     if process_ok {
         block_l[..frames].copy_from_slice(&insert.scratch_l[..frames]);
         block_r[..frames].copy_from_slice(&insert.scratch_r[..frames]);
@@ -2076,6 +2097,12 @@ where
         .build_output_stream::<T, _, _>(
             config,
             move |data: &mut [T], _info: &cpal::OutputCallbackInfo| {
+                if ch > 0 {
+                    for track in &mut runtime.tracks {
+                        track.midi_block_events.clear();
+                    }
+                }
+
                 // ── 1. Drain command queue ───────────────────────────────────
                 // Runs first so commands take effect from the start of this block.
                 while let Ok(cmd) = cmd_rx.try_recv() {
@@ -2210,12 +2237,21 @@ where
                 let base_sample = shared.position_samples.load(Ordering::Relaxed);
                 runtime.begin_meter_block();
 
-                // MIDI scheduling — once per block, path-independent. Advances
-                // each MIDI track's event cursor and emits note on/off for the
-                // block range (debug-logged; instrument routing is Phase 2B).
+                // MIDI scheduling — once per block when playing.
                 if playing_local && ch > 0 {
                     let frames_needed = (data.len() / ch) as u64;
                     runtime.schedule_midi_block(base_sample, frames_needed);
+                }
+
+                if ch > 0 {
+                    let frames_needed = data.len() / ch;
+                    let pending_midi = runtime
+                        .tracks
+                        .iter()
+                        .any(|t| !t.midi_block_events.is_empty());
+                    if pending_midi && !playing_local {
+                        runtime.flush_vst3_midi_inserts(frames_needed);
+                    }
                 }
 
                 if ch >= 2 && playing_local {
@@ -2409,6 +2445,8 @@ mod routing_tests {
             block_r: vec![0.0; cap],
             recv_l: vec![0.0; cap],
             recv_r: vec![0.0; cap],
+            midi_block_events: Vec::new(),
+            midi_instrument_insert_ix: None,
         }
     }
 

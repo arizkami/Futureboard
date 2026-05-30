@@ -14,6 +14,7 @@ pub mod message_box_dialog;
 pub mod menu_dropdown;
 pub mod mixer_panel;
 mod mixer_window;
+pub mod midi_editor_window;
 pub(crate) use mixer_window::external_mixer_debug;
 pub mod panel;
 pub mod project_switcher;
@@ -33,8 +34,8 @@ pub mod title_bar;
 
 
 pub use add_track_dialog::{
-    add_track_dialog, open_add_track_window, AddTrackDialogCallbacks, AddTrackDialogState,
-    AddTrackKind, AddTrackWindow,
+    open_add_track_window, AddTrackDialogCallbacks, AddTrackDialogState, AddTrackKind,
+    AddTrackWindow,
 };
 pub use app_chrome::{
     app_chrome, bpm_debug_enabled, bpm_drag_sensitivity, BpmChangeCb, BpmDragCb, BpmDragSample,
@@ -58,6 +59,9 @@ pub use message_box_dialog::{
 };
 pub use mixer_panel::mixer_panel;
 pub use piano_roll::PianoRoll;
+pub use midi_editor_window::{
+    open_midi_editor_window, MidiEditorTarget, MidiEditorWindow,
+};
 pub use mixer_window::{open_mixer_window, MixerSnapshot, MixerWindow};
 pub use panel::right_panel;
 pub use plugin_manager::{

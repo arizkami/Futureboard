@@ -30,6 +30,7 @@
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
+#include "pluginterfaces/vst/ivstevents.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
 #include "public.sdk/source/vst/hosting/hostclasses.h"
@@ -232,6 +233,94 @@ struct SimpleParamChanges final : Steinberg::Vst::IParameterChanges {
   void reset() { count = 0; }
 };
 
+/// Minimal IEventList: fixed capacity, no dynamic allocation.
+struct SimpleEventList final : Steinberg::Vst::IEventList {
+  static constexpr int kMaxEvents = 256;
+
+  std::array<Steinberg::Vst::Event, kMaxEvents> events{};
+  int count{0};
+
+  Steinberg::tresult PLUGIN_API queryInterface(
+      const Steinberg::TUID iid, void** obj) override {
+    if (std::memcmp(iid, Steinberg::Vst::IEventList::iid,
+                    sizeof(Steinberg::TUID)) == 0) {
+      *obj = this;
+      return Steinberg::kResultOk;
+    }
+    *obj = nullptr;
+    return Steinberg::kNoInterface;
+  }
+  Steinberg::uint32 PLUGIN_API addRef()  override { return 1; }
+  Steinberg::uint32 PLUGIN_API release() override { return 1; }
+
+  Steinberg::int32 PLUGIN_API getEventCount() override { return count; }
+
+  Steinberg::tresult PLUGIN_API getEvent(
+      Steinberg::int32 index, Steinberg::Vst::Event& e) override {
+    if (index < 0 || index >= count) return Steinberg::kResultFalse;
+    e = events[index];
+    return Steinberg::kResultOk;
+  }
+
+  Steinberg::tresult PLUGIN_API addEvent(Steinberg::Vst::Event& e) override {
+    if (count >= kMaxEvents) return Steinberg::kResultFalse;
+    events[count++] = e;
+    return Steinberg::kResultOk;
+  }
+
+  void reset() { count = 0; }
+
+  bool push_note_on(Steinberg::int32 sample_offset, Steinberg::int16 channel,
+                    Steinberg::int16 pitch, float velocity) {
+    if (count >= kMaxEvents) return false;
+    auto& e = events[count++];
+    e = {};
+    e.busIndex = 0;
+    e.sampleOffset = sample_offset;
+    e.type = Steinberg::Vst::Event::kNoteOnEvent;
+    e.noteOn.channel = channel;
+    e.noteOn.pitch = pitch;
+    e.noteOn.velocity = velocity;
+    e.noteOn.tuning = 0.f;
+    e.noteOn.length = 0;
+    e.noteOn.noteId = -1;
+    return true;
+  }
+
+  bool push_note_off(Steinberg::int32 sample_offset, Steinberg::int16 channel,
+                     Steinberg::int16 pitch, float velocity) {
+    if (count >= kMaxEvents) return false;
+    auto& e = events[count++];
+    e = {};
+    e.busIndex = 0;
+    e.sampleOffset = sample_offset;
+    e.type = Steinberg::Vst::Event::kNoteOffEvent;
+    e.noteOff.channel = channel;
+    e.noteOff.pitch = pitch;
+    e.noteOff.velocity = velocity;
+    e.noteOff.tuning = 0.f;
+    e.noteOff.noteId = -1;
+    return true;
+  }
+
+  void sort_by_sample_offset() {
+    if (count <= 1) return;
+    std::sort(events.begin(), events.begin() + count,
+              [](const Steinberg::Vst::Event& a, const Steinberg::Vst::Event& b) {
+                return a.sampleOffset < b.sampleOffset;
+              });
+  }
+};
+
+namespace {
+
+bool daux_vst3_midi_debug() {
+  static const bool enabled = std::getenv("FUTUREBOARD_VST3_MIDI_DEBUG") != nullptr;
+  return enabled;
+}
+
+}  // namespace
+
 // Forward declaration so ComponentHandlerImpl can hold a back-pointer.
 struct SphereDauxVst3Processor;
 
@@ -330,6 +419,8 @@ struct SphereDauxVst3Processor {
   std::mutex                            pending_mutex;  // protects pending_buf/count
 
   SimpleParamChanges   param_changes_obj;  // reused per process call
+  SimpleEventList      input_events_obj;   // reused per process call
+  int                  event_input_bus_count{0};
   ComponentHandlerImpl component_handler;  // installed on IEditController
 
 #if defined(_WIN32)
@@ -429,6 +520,19 @@ struct SphereDauxVst3Processor {
         component->getBusCount(Steinberg::Vst::kAudio, Steinberg::Vst::kOutput);
     std::fprintf(stderr, "[SphereVST3] busCount input=%d output=%d\n",
                  (int)input_bus_count, (int)output_bus_count);
+
+    event_input_bus_count =
+        component->getBusCount(Steinberg::Vst::kEvent, Steinberg::Vst::kInput);
+    std::fprintf(stderr, "[SphereVST3] eventInputBusCount=%d\n", event_input_bus_count);
+    if (event_input_bus_count > 0) {
+      const auto ev_res = component->activateBus(
+          Steinberg::Vst::kEvent, Steinberg::Vst::kInput, 0, true);
+      if (ev_res != Steinberg::kResultOk) {
+        std::fprintf(stderr,
+                     "[SphereVST3] activate event input bus FAILED (result=%d)\n",
+                     (int)ev_res);
+      }
+    }
 
     // Set stereo bus arrangements before bus activation. Some VST3 processors
     // reject processing if the arrangement is changed after activation.
@@ -549,6 +653,71 @@ struct SphereDauxVst3Processor {
   }
 
   // ── Thread-safe parameter enqueue (called from audio thread OR GUI thread) ──
+
+  /// Drain pending parameters and optionally fill inputEvents for this block.
+  void prepare_process_io(const SphereDauxVst3MidiEvent* midi_events,
+                          int midi_event_count) {
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex);
+      if (pending_count > 0) {
+        param_changes_obj.reset();
+        for (int i = 0; i < pending_count; ++i) {
+          Steinberg::int32 idx = 0;
+          auto* q = param_changes_obj.addParameterData(pending_buf[i].id, idx);
+          if (q) {
+            Steinberg::int32 dummy = 0;
+            q->addPoint(0, pending_buf[i].value, dummy);
+          }
+        }
+        pending_count = 0;
+        process_data.inputParameterChanges = &param_changes_obj;
+      } else {
+        process_data.inputParameterChanges = nullptr;
+      }
+    }
+
+    input_events_obj.reset();
+    if (event_input_bus_count > 0 && midi_events && midi_event_count > 0) {
+      const int n = std::min(midi_event_count, SimpleEventList::kMaxEvents);
+      for (int i = 0; i < n; ++i) {
+        const auto& m = midi_events[i];
+        const auto ch = static_cast<Steinberg::int16>(m.channel & 0x0F);
+        const auto pitch = static_cast<Steinberg::int16>(m.pitch & 0x7F);
+        const auto offset = static_cast<Steinberg::int32>(m.sample_offset);
+        if (m.kind == 1) {
+          input_events_obj.push_note_on(offset, ch, pitch, m.velocity);
+        } else {
+          input_events_obj.push_note_off(offset, ch, pitch, m.velocity);
+        }
+      }
+      input_events_obj.sort_by_sample_offset();
+      process_data.inputEvents = &input_events_obj;
+
+      if (daux_vst3_midi_debug()) {
+        std::fprintf(stderr,
+                     "[VST3 MIDI] block events=%d eventInputBuses=%d\n",
+                     input_events_obj.count,
+                     event_input_bus_count);
+        for (int i = 0; i < input_events_obj.count; ++i) {
+          const auto& e = input_events_obj.events[i];
+          if (e.type == Steinberg::Vst::Event::kNoteOnEvent) {
+            std::fprintf(stderr,
+                         "[VST3 MIDI] send note_on pitch=%d vel=%.2f offset=%d\n",
+                         (int)e.noteOn.pitch,
+                         e.noteOn.velocity,
+                         (int)e.sampleOffset);
+          } else if (e.type == Steinberg::Vst::Event::kNoteOffEvent) {
+            std::fprintf(stderr,
+                         "[VST3 MIDI] send note_off pitch=%d offset=%d\n",
+                         (int)e.noteOff.pitch,
+                         (int)e.sampleOffset);
+          }
+        }
+      }
+    } else {
+      process_data.inputEvents = nullptr;
+    }
+  }
 
   /// Add or update a parameter change in the pending queue.
   /// Deduplicates by paramId — later value wins within one block.
@@ -1872,27 +2041,7 @@ extern "C" int sphere_daux_vst3_process_stereo_sample(
     float* out_l, float* out_r) {
   if (!processor || !processor->processor || !out_l || !out_r) return 0;
 
-  // Drain pending parameter changes into inputParameterChanges.
-  // Lock scope is minimal — no allocation occurs here.
-  {
-    std::lock_guard<std::mutex> lock(processor->pending_mutex);
-    if (processor->pending_count > 0) {
-      processor->param_changes_obj.reset();
-      for (int i = 0; i < processor->pending_count; ++i) {
-        Steinberg::int32 idx = 0;
-        auto* q = processor->param_changes_obj.addParameterData(
-            processor->pending_buf[i].id, idx);
-        if (q) {
-          Steinberg::int32 dummy = 0;
-          q->addPoint(0, processor->pending_buf[i].value, dummy);
-        }
-      }
-      processor->pending_count = 0;
-      processor->process_data.inputParameterChanges = &processor->param_changes_obj;
-    } else {
-      processor->process_data.inputParameterChanges = nullptr;
-    }
-  }
+  processor->prepare_process_io(nullptr, 0);
 
   // Fill input, clear output
   processor->input_l  = in_l;
@@ -1939,29 +2088,24 @@ extern "C" int sphere_daux_vst3_process_stereo_block(
     float* out_l,
     float* out_r,
     int frames) {
+  return sphere_daux_vst3_process_stereo_block_with_midi(
+      processor, in_l, in_r, out_l, out_r, frames, nullptr, 0);
+}
+
+extern "C" int sphere_daux_vst3_process_stereo_block_with_midi(
+    SphereDauxVst3Processor* processor,
+    const float* in_l,
+    const float* in_r,
+    float* out_l,
+    float* out_r,
+    int frames,
+    const SphereDauxVst3MidiEvent* events,
+    int event_count) {
   if (!processor || !processor->processor || !in_l || !in_r || !out_l || !out_r || frames <= 0) {
     return 0;
   }
 
-  {
-    std::lock_guard<std::mutex> lock(processor->pending_mutex);
-    if (processor->pending_count > 0) {
-      processor->param_changes_obj.reset();
-      for (int i = 0; i < processor->pending_count; ++i) {
-        Steinberg::int32 idx = 0;
-        auto* q = processor->param_changes_obj.addParameterData(
-            processor->pending_buf[i].id, idx);
-        if (q) {
-          Steinberg::int32 dummy = 0;
-          q->addPoint(0, processor->pending_buf[i].value, dummy);
-        }
-      }
-      processor->pending_count = 0;
-      processor->process_data.inputParameterChanges = &processor->param_changes_obj;
-    } else {
-      processor->process_data.inputParameterChanges = nullptr;
-    }
-  }
+  processor->prepare_process_io(events, event_count);
 
   float* input_channels[2] = {
       const_cast<float*>(in_l),
@@ -1977,6 +2121,10 @@ extern "C" int sphere_daux_vst3_process_stereo_block(
   processor->process_data.outputs = &processor->output_bus;
 
   const auto result = processor->processor->process(processor->process_data);
+
+  if (daux_vst3_midi_debug() && event_count > 0) {
+    std::fprintf(stderr, "[VST3 MIDI] process result=%d\n", (int)result);
+  }
 
   double input_peak_l = 0.0;
   double input_peak_r = 0.0;
@@ -2007,12 +2155,19 @@ extern "C" int sphere_daux_vst3_process_stereo_block(
   }
 
   processor->process_data.numSamples = 1;
+  processor->process_data.inputEvents = nullptr;
   processor->input_bus.channelBuffers32 = processor->input_channels;
   processor->output_bus.channelBuffers32 = processor->output_channels;
 
   if (result != Steinberg::kResultOk) return 0;
   processor->process_count += 1;
   return 1;
+}
+
+extern "C" int sphere_daux_vst3_event_input_bus_count(
+    SphereDauxVst3Processor* processor) {
+  if (!processor) return 0;
+  return processor->event_input_bus_count;
 }
 
 /// Enqueue a normalized parameter change for delivery on the next process call.

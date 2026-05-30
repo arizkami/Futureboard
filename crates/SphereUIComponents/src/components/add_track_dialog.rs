@@ -11,9 +11,14 @@ use crate::assets;
 use crate::components::text_input::{
     bind_mouse_selection, text_field_with_callbacks, TextInputCallbacks, TextInputState,
 };
-use crate::components::title_bar::external_window_titlebar;
+use crate::components::controls::{
+    fb_button, fb_form_row, fb_segmented_button, fb_stepper_button, FbButtonKind,
+};
+use crate::components::title_bar::external_window_titlebar_with_icon;
 use crate::components::timeline::timeline_state::TrackType;
 use crate::theme::{self, Colors};
+
+const MAX_TRACK_COUNT: u32 = 128;
 
 type VoidCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 type KindCb = Arc<dyn Fn(&AddTrackKind, &mut Window, &mut App) + 'static>;
@@ -25,6 +30,9 @@ pub enum AddTrackKind {
     Audio,
     Instrument,
     Midi,
+    Automation,
+    Folder,
+    /// Legacy / menu-only kinds (not shown in the primary tab row).
     Plugin,
     Bus,
     Return,
@@ -32,12 +40,39 @@ pub enum AddTrackKind {
     Master,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioFormat {
+    Mono,
+    Stereo,
+}
+
 impl AddTrackKind {
     pub fn label(self) -> &'static str {
+        self.default_name_stem()
+    }
+
+    pub fn tab_label(self) -> &'static str {
+        match self {
+            Self::Audio => "Audio",
+            Self::Instrument => "Instrument",
+            Self::Midi => "MIDI",
+            Self::Automation => "Automation",
+            Self::Folder => "Folder",
+            Self::Plugin => "Plugin",
+            Self::Bus => "Bus",
+            Self::Return => "Return",
+            Self::Group => "Group",
+            Self::Master => "Master",
+        }
+    }
+
+    pub fn default_name_stem(self) -> &'static str {
         match self {
             Self::Audio => "Audio Track",
             Self::Instrument => "Instrument Track",
             Self::Midi => "MIDI Track",
+            Self::Automation => "Automation Track",
+            Self::Folder => "Folder Track",
             Self::Plugin => "Plugin Track",
             Self::Bus => "Bus Track",
             Self::Return => "Return Track",
@@ -46,38 +81,14 @@ impl AddTrackKind {
         }
     }
 
-    pub fn detail(self) -> &'static str {
-        match self {
-            Self::Audio => "WAV - MP3 - AIFF",
-            Self::Instrument => "VST3 - CLAP - Piano Roll",
-            Self::Midi => "Piano Roll - CC",
-            Self::Plugin => "VST3 - CLAP",
-            Self::Bus => "Sends - Groups",
-            Self::Return => "FX Returns - Aux",
-            Self::Group => "Sub-mix - Stem",
-            Self::Master => "Main Output",
-        }
-    }
-
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::Audio => "Record and arrange audio clips",
-            Self::Instrument => "MIDI clips routed to an instrument plugin",
-            Self::Midi => "Sequence instruments with notes",
-            Self::Plugin => "Host virtual instruments & effects",
-            Self::Bus => "Route and blend multiple channels",
-            Self::Return => "Receive sends from other tracks",
-            Self::Group => "Group and process multiple tracks",
-            Self::Master => "Final output and master bus",
-        }
-    }
-
     pub fn icon(self) -> &'static str {
         match self {
             Self::Audio => assets::ICON_MIC_PATH,
             Self::Instrument => assets::ICON_CPU_PATH,
             Self::Midi => assets::ICON_MUSIC_PATH,
-            Self::Plugin => assets::ICON_CPU_PATH,
+            Self::Automation => assets::ICON_AUTOMATION_PATH,
+            Self::Folder => assets::ICON_FOLDER_PATH,
+            Self::Plugin => assets::ICON_PLUG_PATH,
             Self::Bus => assets::ICON_GIT_MERGE_PATH,
             Self::Return => assets::ICON_CORNER_DOWN_LEFT_PATH,
             Self::Group => assets::ICON_GIT_FORK_PATH,
@@ -92,7 +103,7 @@ impl AddTrackKind {
             Self::Midi => Some(TrackType::Midi),
             Self::Bus => Some(TrackType::Bus),
             Self::Return => Some(TrackType::Return),
-            Self::Plugin | Self::Group | Self::Master => None,
+            Self::Automation | Self::Folder | Self::Plugin | Self::Group | Self::Master => None,
         }
     }
 
@@ -104,17 +115,32 @@ impl AddTrackKind {
         }
     }
 
-    pub fn all() -> [Self; 8] {
-        [
+    /// Primary DAW-style tabs shown at the top of the dialog.
+    pub fn primary_tabs() -> &'static [Self] {
+        &[
             Self::Audio,
             Self::Instrument,
             Self::Midi,
-            Self::Plugin,
+            Self::Automation,
+            Self::Folder,
+        ]
+    }
+
+    /// Tabs visible for the current selection (primary + menu-only kinds).
+    pub fn visible_tabs(selected: Self) -> Vec<Self> {
+        let mut tabs = Self::primary_tabs().to_vec();
+        for extra in [
             Self::Bus,
             Self::Return,
+            Self::Plugin,
             Self::Group,
             Self::Master,
-        ]
+        ] {
+            if selected == extra && !tabs.contains(&extra) {
+                tabs.push(extra);
+            }
+        }
+        tabs
     }
 }
 
@@ -124,49 +150,68 @@ pub struct AddTrackDialogState {
     pub selected_kind: AddTrackKind,
     pub track_name: String,
     pub count: u32,
+    pub auto_color: bool,
     pub color_index: usize,
+    pub audio_format: AudioFormat,
+    pub fx_chain: Option<String>,
+    pub input_label: String,
+    pub output_label: String,
+    pub ascending_input: bool,
+    pub ascending_output: bool,
+    pub midi_channel_label: String,
+    pub pack_folder: bool,
     pub channel_count: u32,
-    pub volume: f32,
-    pub pan: f32,
     pub arm_track: bool,
     pub monitor_mode: &'static str,
     pub next_number: usize,
     pub has_master_track: bool,
+    pub base_track_count: usize,
+}
+
+pub(crate) fn add_track_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("FUTUREBOARD_ADD_TRACK_DEBUG")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+pub(crate) fn add_track_debug(message: &str) {
+    if add_track_debug_enabled() {
+        eprintln!("[Add Track] {message}");
+    }
 }
 
 impl AddTrackDialogState {
     pub fn closed() -> Self {
-        Self {
-            is_open: false,
-            selected_kind: AddTrackKind::Audio,
-            track_name: String::new(),
-            count: 1,
-            color_index: 0,
-            channel_count: 2,
-            volume: 0.8,
-            pan: 0.0,
-            arm_track: false,
-            monitor_mode: "off",
-            next_number: 1,
-            has_master_track: false,
-        }
+        Self::open_for(0, false)
     }
 
     pub fn open_for(track_count: usize, has_master_track: bool) -> Self {
-        let next_number = track_count + 1;
+        let next_number = track_count.saturating_add(1);
+        let kind = AddTrackKind::Audio;
         Self {
             is_open: true,
-            selected_kind: AddTrackKind::Audio,
-            track_name: format!("Audio Track {}", next_number),
+            selected_kind: kind,
+            track_name: format!("{} {}", kind.default_name_stem(), next_number),
             count: 1,
+            auto_color: true,
             color_index: track_count % Colors::TRACK_COLORS.len(),
+            audio_format: AudioFormat::Stereo,
+            fx_chain: None,
+            input_label: kind.default_input().to_string(),
+            output_label: "Main".to_string(),
+            ascending_input: false,
+            ascending_output: false,
+            midi_channel_label: "All Channels".to_string(),
+            pack_folder: false,
             channel_count: 2,
-            volume: 0.8,
-            pan: 0.0,
             arm_track: false,
             monitor_mode: "off",
             next_number,
             has_master_track,
+            base_track_count: track_count,
         }
     }
 
@@ -175,7 +220,19 @@ impl AddTrackDialogState {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.selected_kind.native_track_type().is_some()
+        let name_ok = !self.track_name.trim().is_empty();
+        let count_ok = self.count >= 1 && self.count <= MAX_TRACK_COUNT;
+        name_ok
+            && count_ok
+            && self.selected_kind.native_track_type().is_some()
+            && !(self.selected_kind == AddTrackKind::Master && self.has_master_track)
+    }
+
+    pub fn sync_channel_count_from_format(&mut self) {
+        self.channel_count = match self.audio_format {
+            AudioFormat::Mono => 1,
+            AudioFormat::Stereo => 2,
+        };
     }
 }
 
@@ -185,8 +242,12 @@ pub struct AddTrackDialogCallbacks {
     pub on_confirm: VoidCb,
     pub on_select_kind: KindCb,
     pub on_count_delta: Arc<dyn Fn(&i32, &mut Window, &mut App) + 'static>,
-    pub on_channel_count: U32Cb,
+    pub on_audio_format: Arc<dyn Fn(&AudioFormat, &mut Window, &mut App) + 'static>,
     pub on_color_index: U32Cb,
+    pub on_auto_color: BoolCb,
+    pub on_ascending_input: BoolCb,
+    pub on_ascending_output: BoolCb,
+    pub on_pack_folder: BoolCb,
     pub on_arm: BoolCb,
     pub on_monitor: Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
 }
@@ -195,773 +256,406 @@ pub fn track_color(index: usize) -> gpui::Rgba {
     Colors::track_color_for_index(index)
 }
 
-fn option_supported(kind: AddTrackKind, state: &AddTrackDialogState) -> bool {
+fn kind_supported(kind: AddTrackKind, state: &AddTrackDialogState) -> bool {
     kind.native_track_type().is_some() && !(kind == AddTrackKind::Master && state.has_master_track)
-}
-
-fn unsupported_badge(kind: AddTrackKind, state: &AddTrackDialogState) -> &'static str {
-    if kind == AddTrackKind::Master && state.has_master_track {
-        "Exists"
-    } else {
-        "Soon"
-    }
 }
 
 fn icon(path: &'static str, size: f32, color: gpui::Rgba) -> impl IntoElement {
     svg().path(path).w(px(size)).h(px(size)).text_color(color)
 }
 
-fn option_card(
-    state: &AddTrackDialogState,
-    kind: AddTrackKind,
-    callbacks: &AddTrackDialogCallbacks,
-    index: usize,
-) -> impl IntoElement {
-    let active = state.selected_kind == kind;
-    let supported = option_supported(kind, state);
-    let cb = callbacks.on_select_kind.clone();
-    let border = if active {
-        Colors::with_alpha(Colors::accent_primary(), 0.48)
-    } else {
-        Colors::divider()
-    };
-    let bg = if active {
-        Colors::with_alpha(Colors::accent_primary(), 0.07)
-    } else {
-        Colors::surface_input()
-    };
-    let icon_bg = if active {
-        Colors::accent_soft()
-    } else {
-        Colors::surface_canvas()
-    };
-    let icon_border = if active {
-        Colors::with_alpha(Colors::accent_primary(), 0.3)
-    } else {
-        Colors::slot_border()
-    };
-    let icon_color = if active {
-        Colors::accent_primary()
-    } else {
-        Colors::text_muted()
-    };
-
-    let mut card = div()
-        .relative()
+fn select_box(text: impl Into<String>) -> impl IntoElement {
+    let text = text.into();
+    div()
         .flex()
-        .flex_col()
-        .gap(px(6.0))
-        .h(px(94.0))
-        .flex_1()
-        .rounded_lg()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .w_full()
+        .h(px(28.0))
+        .rounded_md()
         .border(px(1.0))
-        .border_color(border)
-        .bg(bg)
-        .p(px(10.0))
-        .id(("add-track-kind", index))
-        .opacity(if supported { 1.0 } else { 0.4 })
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_input())
+        .px(px(8.0))
+        .text_size(px(11.0))
+        .text_color(Colors::text_secondary())
+        .child(text)
+        .child(icon(assets::ICON_CHEVRON_DOWN_PATH, 10.0, Colors::text_faint()))
+}
+
+fn check_row(
+    id: &'static str,
+    label: &'static str,
+    checked: bool,
+    enabled: bool,
+    on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let mut row = div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
         .child(
             div()
-                .absolute()
-                .right(px(8.0))
-                .top(px(8.0))
-                .children(if supported {
-                    Some(
-                        div()
-                            .rounded_sm()
-                            .px(px(4.0))
-                            .py(px(1.0))
-                            .bg(Colors::accent_soft())
-                            .text_size(px(8.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(Colors::accent_primary())
-                            .child("Ready"),
-                    )
+                .w(px(12.0))
+                .h(px(12.0))
+                .rounded_sm()
+                .border(px(1.0))
+                .border_color(if checked {
+                    Colors::accent_primary()
                 } else {
-                    Some(
-                        div()
-                            .rounded_sm()
-                            .px(px(4.0))
-                            .py(px(1.0))
-                            .bg(Colors::with_alpha(Colors::text_primary(), 0.05))
-                            .text_size(px(8.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(Colors::text_faint())
-                            .child(unsupported_badge(kind, state)),
-                    )
+                    Colors::border_subtle()
+                })
+                .bg(if checked {
+                    Colors::accent_primary()
+                } else {
+                    Colors::surface_input()
                 }),
         )
         .child(
             div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(28.0))
-                .h(px(28.0))
-                .rounded_lg()
-                .border(px(1.0))
-                .border_color(icon_border)
-                .bg(icon_bg)
-                .child(icon(kind.icon(), 13.0, icon_color)),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(if active {
-                            Colors::text_primary()
-                        } else {
-                            Colors::text_muted()
-                        })
-                        .child(kind.label()),
-                )
-                .child(
-                    div()
-                        .text_size(px(9.0))
-                        .text_color(Colors::text_faint())
-                        .child(kind.detail()),
-                ),
-        );
-
-    if supported {
-        card = card
-            .cursor(gpui::CursorStyle::PointingHand)
-            .hover(|s| s.bg(Colors::surface_hover()).border_color(Colors::border_default()))
-            .on_click(move |_, window, cx| {
-                cb(&kind, window, cx);
-            });
-    }
-
-    card
-}
-
-fn option_group(label: &'static str, child: impl IntoElement) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_w(px(0.0))
-        .gap(px(6.0))
-        .child(
-            div()
-                .h(px(12.0))
-                .text_size(px(9.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(Colors::text_faint())
+                .text_size(px(11.0))
+                .text_color(Colors::text_secondary())
                 .child(label),
-        )
-        .child(child)
+        );
+    if enabled {
+        row = row
+            .cursor(gpui::CursorStyle::PointingHand)
+            .hover(|s| s.bg(Colors::surface_hover()))
+            .on_click(on_toggle);
+    } else {
+        row = row.opacity(0.45);
+    }
+    row
 }
 
-fn pill(
-    label: &'static str,
-    active: bool,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .h(px(27.0))
-        .flex_1()
-        .min_w(px(52.0))
-        .px(px(10.0))
-        .rounded_md()
-        .border(px(1.0))
-        .border_color(if active {
-            Colors::with_alpha(Colors::accent_primary(), 0.48)
-        } else {
-            Colors::slot_border()
-        })
-        .bg(if active {
-            Colors::with_alpha(Colors::accent_primary(), 0.14)
-        } else {
-            Colors::surface_input()
-        })
-        .text_size(px(11.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(if active {
-            Colors::text_primary()
-        } else {
-            Colors::text_muted()
-        })
-        .id(label)
-        .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|s| s.bg(Colors::surface_hover()))
-        .on_click(on_click)
-        .child(label)
-}
-
-fn spinner(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -> impl IntoElement {
+fn count_stepper(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -> impl IntoElement {
     let down = callbacks.on_count_delta.clone();
     let up = callbacks.on_count_delta.clone();
     div()
         .flex()
         .flex_row()
-        .gap(px(5.0))
+        .items_center()
+        .gap(px(6.0))
+        .child(fb_stepper_button(
+            "add-track-count-minus",
+            "-",
+            move |_, w, cx| down(&-1, w, cx),
+        ))
         .child(
             div()
                 .flex()
                 .items_center()
                 .justify_center()
-                .w(px(27.0))
-                .h(px(27.0))
+                .min_w(px(48.0))
+                .h(px(28.0))
+                .px(px(10.0))
                 .rounded_md()
                 .border(px(1.0))
-                .border_color(Colors::slot_border())
-                .bg(Colors::surface_input())
-                .text_size(px(12.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(Colors::text_muted())
-                .id("add-track-count-minus")
-                .cursor(gpui::CursorStyle::PointingHand)
-                .on_click(move |_, window, cx| down(&-1, window, cx))
-                .child("-"),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .h(px(27.0))
-                .flex_1()
-                .rounded_md()
-                .border(px(1.0))
-                .border_color(Colors::slot_border())
+                .border_color(Colors::border_subtle())
                 .bg(Colors::surface_input())
                 .text_size(px(12.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_primary())
                 .child(state.count.to_string()),
         )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(27.0))
-                .h(px(27.0))
-                .rounded_md()
-                .border(px(1.0))
-                .border_color(Colors::slot_border())
-                .bg(Colors::surface_input())
-                .text_size(px(12.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(Colors::text_muted())
-                .id("add-track-count-plus")
-                .cursor(gpui::CursorStyle::PointingHand)
-                .on_click(move |_, window, cx| up(&1, window, cx))
-                .child("+"),
-        )
-}
-
-fn routing_row(label: &'static str, value: impl IntoElement) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(12.0))
-        .child(
-            div()
-                .w(px(56.0))
-                .text_size(px(9.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(Colors::text_faint())
-                .child(label),
-        )
-        .child(value)
-}
-
-fn select_box(text: String) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .flex_1()
-        .h(px(27.0))
-        .rounded_md()
-        .border(px(1.0))
-        .border_color(Colors::slot_border())
-        .bg(Colors::surface_input())
-        .px(px(8.0))
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(Colors::text_muted())
-                .child(text),
-        )
-        .child(icon(
-            assets::ICON_CHEVRON_DOWN_PATH,
-            10.0,
-            Colors::text_faint(),
+        .child(fb_stepper_button(
+            "add-track-count-plus",
+            "+",
+            move |_, w, cx| up(&1, w, cx),
         ))
 }
 
-fn summary_text(state: &AddTrackDialogState) -> String {
-    let n = if state.count == 1 {
-        String::new()
-    } else {
-        format!("{} ", state.count)
-    };
-    let plural = if state.count > 1 { "s" } else { "" };
-    let out = if state.selected_kind == AddTrackKind::Midi {
-        "none"
-    } else {
-        "Master"
-    };
-    match state.selected_kind {
-        AddTrackKind::Audio => {
-            let ch = if state.channel_count == 1 {
-                "mono"
+fn type_tabs(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -> impl IntoElement {
+    let tabs = AddTrackKind::visible_tabs(state.selected_kind);
+    let mut row = div().flex().flex_row().gap(px(4.0)).px(px(12.0)).py(px(8.0));
+    for (i, kind) in tabs.iter().enumerate() {
+        let active = state.selected_kind == *kind;
+        let supported = kind_supported(*kind, state);
+        let cb = callbacks.on_select_kind.clone();
+        let k = *kind;
+        let mut tab = div()
+            .id(("add-track-tab", i))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(3.0))
+            .min_w(px(72.0))
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded_md()
+            .border(px(1.0))
+            .border_color(if active {
+                Colors::border_accent()
             } else {
-                "stereo"
-            };
-            let mon = if state.monitor_mode != "off" {
-                format!(" - Mon {}", state.monitor_mode)
+                Colors::border_subtle()
+            })
+            .bg(if active {
+                Colors::accent_muted()
             } else {
-                String::new()
-            };
-            format!("Add {n}{ch} audio track{plural} - stereo in -> {out}{mon}")
+                Colors::surface_input()
+            })
+            .opacity(if supported { 1.0 } else { 0.42 })
+            .child(icon(
+                kind.icon(),
+                14.0,
+                if active {
+                    Colors::accent_primary()
+                } else {
+                    Colors::text_muted()
+                },
+            ))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .font_weight(if active {
+                        gpui::FontWeight::SEMIBOLD
+                    } else {
+                        gpui::FontWeight::NORMAL
+                    })
+                    .text_color(if active {
+                        Colors::text_primary()
+                    } else {
+                        Colors::text_muted()
+                    })
+                    .child(kind.tab_label()),
+            );
+        if supported {
+            tab = tab
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(|s| s.bg(Colors::surface_hover()))
+                .on_click(move |_, w, cx| cb(&k, w, cx));
         }
-        AddTrackKind::Midi => format!("Add {n}MIDI track{plural} - All MIDI Inputs, all channels"),
-        AddTrackKind::Instrument => {
-            format!(
-                "Add {n}instrument track{plural} - All MIDI Inputs -> instrument plugin -> {out}"
-            )
-        }
-        AddTrackKind::Plugin => "Plugin tracks are not wired in Native yet".to_string(),
-        AddTrackKind::Bus => {
-            format!("Add {n}bus track{plural} - sub-mix -> {out} (sends routing pending)")
-        }
-        AddTrackKind::Return => {
-            format!("Add {n}return track{plural} - FX return -> {out} (sends routing pending)")
-        }
-        AddTrackKind::Group => "Group tracks are not wired in Native yet".to_string(),
-        AddTrackKind::Master => "Native uses a managed master bus".to_string(),
+        row = row.child(tab);
     }
+    row
 }
 
-pub fn add_track_dialog(
-    state: &AddTrackDialogState,
-    track_name_input: &TextInputState,
-    track_name_focused: bool,
-    track_name_callbacks: TextInputCallbacks,
-    callbacks: AddTrackDialogCallbacks,
-) -> impl IntoElement {
-    let close_backdrop = callbacks.on_close.clone();
-    let close_button = callbacks.on_close.clone();
-    let confirm = callbacks.on_confirm.clone();
-    let selected_color = state.selected_color();
-
-    let mut option_rows = Vec::new();
-    let all = AddTrackKind::all();
-    for row in 0..2 {
-        let mut row_el = div().flex().flex_row().gap(px(6.0));
-        for col in 0..4 {
-            let index = row * 4 + col;
-            row_el = row_el.child(option_card(state, all[index], &callbacks, index));
+fn color_row(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -> impl IntoElement {
+    let auto_cb = callbacks.on_auto_color.clone();
+    let auto_on = state.auto_color;
+    let mut swatches = div().flex().flex_row().gap(px(5.0)).flex_wrap();
+    for i in 0..Colors::TRACK_COLORS.len() {
+        let cb = callbacks.on_color_index.clone();
+        let active = !auto_on && i == state.color_index;
+        let color = track_color(i);
+        let mut sw = div()
+            .id(("add-track-color", i))
+            .w(px(18.0))
+            .h(px(18.0))
+            .rounded_full()
+            .border(px(2.0))
+            .border_color(color)
+            .bg(if active {
+                color
+            } else {
+                gpui::transparent_black().into()
+            })
+            .opacity(if auto_on {
+                0.35
+            } else if active {
+                1.0
+            } else {
+                0.55
+            });
+        if !auto_on {
+            sw = sw
+                .cursor(gpui::CursorStyle::PointingHand)
+                .on_click(move |_, w, cx| cb(&(i as u32), w, cx));
         }
-        option_rows.push(row_el.into_any_element());
+        swatches = swatches.child(sw);
     }
-
-    let channel_controls = if matches!(
-        state.selected_kind,
-        AddTrackKind::Audio
-            | AddTrackKind::Plugin
-            | AddTrackKind::Bus
-            | AddTrackKind::Return
-            | AddTrackKind::Group
-    ) {
-        option_group(
-            "Channels",
-            div()
-                .flex()
-                .flex_row()
-                .gap(px(6.0))
-                .child({
-                    let cb = callbacks.on_channel_count.clone();
-                    pill("Mono", state.channel_count == 1, move |_, window, cx| {
-                        cb(&1, window, cx);
-                    })
-                })
-                .child({
-                    let cb = callbacks.on_channel_count.clone();
-                    pill("Stereo", state.channel_count == 2, move |_, window, cx| {
-                        cb(&2, window, cx);
-                    })
-                }),
-        )
-        .into_any_element()
-    } else {
-        div().into_any_element()
-    };
-
-    let routing = if state.selected_kind == AddTrackKind::Audio {
-        let off = callbacks.on_monitor.clone();
-        let auto = callbacks.on_monitor.clone();
-        let input = callbacks.on_monitor.clone();
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .border_t(px(1.0))
-            .border_color(Colors::divider())
-            .px(px(12.0))
-            .py(px(10.0))
-            .child(routing_row(
-                "Monitor",
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .gap(px(5.0))
-                    .child(pill(
-                        "Off",
-                        state.monitor_mode == "off",
-                        move |_, window, cx| off(&"off".to_string(), window, cx),
-                    ))
-                    .child(pill(
-                        "Auto",
-                        state.monitor_mode == "auto",
-                        move |_, window, cx| auto(&"auto".to_string(), window, cx),
-                    ))
-                    .child(pill(
-                        "In",
-                        state.monitor_mode == "in",
-                        move |_, window, cx| input(&"in".to_string(), window, cx),
-                    )),
-            ))
-            .child(routing_row("Input", select_box("System Input".to_string())))
-            .child(routing_row("Output", select_box("Master".to_string())))
-            .child({
-                let cb = callbacks.on_arm.clone();
-                let next = !state.arm_track;
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .mt(px(2.0))
-                    .id("add-track-arm")
-                    .cursor(gpui::CursorStyle::PointingHand)
-                    .on_click(move |_, window, cx| cb(&next, window, cx))
-                    .child(
-                        div()
-                            .w(px(12.0))
-                            .h(px(12.0))
-                            .rounded_sm()
-                            .border(px(1.0))
-                            .border_color(if state.arm_track {
-                                Colors::status_error()
-                            } else {
-                                Colors::border_default()
-                            })
-                            .bg(if state.arm_track {
-                                Colors::status_error()
-                            } else {
-                                Colors::surface_input()
-                            }),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(Colors::text_muted())
-                            .child("Arm for recording"),
-                    )
-            })
-            .into_any_element()
-    } else if state.selected_kind == AddTrackKind::Midi
-        || state.selected_kind == AddTrackKind::Instrument
-    {
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .border_t(px(1.0))
-            .border_color(Colors::divider())
-            .px(px(12.0))
-            .py(px(10.0))
-            .child(routing_row(
-                if state.selected_kind == AddTrackKind::Instrument {
-                    "MIDI In"
-                } else {
-                    "Input"
-                },
-                select_box(state.selected_kind.default_input().to_string()),
-            ))
-            .when(state.selected_kind == AddTrackKind::Midi, |this| {
-                this.child(routing_row(
-                    "Channel",
-                    select_box("All Channels".to_string()),
-                ))
-            })
-            .when(state.selected_kind == AddTrackKind::Instrument, |this| {
-                this.child(routing_row("Output", select_box("Master".to_string())))
-            })
-            .into_any_element()
-    } else {
-        div()
-            .border_t(px(1.0))
-            .border_color(Colors::divider())
-            .px(px(12.0))
-            .py(px(10.0))
-            .text_size(px(10.0))
-            .text_color(Colors::text_faint())
-            .child(state.selected_kind.description())
-            .into_any_element()
-    };
-
     div()
-        .absolute()
-        .top_0()
-        .bottom_0()
-        .left_0()
-        .right_0()
         .flex()
-        .items_start()
-        .justify_center()
-        .pt(px(56.0))
-        .px(px(18.0))
-        .pb(px(32.0))
-        .id("add-track-modal-overlay")
-        .bg(gpui::transparent_black())
-        .occlude()
-        .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-            close_backdrop(&(), window, cx);
-        })
-        .child(
+        .flex_col()
+        .gap(px(8.0))
+        .child(fb_form_row("Color", swatches))
+        .child(check_row(
+            "add-track-auto-color",
+            "Auto Color",
+            auto_on,
+            true,
+            move |_, w, cx| auto_cb(&!auto_on, w, cx),
+        ))
+}
+
+fn type_fields(state: &AddTrackDialogState, callbacks: &AddTrackDialogCallbacks) -> gpui::AnyElement {
+    let show_asc = state.count > 1;
+    match state.selected_kind {
+        AddTrackKind::Audio => {
+            let fmt_cb = callbacks.on_audio_format.clone();
+            let asc_in = callbacks.on_ascending_input.clone();
+            let asc_out = callbacks.on_ascending_output.clone();
+            let arm_cb = callbacks.on_arm.clone();
+            let asc_in_on = state.ascending_input;
+            let asc_out_on = state.ascending_output;
+            let arm_on = state.arm_track;
             div()
                 .flex()
                 .flex_col()
-                .w(px(620.0))
-                .max_w(px(620.0))
-                .max_h(px(760.0))
-                .overflow_hidden()
-                .rounded_xl()
-                .border(px(1.0))
-                .border_color(Colors::border_default())
-                .bg(Colors::surface_window())
-                .shadow_xl()
-                .on_mouse_down(gpui::MouseButton::Left, |_, _window, cx| {
-                    cx.stop_propagation();
+                .gap(px(6.0))
+                .child(fb_form_row(
+                    "Format",
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(4.0))
+                        .child({
+                            let fmt_cb = fmt_cb.clone();
+                            fb_segmented_button(
+                                "add-track-mono",
+                                "Mono",
+                                state.audio_format == AudioFormat::Mono,
+                                move |_, w, cx| fmt_cb(&AudioFormat::Mono, w, cx),
+                            )
+                        })
+                        .child({
+                            let fmt_cb = fmt_cb.clone();
+                            fb_segmented_button(
+                                "add-track-stereo",
+                                "Stereo",
+                                state.audio_format == AudioFormat::Stereo,
+                                move |_, w, cx| fmt_cb(&AudioFormat::Stereo, w, cx),
+                            )
+                        }),
+                ))
+                .child(fb_form_row(
+                    "FX Chain",
+                    select_box(
+                        state
+                            .fx_chain
+                            .clone()
+                            .unwrap_or_else(|| "No Preset".to_string()),
+                    ),
+                ))
+                .child(fb_form_row("Input", select_box(state.input_label.clone())))
+                .child(fb_form_row("Output", select_box(state.output_label.clone())))
+                .when(show_asc, |col| {
+                    col.child(check_row(
+                        "add-track-asc-in",
+                        "Ascending Input",
+                        asc_in_on,
+                        true,
+                        move |_, w, cx| asc_in(&!asc_in_on, w, cx),
+                    ))
+                    .child(check_row(
+                        "add-track-asc-out",
+                        "Ascending Output",
+                        asc_out_on,
+                        true,
+                        move |_, w, cx| asc_out(&!asc_out_on, w, cx),
+                    ))
                 })
+                .child(check_row(
+                    "add-track-arm",
+                    "Arm for recording",
+                    arm_on,
+                    true,
+                    move |_, w, cx| arm_cb(&!arm_on, w, cx),
+                ))
+                .into_any_element()
+        }
+        AddTrackKind::Instrument => {
+            let asc_in = callbacks.on_ascending_input.clone();
+            let asc_in_on = state.ascending_input;
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(fb_form_row(
+                    "Instrument",
+                    select_box("No Instrument".to_string()),
+                ))
+                .child(fb_form_row("MIDI Input", select_box(state.input_label.clone())))
+                .child(fb_form_row("Output", select_box(state.output_label.clone())))
+                .child(fb_form_row("FX Chain", select_box("No Preset".to_string())))
+                .when(show_asc, |col| {
+                    col.child(check_row(
+                        "add-track-asc-in",
+                        "Ascending MIDI Input",
+                        asc_in_on,
+                        true,
+                        move |_, w, cx| asc_in(&!asc_in_on, w, cx),
+                    ))
+                })
+                .into_any_element()
+        }
+        AddTrackKind::Midi => {
+            let asc_in = callbacks.on_ascending_input.clone();
+            let asc_in_on = state.ascending_input;
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(fb_form_row("MIDI Input", select_box(state.input_label.clone())))
+                .child(fb_form_row("MIDI Output", select_box("None".to_string())))
+                .child(fb_form_row("Channel", select_box(state.midi_channel_label.clone())))
+                .child(fb_form_row("Output", select_box(state.output_label.clone())))
+                .when(show_asc, |col| {
+                    col.child(check_row(
+                        "add-track-asc-in",
+                        "Ascending Input",
+                        asc_in_on,
+                        true,
+                        move |_, w, cx| asc_in(&!asc_in_on, w, cx),
+                    ))
+                })
+                .into_any_element()
+        }
+        AddTrackKind::Automation => div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(fb_form_row("Target", select_box("None".to_string())))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(Colors::text_faint())
+                    .child(
+                        "Automation lanes on existing tracks — dedicated automation tracks coming soon.",
+                    ),
+            )
+            .into_any_element(),
+        AddTrackKind::Folder => {
+            let pack = callbacks.on_pack_folder.clone();
+            let pack_on = state.pack_folder;
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(check_row(
+                    "add-track-pack-folder",
+                    "Pack Folder",
+                    pack_on,
+                    true,
+                    move |_, w, cx| pack(&!pack_on, w, cx),
+                ))
                 .child(
                     div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .h(px(40.0))
-                        .px(px(16.0))
-                        .border_b(px(1.0))
-                        .border_color(Colors::divider())
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(icon(assets::ICON_PLUS_PATH, 13.0, Colors::accent_primary()))
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(Colors::text_primary())
-                                        .child("New Track"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .w(px(24.0))
-                                .h(px(24.0))
-                                .rounded_md()
-                                .id("add-track-close")
-                                .cursor(gpui::CursorStyle::PointingHand)
-                                .hover(|s| s.bg(Colors::surface_control_hover()))
-                                .on_click(move |_, window, cx| close_button(&(), window, cx))
-                                .child(icon(assets::ICON_X_PATH, 13.0, Colors::text_faint())),
-                        ),
+                        .text_size(px(10.0))
+                        .text_color(Colors::text_faint())
+                        .child("Folder tracks for grouping — creation coming soon."),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .p(px(12.0))
-                        .children(option_rows),
-                )
-                .child(
-                    div()
-                        .border_t(px(1.0))
-                        .border_color(Colors::divider())
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(10.0))
-                                .h(px(34.0))
-                                .child(icon(state.selected_kind.icon(), 12.0, Colors::text_faint()))
-                                .child(div().flex_1().min_w_0().child(text_field_with_callbacks(
-                                    track_name_input,
-                                    track_name_focused,
-                                    track_name_callbacks,
-                                ))),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap(px(8.0))
-                        .border_t(px(1.0))
-                        .border_color(Colors::divider())
-                        .px(px(14.0))
-                        .py(px(10.0))
-                        .child(option_group("Amount", spinner(state, &callbacks)))
-                        .child(channel_controls),
-                )
-                .child(routing)
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.0))
-                        .border_t(px(1.0))
-                        .border_color(Colors::divider())
-                        .px(px(12.0))
-                        .py(px(10.0))
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(Colors::text_faint())
-                                .child(summary_text(state)),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .gap(px(12.0))
-                                .child({
-                                    let mut swatches = div().flex().flex_row().gap(px(5.0));
-                                    for i in 0..Colors::TRACK_COLORS.len() {
-                                        let cb = callbacks.on_color_index.clone();
-                                        let active = i == state.color_index;
-                                        let color = track_color(i);
-                                        swatches = swatches.child(
-                                            div()
-                                                .relative()
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .w(px(20.0))
-                                                .h(px(20.0))
-                                                .rounded_full()
-                                                .border(px(2.0))
-                                                .border_color(color)
-                                                .bg(if active { color } else { gpui::transparent_black().into() })
-                                                .opacity(if active { 1.0 } else { 0.5 })
-                                                .id(("add-track-color", i))
-                                                .cursor(gpui::CursorStyle::PointingHand)
-                                                .on_click(move |_, window, cx| {
-                                                    cb(&(i as u32), window, cx);
-                                                })
-                                                .children(if active {
-                                                    Some(icon(
-                                                        assets::ICON_CIRCLE_DOT_PATH,
-                                                        12.0,
-                                                        Colors::with_alpha(Colors::surface_canvas(), 0.6),
-                                                    ))
-                                                } else {
-                                                    None
-                                                }),
-                                        );
-                                    }
-                                    swatches
-                                })
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(8.0))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .h(px(28.0))
-                                                .px(px(12.0))
-                                                .rounded_md()
-                                                .border(px(1.0))
-                                                .border_color(Colors::slot_border())
-                                                .text_size(px(11.0))
-                                                .font_weight(gpui::FontWeight::MEDIUM)
-                                                .text_color(Colors::text_faint())
-                                                .id("add-track-cancel")
-                                                .cursor(gpui::CursorStyle::PointingHand)
-                                                .hover(|s| s.bg(Colors::surface_hover()))
-                                                .on_click({
-                                                    let cb = callbacks.on_close.clone();
-                                                    move |_, window, cx| cb(&(), window, cx)
-                                                })
-                                                .child("Cancel"),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_row()
-                                                .items_center()
-                                                .gap(px(6.0))
-                                                .h(px(28.0))
-                                                .px(px(12.0))
-                                                .rounded_md()
-                                                .bg(selected_color)
-                                                .opacity(if state.is_valid() { 1.0 } else { 0.45 })
-                                                .text_size(px(11.0))
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .text_color(Colors::text_inverse())
-                                                .id("add-track-confirm")
-                                                .when(state.is_valid(), |this| {
-                                                    this.cursor(gpui::CursorStyle::PointingHand)
-                                                        .on_click(move |_, window, cx| {
-                                                            confirm(&(), window, cx);
-                                                        })
-                                                })
-                                                .child(icon(
-                                                    assets::ICON_PLUS_PATH,
-                                                    12.0,
-                                                    Colors::text_inverse(),
-                                                ))
-                                                .child(if state.count == 1 {
-                                                    "Add Track".to_string()
-                                                } else {
-                                                    format!("Add {} Tracks", state.count)
-                                                }),
-                                        ),
-                                ),
-                        ),
-                ),
-        )
+                .into_any_element()
+        }
+        AddTrackKind::Bus | AddTrackKind::Return => div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(fb_form_row("Output", select_box("Main".to_string())))
+            .into_any_element(),
+        _ => div()
+            .text_size(px(10.0))
+            .text_color(Colors::text_faint())
+            .child("This track type is not available in Native yet.")
+            .into_any_element(),
+    }
 }
 
-/// Body-only layout for embedding in an external window.
-///
-/// This intentionally omits the modal backdrop/occlusion layer and the inner
-/// "New Track" title row because the external window provides its own chrome.
+/// Compact DAW-style Add Tracks form (external window body).
 pub fn add_track_dialog_body(
     state: &AddTrackDialogState,
     track_name_input: &TextInputState,
@@ -970,324 +664,92 @@ pub fn add_track_dialog_body(
     callbacks: AddTrackDialogCallbacks,
 ) -> gpui::Div {
     let confirm = callbacks.on_confirm.clone();
-    let selected_color = state.selected_color();
-
-    let mut option_rows = Vec::new();
-    let all = AddTrackKind::all();
-    for row in 0..2 {
-        let mut row_el = div().flex().flex_row().gap(px(6.0));
-        for col in 0..4 {
-            let index = row * 4 + col;
-            row_el = row_el.child(option_card(state, all[index], &callbacks, index));
-        }
-        option_rows.push(row_el.into_any_element());
-    }
-
-    let channel_controls = if matches!(
-        state.selected_kind,
-        AddTrackKind::Audio
-            | AddTrackKind::Plugin
-            | AddTrackKind::Bus
-            | AddTrackKind::Return
-            | AddTrackKind::Group
-    ) {
-        option_group(
-            "Channels",
-            div()
-                .flex()
-                .flex_row()
-                .gap(px(6.0))
-                .child({
-                    let cb = callbacks.on_channel_count.clone();
-                    pill("Mono", state.channel_count == 1, move |_, window, cx| {
-                        cb(&1, window, cx);
-                    })
-                })
-                .child({
-                    let cb = callbacks.on_channel_count.clone();
-                    pill("Stereo", state.channel_count == 2, move |_, window, cx| {
-                        cb(&2, window, cx);
-                    })
-                }),
-        )
-        .into_any_element()
+    let cancel = callbacks.on_close.clone();
+    let valid = state.is_valid();
+    let ok_label = if state.count == 1 {
+        "OK".to_string()
     } else {
-        div().into_any_element()
-    };
-
-    let routing = if state.selected_kind == AddTrackKind::Audio {
-        let off = callbacks.on_monitor.clone();
-        let auto = callbacks.on_monitor.clone();
-        let input = callbacks.on_monitor.clone();
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .border_t(px(1.0))
-            .border_color(Colors::divider())
-            .px(px(12.0))
-            .py(px(10.0))
-            .child(routing_row(
-                "Monitor",
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .gap(px(5.0))
-                    .child(pill(
-                        "Off",
-                        state.monitor_mode == "off",
-                        move |_, window, cx| off(&"off".to_string(), window, cx),
-                    ))
-                    .child(pill(
-                        "Auto",
-                        state.monitor_mode == "auto",
-                        move |_, window, cx| auto(&"auto".to_string(), window, cx),
-                    ))
-                    .child(pill(
-                        "In",
-                        state.monitor_mode == "in",
-                        move |_, window, cx| input(&"in".to_string(), window, cx),
-                    )),
-            ))
-            .child(routing_row("Input", select_box("System Input".to_string())))
-            .child(routing_row("Output", select_box("Master".to_string())))
-            .child({
-                let cb = callbacks.on_arm.clone();
-                let next = !state.arm_track;
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .mt(px(2.0))
-                    .id("add-track-arm")
-                    .cursor(gpui::CursorStyle::PointingHand)
-                    .on_click(move |_, window, cx| cb(&next, window, cx))
-                    .child(
-                        div()
-                            .w(px(12.0))
-                            .h(px(12.0))
-                            .rounded_sm()
-                            .border(px(1.0))
-                            .border_color(if state.arm_track {
-                                Colors::status_error()
-                            } else {
-                                Colors::divider()
-                            })
-                            .bg(if state.arm_track {
-                                Colors::status_error()
-                            } else {
-                                Colors::surface_input()
-                            }),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(Colors::text_muted())
-                            .child("Arm for recording"),
-                    )
-            })
-            .into_any_element()
-    } else if state.selected_kind == AddTrackKind::Midi || state.selected_kind == AddTrackKind::Instrument
-    {
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .border_t(px(1.0))
-            .border_color(Colors::divider())
-            .px(px(12.0))
-            .py(px(10.0))
-            .child(routing_row(
-                if state.selected_kind == AddTrackKind::Instrument {
-                    "MIDI In"
-                } else {
-                    "Input"
-                },
-                select_box(AddTrackKind::Instrument.default_input().to_string()),
-            ))
-            .child(routing_row("Output", select_box("Master".to_string())))
-            .into_any_element()
-    } else {
-        div().into_any_element()
+        format!("OK ×{}", state.count)
     };
 
     div()
         .flex()
         .flex_col()
-        .size_full()
+        .flex_1()
         .min_h_0()
+        .child(type_tabs(state, &callbacks))
         .child(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
-                .p(px(12.0))
-                .children(option_rows),
-        )
-        .child(
-            div()
-                .border_t(px(1.0))
-                .border_color(Colors::divider())
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
                 .px(px(12.0))
-                .py(px(8.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(10.0))
-                        .h(px(34.0))
-                        .child(icon(state.selected_kind.icon(), 12.0, Colors::text_faint()))
-                        .child(div().flex_1().min_w_0().child(text_field_with_callbacks(
-                            track_name_input,
-                            track_name_focused,
-                            track_name_callbacks,
-                        ))),
-                ),
+                .py(px(10.0))
+                .gap(px(8.0))
+                .child(fb_form_row(
+                    "Name",
+                    text_field_with_callbacks(
+                        track_name_input,
+                        track_name_focused,
+                        track_name_callbacks,
+                    ),
+                ))
+                .child(fb_form_row("Count", count_stepper(state, &callbacks)))
+                .child(color_row(state, &callbacks))
+                .child(type_fields(state, &callbacks)),
         )
         .child(
             div()
                 .flex()
                 .flex_row()
+                .items_center()
+                .justify_between()
                 .gap(px(8.0))
-                .border_t(px(1.0))
-                .border_color(Colors::divider())
-                .px(px(14.0))
-                .py(px(10.0))
-                .child(option_group("Amount", spinner(state, &callbacks)))
-                .child(channel_controls),
-        )
-        .child(routing)
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .border_t(px(1.0))
-                .border_color(Colors::divider())
+                .h(px(44.0))
                 .px(px(12.0))
-                .py(px(10.0))
+                .border_t(px(1.0))
+                .border_color(Colors::border_subtle())
+                .bg(Colors::surface_panel())
                 .child(
                     div()
                         .text_size(px(10.0))
                         .text_color(Colors::text_faint())
-                        .child(summary_text(state)),
+                        .child("Load Track Preset...")
+                        .opacity(0.5),
                 )
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
-                        .justify_between()
-                        .gap(px(12.0))
-                        .child({
-                            let mut swatches = div().flex().flex_row().gap(px(5.0));
-                            for i in 0..Colors::TRACK_COLORS.len() {
-                                let cb = callbacks.on_color_index.clone();
-                                let active = i == state.color_index;
-                                let color = track_color(i);
-                                swatches = swatches.child(
-                                    div()
-                                        .relative()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .w(px(20.0))
-                                        .h(px(20.0))
-                                        .rounded_full()
-                                        .border(px(2.0))
-                                        .border_color(color)
-                                        .bg(if active { color } else { gpui::transparent_black().into() })
-                                        .opacity(if active { 1.0 } else { 0.5 })
-                                        .id(("add-track-color", i))
-                                        .cursor(gpui::CursorStyle::PointingHand)
-                                        .on_click(move |_, window, cx| {
-                                            cb(&(i as u32), window, cx);
-                                        })
-                                        .children(if active {
-                                            Some(icon(
-                                                assets::ICON_CIRCLE_DOT_PATH,
-                                                12.0,
-                                                Colors::with_alpha(Colors::surface_canvas(), 0.6),
-                                            ))
-                                        } else {
-                                            None
-                                        }),
-                                );
-                            }
-                            swatches
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .h(px(28.0))
-                                        .px(px(12.0))
-                                        .rounded_md()
-                                        .border(px(1.0))
-                                        .border_color(Colors::slot_border())
-                                        .text_size(px(11.0))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(Colors::text_faint())
-                                        .id("add-track-cancel")
-                                        .cursor(gpui::CursorStyle::PointingHand)
-                                        .hover(|s| s.bg(Colors::surface_hover()))
-                                        .on_click({
-                                            let cb = callbacks.on_close.clone();
-                                            move |_, window, cx| cb(&(), window, cx)
-                                        })
-                                        .child("Cancel"),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(6.0))
-                                        .h(px(28.0))
-                                        .px(px(12.0))
-                                        .rounded_md()
-                                        .bg(selected_color)
-                                        .opacity(if state.is_valid() { 1.0 } else { 0.45 })
-                                        .text_size(px(11.0))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(Colors::text_inverse())
-                                        .id("add-track-confirm")
-                                        .when(state.is_valid(), |this| {
-                                            this.cursor(gpui::CursorStyle::PointingHand)
-                                                .on_click(move |_, window, cx| {
-                                                    confirm(&(), window, cx);
-                                                })
-                                        })
-                                        .child(icon(
-                                            assets::ICON_PLUS_PATH,
-                                            12.0,
-                                            Colors::text_inverse(),
-                                        ))
-                                        .child(if state.count == 1 {
-                                            "Add Track".to_string()
-                                        } else {
-                                            format!("Add {} Tracks", state.count)
-                                        }),
-                                ),
-                        ),
+                        .gap(px(8.0))
+                        .child(fb_button(
+                            "add-track-cancel",
+                            "Cancel",
+                            FbButtonKind::Default,
+                            true,
+                            move |_, w, cx| cancel(&(), w, cx),
+                        ))
+                        .child(fb_button(
+                            "add-track-ok",
+                            ok_label,
+                            FbButtonKind::Primary,
+                            valid,
+                            move |_, w, cx| {
+                                if valid {
+                                    confirm(&(), w, cx);
+                                }
+                            },
+                        )),
                 ),
         )
 }
-
-pub const ADD_TRACK_WINDOW_WIDTH: f32 = 960.0;
-pub const ADD_TRACK_WINDOW_HEIGHT: f32 = 660.0;
-pub const ADD_TRACK_WINDOW_MIN_WIDTH: f32 = 860.0;
-pub const ADD_TRACK_WINDOW_MIN_HEIGHT: f32 = 560.0;
+pub const ADD_TRACK_WINDOW_WIDTH: f32 = 520.0;
+pub const ADD_TRACK_WINDOW_HEIGHT: f32 = 520.0;
+pub const ADD_TRACK_WINDOW_MIN_WIDTH: f32 = 480.0;
+pub const ADD_TRACK_WINDOW_MIN_HEIGHT: f32 = 440.0;
 
 pub struct AddTrackWindow {
     pub state: AddTrackDialogState,
@@ -1317,7 +779,13 @@ impl AddTrackWindow {
     pub fn set_context(&mut self, kind: AddTrackKind, track_count: usize, has_master: bool) {
         let mut dialog = AddTrackDialogState::open_for(track_count, has_master);
         dialog.selected_kind = kind;
-        dialog.track_name = format!("{} {}", kind.label(), dialog.next_number);
+        dialog.input_label = kind.default_input().to_string();
+        dialog.track_name = format!("{} {}", kind.default_name_stem(), dialog.next_number);
+        add_track_debug(&format!(
+            "dialog open kind={} count={}",
+            kind.tab_label(),
+            dialog.count
+        ));
         self.track_name_input.set_value(dialog.track_name.clone());
         self.track_name_input.select_all();
         self.state = dialog;
@@ -1328,6 +796,11 @@ impl AddTrackWindow {
             return;
         }
         self.state.track_name = self.track_name_input.value.clone();
+        add_track_debug(&format!(
+            "confirm kind={} count={}",
+            self.state.selected_kind.tab_label(),
+            self.state.count
+        ));
         let req = self.state.clone();
         let name = self.track_name_input.value.clone();
         let cb = self.on_confirm_request.clone();
@@ -1379,10 +852,12 @@ impl Render for AddTrackWindow {
                     let kind = *kind;
                     let _ = target.update(cx, |this, cx| {
                         this.state.selected_kind = kind;
+                        this.state.input_label = kind.default_input().to_string();
                         this.state.track_name =
-                            format!("{} {}", kind.label(), this.state.next_number);
+                            format!("{} {}", kind.default_name_stem(), this.state.next_number);
                         this.track_name_input.set_value(this.state.track_name.clone());
                         this.track_name_input.select_all();
+                        add_track_debug(&format!("selected kind={}", kind.tab_label()));
                         cx.notify();
                     });
                 }
@@ -1393,17 +868,19 @@ impl Render for AddTrackWindow {
                     let delta = *delta;
                     let _ = target.update(cx, |this, cx| {
                         let current = this.state.count as i32;
-                        this.state.count = (current + delta).clamp(1, 32) as u32;
+                        this.state.count =
+                            (current + delta).clamp(1, MAX_TRACK_COUNT as i32) as u32;
                         cx.notify();
                     });
                 }
             }),
-            on_channel_count: Arc::new({
+            on_audio_format: Arc::new({
                 let target = target.clone();
-                move |channels: &u32, _w, cx| {
-                    let channels = *channels;
+                move |format: &AudioFormat, _w, cx| {
+                    let format = *format;
                     let _ = target.update(cx, |this, cx| {
-                        this.state.channel_count = channels.clamp(1, 2);
+                        this.state.audio_format = format;
+                        this.state.sync_channel_count_from_format();
                         cx.notify();
                     });
                 }
@@ -1414,6 +891,47 @@ impl Render for AddTrackWindow {
                     let index = *index as usize;
                     let _ = target.update(cx, |this, cx| {
                         this.state.color_index = index;
+                        this.state.auto_color = false;
+                        cx.notify();
+                    });
+                }
+            }),
+            on_auto_color: Arc::new({
+                let target = target.clone();
+                move |on: &bool, _w, cx| {
+                    let on = *on;
+                    let _ = target.update(cx, |this, cx| {
+                        this.state.auto_color = on;
+                        cx.notify();
+                    });
+                }
+            }),
+            on_ascending_input: Arc::new({
+                let target = target.clone();
+                move |on: &bool, _w, cx| {
+                    let on = *on;
+                    let _ = target.update(cx, |this, cx| {
+                        this.state.ascending_input = on;
+                        cx.notify();
+                    });
+                }
+            }),
+            on_ascending_output: Arc::new({
+                let target = target.clone();
+                move |on: &bool, _w, cx| {
+                    let on = *on;
+                    let _ = target.update(cx, |this, cx| {
+                        this.state.ascending_output = on;
+                        cx.notify();
+                    });
+                }
+            }),
+            on_pack_folder: Arc::new({
+                let target = target.clone();
+                move |on: &bool, _w, cx| {
+                    let on = *on;
+                    let _ = target.update(cx, |this, cx| {
+                        this.state.pack_folder = on;
                         cx.notify();
                     });
                 }
@@ -1458,8 +976,9 @@ impl Render for AddTrackWindow {
                 }
             })
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
-            .child(external_window_titlebar(
-                "New Track",
+            .child(external_window_titlebar_with_icon(
+                Some(assets::ICON_PLUS_PATH),
+                "Add Tracks",
                 "add-track-window-close",
                 move |window, _cx| window.remove_window(),
             ))
@@ -1492,7 +1011,13 @@ pub fn open_add_track_window(
 
     let mut state = AddTrackDialogState::open_for(track_count, has_master_track);
     state.selected_kind = kind;
-    state.track_name = format!("{} {}", kind.label(), state.next_number);
+    state.input_label = kind.default_input().to_string();
+    state.track_name = format!("{} {}", kind.default_name_stem(), state.next_number);
+    add_track_debug(&format!(
+        "open window kind={} track_count={}",
+        kind.tab_label(),
+        track_count
+    ));
 
     let mut options = crate::platform_chrome::external_dialog_window_options_partial();
     options.window_bounds = Some(WindowBounds::Windowed(Bounds {

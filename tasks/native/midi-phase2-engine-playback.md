@@ -58,12 +58,17 @@ velocity, notes stored relative to clip start) but **not** for engine playback.
   off-before-on, zero-length skip, on/off firing + active tracking, seek-before
   fires, seek-after does not, all-notes-off clears.
 
-## TODO (Phase 2B and beyond)
-- **VST3 instrument event input**: the C++ bridge has no IEventList input. Add a
-  minimal C-ABI (`sphere_daux_vst3_send_note_on/off` filling `processData.
-  inputEvents` for the next process call), then route `RuntimeMidiEvent` →
-  instrument insert at `schedule_midi_block`'s marked hook. Audio effects keep
-  working (additive API).
+## Phase 2B-1 (done) — VST3 event-input bridge
+
+- C++ `SimpleEventList` fills `processData.inputEvents` (batched
+  `sphere_daux_vst3_process_stereo_block_with_midi`).
+- Event input bus activated at setup when present; effects get empty lists.
+- Rust `Vst3MidiEvent` + per-track `midi_block_events` buffer (no steady-path
+  alloc); instrument insert chosen by track type / category / `acceptsMidi`.
+- `schedule_midi_block` routes scheduled notes; `all_notes_off` + stop flush
+  deliver note-offs. Debug: `FUTUREBOARD_VST3_MIDI_DEBUG=1`.
+
+## TODO (Phase 2B+ and beyond)
 - **Instrument track routing**: MIDI track / instrument insert → audio out.
 - **Tempo automation**: scheduling is constant-BPM; events are sample-resolved
   at build time. Tempo changes currently require a project rebuild.

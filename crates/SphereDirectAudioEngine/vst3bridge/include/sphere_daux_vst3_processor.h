@@ -36,6 +36,33 @@ SPHERE_DAUX_VST3_API int sphere_daux_vst3_process_stereo_block(
     float* out_r,
     int frames);
 
+/// MIDI note event for batched delivery via processData.inputEvents.
+/// kind: 0 = NoteOff, 1 = NoteOn. velocity is normalized [0.0, 1.0].
+typedef struct SphereDauxVst3MidiEvent {
+    unsigned int sample_offset;
+    unsigned char kind;
+    unsigned char channel;
+    unsigned char pitch;
+    float velocity;
+} SphereDauxVst3MidiEvent;
+
+/// Process a stereo block with optional VST3 input note events (sorted by
+/// sample_offset). When event_count is 0 or the plugin has no event input bus,
+/// behaves like sphere_daux_vst3_process_stereo_block.
+SPHERE_DAUX_VST3_API int sphere_daux_vst3_process_stereo_block_with_midi(
+    SphereDauxVst3Processor* processor,
+    const float* in_l,
+    const float* in_r,
+    float* out_l,
+    float* out_r,
+    int frames,
+    const SphereDauxVst3MidiEvent* events,
+    int event_count);
+
+/// Number of event input buses reported at plugin setup (0 if none).
+SPHERE_DAUX_VST3_API int sphere_daux_vst3_event_input_bus_count(
+    SphereDauxVst3Processor* processor);
+
 SPHERE_DAUX_VST3_API unsigned long long sphere_daux_vst3_process_count(
     SphereDauxVst3Processor* processor);
 

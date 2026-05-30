@@ -1,5 +1,5 @@
 use gpui::{
-    div, px, svg, App, Div, InteractiveElement, IntoElement, MouseButton, ParentElement, Rgba,
+    div, px, svg, App, Div, InteractiveElement, IntoElement, ParentElement, Rgba,
     StatefulInteractiveElement, Styled, Window, WindowControlArea,
 };
 
@@ -83,8 +83,19 @@ pub fn draggable_spacer() -> Div {
 }
 
 /// Compact title bar for external floating dialogs (Project Wizard, Preferences).
-/// Drag on the bar; close button uses `.occlude()` so it is not swallowed by drag.
+/// Drag uses an explicit flex spacer (same pattern as the main studio chrome) so
+/// interactive children do not swallow window-move hit testing.
 pub fn external_window_titlebar(
+    title: impl Into<String>,
+    close_id: impl Into<gpui::ElementId>,
+    on_close: impl Fn(&mut Window, &mut App) + 'static + Clone,
+) -> impl IntoElement {
+    external_window_titlebar_with_icon(None, title, close_id, on_close)
+}
+
+/// Optional leading icon (e.g. Add Tracks dialog).
+pub fn external_window_titlebar_with_icon(
+    icon_path: Option<&'static str>,
     title: impl Into<String>,
     close_id: impl Into<gpui::ElementId>,
     on_close: impl Fn(&mut Window, &mut App) + 'static + Clone,
@@ -93,12 +104,33 @@ pub fn external_window_titlebar(
     let on_close = on_close.clone();
     let title_text = title.into();
 
-    let mut bar = div()
-        .window_control_area(WindowControlArea::Drag)
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+    let mut title_row = div()
         .flex()
         .items_center()
-        .justify_between()
+        .gap(px(8.0))
+        .h_full()
+        .flex_shrink_0();
+    if let Some(path) = icon_path {
+        title_row = title_row.child(
+            svg()
+                .path(path)
+                .w(px(13.0))
+                .h(px(13.0))
+                .text_color(Colors::accent_primary()),
+        );
+    }
+    title_row = title_row.child(
+        div()
+            .text_size(px(CHROME_TITLE_SIZE))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(Colors::text_primary())
+            .child(title_text),
+    );
+
+    let mut bar = div()
+        .flex()
+        .flex_row()
+        .items_center()
         .h(px(policy.titlebar_height_px))
         .pl(policy.external_titlebar_left_padding())
         .pr(px(if policy.show_window_controls {
@@ -109,21 +141,34 @@ pub fn external_window_titlebar(
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_titlebar())
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .h_full()
-                .text_size(px(CHROME_TITLE_SIZE))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(Colors::text_primary())
-                .child(title_text),
-        );
+        .child(title_row)
+        .child(draggable_spacer());
 
     if policy.show_window_controls {
         bar = bar.child(
             div()
                 .window_control_area(WindowControlArea::Close)
+                .id(close_id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(TITLEBAR_HEIGHT))
+                .h(px(TITLEBAR_HEIGHT))
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(|s| s.bg(Colors::surface_control_hover()))
+                .occlude()
+                .on_click(move |_, window, cx| on_close(window, cx))
+                .child(
+                    svg()
+                        .path(assets::ICON_X_PATH)
+                        .w(px(12.0))
+                        .h(px(12.0))
+                        .text_color(Colors::text_faint()),
+                ),
+        );
+    } else {
+        bar = bar.child(
+            div()
                 .id(close_id)
                 .flex()
                 .items_center()
